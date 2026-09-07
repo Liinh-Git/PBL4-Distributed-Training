@@ -1,0 +1,270 @@
+[
+  {
+    "check": "architecture",
+    "command": [
+      "D:\\PBL4\\.venv\\Scripts\\python.exe",
+      "scripts/check_architecture.py"
+    ],
+    "exit_code": 0,
+    "output": "Architecture import-boundary check PASSED: all configured package import rules passed.\n"
+  },
+  {
+    "check": "scaffold",
+    "command": [
+      "D:\\PBL4\\.venv\\Scripts\\python.exe",
+      "scripts/verify_scaffold.py"
+    ],
+    "exit_code": 0,
+    "output": "Running PBL4 bootstrap scaffold verification...\n[PASS] All required repository structural paths exist.\n[PASS] No prohibited obsolete paths found.\n[PASS] All Python sources in src/ and scripts/ compile cleanly.\n[PASS] Architecture boundary checks passed.\n[PASS] No forbidden dependencies declared in pyproject.toml.\n\nScaffold verification PASSED: Repository layout and constraints are clean.\n"
+  },
+  {
+    "check": "production lint baseline",
+    "command": [
+      "D:\\PBL4\\.venv\\Scripts\\ruff.exe",
+      "check",
+      "--no-cache",
+      "src",
+      "scripts"
+    ],
+    "exit_code": 1,
+    "output": "E501 Line too long (108 > 100)\n   --> scripts\\verify_scaffold.py:218:101\n    |\n216 |                         found_forbidden.append(f\"{forbidden} (found in extra '{extra}': '{dep}')\")\n217 |         else:\n218 |             # All other extras (worker, runtime, dataset-manager, cli, adapter, etc.) are strictly forbidden\n    |                                                                                                     ^^^^^^^^\n219 |             for dep in deps:\n220 |                 dep_lower = dep.lower()\n    |\n\nFound 1 error.\n"
+  },
+  {
+    "check": "production format baseline",
+    "command": [
+      "D:\\PBL4\\.venv\\Scripts\\ruff.exe",
+      "format",
+      "--check",
+      "--no-cache",
+      "src",
+      "scripts"
+    ],
+    "exit_code": 1,
+    "output": "unformatted: File would be reformatted\n   --> scripts\\verify_scaffold.py:224:43\n    |\n223 |                         found_forbidden.append(\n    -                             f\"{forbidden} \"\n    -                             f\"(found in non-persistence extra '{extra}': '{dep}')\"\n224 +                             f\"{forbidden} (found in non-persistence extra '{extra}': '{dep}')\"\n225 |                         )\n    |\n\n1 file would be reformatted, 113 files already formatted\n"
+  },
+  {
+    "check": "skills verifier lint",
+    "command": [
+      "D:\\PBL4\\.venv\\Scripts\\ruff.exe",
+      "check",
+      "--no-cache",
+      ".agents/scripts/verify_skills.py"
+    ],
+    "exit_code": 0,
+    "output": "All checks passed!\n"
+  },
+  {
+    "check": "skills verifier format",
+    "command": [
+      "D:\\PBL4\\.venv\\Scripts\\ruff.exe",
+      "format",
+      "--check",
+      "--no-cache",
+      ".agents/scripts/verify_skills.py"
+    ],
+    "exit_code": 0,
+    "output": "1 file already formatted\n"
+  },
+  {
+    "check": "skills offline integrity",
+    "command": [
+      "C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      ".agents/scripts/verify_skills.py",
+      "--write-reports"
+    ],
+    "exit_code": 1,
+    "output": "FAIL\nBroken enabled link: SUPPLY_CHAIN_SCAN.md -> ../../SKILL_ROUTING.md\nBroken enabled link: SUPPLY_CHAIN_SCAN.md -> ../../SOURCE_REGISTRY.md\nBroken enabled link: SUPPLY_CHAIN_SCAN.md -> ../../vendor/vercel-labs/web-design-guidelines/063bee94c3f4df8453406c830b0a7df0f2860278/UPSTREAM_SKILL.md\nBroken enabled link: SUPPLY_CHAIN_SCAN.md -> ../../vendor/vercel-labs/web-interface-guidelines/e3d624baaf29dc1fc645aff3e38f03e564d2d6b1/command.md\n"
+  },
+  {
+    "check": "frontmatter architecture-guard",
+    "command": [
+      "C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "C:\\Users\\LENOVO\\.codex\\skills\\.system\\skill-creator\\scripts\\quick_validate.py",
+      "D:\\PBL4\\.agents\\skills\\architecture-guard"
+    ],
+    "exit_code": 0,
+    "output": "Skill is valid!\n"
+  },
+  {
+    "check": "frontmatter contract-change",
+    "command": [
+      "C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "C:\\Users\\LENOVO\\.codex\\skills\\.system\\skill-creator\\scripts\\quick_validate.py",
+      "D:\\PBL4\\.agents\\skills\\contract-change"
+    ],
+    "exit_code": 0,
+    "output": "Skill is valid!\n"
+  },
+  {
+    "check": "frontmatter distributed-debug",
+    "command": [
+      "C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "C:\\Users\\LENOVO\\.codex\\skills\\.system\\skill-creator\\scripts\\quick_validate.py",
+      "D:\\PBL4\\.agents\\skills\\distributed-debug"
+    ],
+    "exit_code": 0,
+    "output": "Skill is valid!\n"
+  },
+  {
+    "check": "frontmatter distributed-verification",
+    "command": [
+      "C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "C:\\Users\\LENOVO\\.codex\\skills\\.system\\skill-creator\\scripts\\quick_validate.py",
+      "D:\\PBL4\\.agents\\skills\\distributed-verification"
+    ],
+    "exit_code": 0,
+    "output": "Skill is valid!\n"
+  },
+  {
+    "check": "frontmatter doc-sync",
+    "command": [
+      "C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "C:\\Users\\LENOVO\\.codex\\skills\\.system\\skill-creator\\scripts\\quick_validate.py",
+      "D:\\PBL4\\.agents\\skills\\doc-sync"
+    ],
+    "exit_code": 0,
+    "output": "Skill is valid!\n"
+  },
+  {
+    "check": "frontmatter pbl4-ui-direction",
+    "command": [
+      "C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "C:\\Users\\LENOVO\\.codex\\skills\\.system\\skill-creator\\scripts\\quick_validate.py",
+      "D:\\PBL4\\.agents\\skills\\pbl4-ui-direction"
+    ],
+    "exit_code": 0,
+    "output": "Skill is valid!\n"
+  },
+  {
+    "check": "frontmatter protocol-change",
+    "command": [
+      "C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "C:\\Users\\LENOVO\\.codex\\skills\\.system\\skill-creator\\scripts\\quick_validate.py",
+      "D:\\PBL4\\.agents\\skills\\protocol-change"
+    ],
+    "exit_code": 0,
+    "output": "Skill is valid!\n"
+  },
+  {
+    "check": "frontmatter release-gate",
+    "command": [
+      "C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "C:\\Users\\LENOVO\\.codex\\skills\\.system\\skill-creator\\scripts\\quick_validate.py",
+      "D:\\PBL4\\.agents\\skills\\release-gate"
+    ],
+    "exit_code": 0,
+    "output": "Skill is valid!\n"
+  },
+  {
+    "check": "frontmatter vendor-fastapi",
+    "command": [
+      "C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "C:\\Users\\LENOVO\\.codex\\skills\\.system\\skill-creator\\scripts\\quick_validate.py",
+      "D:\\PBL4\\.agents\\skills\\vendor-fastapi"
+    ],
+    "exit_code": 0,
+    "output": "Skill is valid!\n"
+  },
+  {
+    "check": "frontmatter vendor-impeccable",
+    "command": [
+      "C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "C:\\Users\\LENOVO\\.codex\\skills\\.system\\skill-creator\\scripts\\quick_validate.py",
+      "D:\\PBL4\\.agents\\skills\\vendor-impeccable"
+    ],
+    "exit_code": 0,
+    "output": "Skill is valid!\n"
+  },
+  {
+    "check": "frontmatter vendor-react-best-practices",
+    "command": [
+      "C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "C:\\Users\\LENOVO\\.codex\\skills\\.system\\skill-creator\\scripts\\quick_validate.py",
+      "D:\\PBL4\\.agents\\skills\\vendor-react-best-practices"
+    ],
+    "exit_code": 0,
+    "output": "Skill is valid!\n"
+  },
+  {
+    "check": "frontmatter vendor-verification-before-completion",
+    "command": [
+      "C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "C:\\Users\\LENOVO\\.codex\\skills\\.system\\skill-creator\\scripts\\quick_validate.py",
+      "D:\\PBL4\\.agents\\skills\\vendor-verification-before-completion"
+    ],
+    "exit_code": 0,
+    "output": "Skill is valid!\n"
+  },
+  {
+    "check": "frontmatter vendor-web-design-guidelines",
+    "command": [
+      "C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "C:\\Users\\LENOVO\\.codex\\skills\\.system\\skill-creator\\scripts\\quick_validate.py",
+      "D:\\PBL4\\.agents\\skills\\vendor-web-design-guidelines"
+    ],
+    "exit_code": 0,
+    "output": "Skill is valid!\n"
+  },
+  {
+    "check": "frontmatter vendor-webapp-testing",
+    "command": [
+      "C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "C:\\Users\\LENOVO\\.codex\\skills\\.system\\skill-creator\\scripts\\quick_validate.py",
+      "D:\\PBL4\\.agents\\skills\\vendor-webapp-testing"
+    ],
+    "exit_code": 0,
+    "output": "Skill is valid!\n"
+  },
+  {
+    "check": "negative: changed snapshot must fail",
+    "command": [
+      "C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "C:\\Users\\LENOVO\\AppData\\Local\\Temp\\pbl4-skills-negative-oa3c3v7y\\.agents\\scripts\\verify_skills.py"
+    ],
+    "exit_code": 1,
+    "output": "FAIL\nSHA256 mismatch: C:\\Users\\LENOVO\\AppData\\Local\\Temp\\pbl4-skills-negative-oa3c3v7y\\.agents\\vendor\\vercel-labs\\web-design-guidelines\\063bee94c3f4df8453406c830b0a7df0f2860278\\UPSTREAM_SKILL.md\nGit blob mismatch: C:\\Users\\LENOVO\\AppData\\Local\\Temp\\pbl4-skills-negative-oa3c3v7y\\.agents\\vendor\\vercel-labs\\web-design-guidelines\\063bee94c3f4df8453406c830b0a7df0f2860278\\UPSTREAM_SKILL.md\nBroken enabled link: SUPPLY_CHAIN_SCAN.md -> ../../SKILL_ROUTING.md\nBroken enabled link: SUPPLY_CHAIN_SCAN.md -> ../../SOURCE_REGISTRY.md\nBroken enabled link: SUPPLY_CHAIN_SCAN.md -> ../../vendor/vercel-labs/web-design-guidelines/063bee94c3f4df8453406c830b0a7df0f2860278/UPSTREAM_SKILL.md\nBroken enabled link: SUPPLY_CHAIN_SCAN.md -> ../../vendor/vercel-labs/web-interface-guidelines/e3d624baaf29dc1fc645aff3e38f03e564d2d6b1/command.md\n"
+  },
+  {
+    "check": "negative: raw discovery must fail",
+    "command": [
+      "C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "C:\\Users\\LENOVO\\AppData\\Local\\Temp\\pbl4-skills-negative-oa3c3v7y\\.agents\\scripts\\verify_skills.py"
+    ],
+    "exit_code": 1,
+    "output": "FAIL\nUnintended recursive SKILL.md discovery\nVendor manifest inventory differs from disk\nBroken enabled link: SUPPLY_CHAIN_SCAN.md -> ../../SKILL_ROUTING.md\nBroken enabled link: SUPPLY_CHAIN_SCAN.md -> ../../SOURCE_REGISTRY.md\nBroken enabled link: SUPPLY_CHAIN_SCAN.md -> ../../vendor/vercel-labs/web-design-guidelines/063bee94c3f4df8453406c830b0a7df0f2860278/UPSTREAM_SKILL.md\nBroken enabled link: SUPPLY_CHAIN_SCAN.md -> ../../vendor/vercel-labs/web-interface-guidelines/e3d624baaf29dc1fc645aff3e38f03e564d2d6b1/command.md\n"
+  },
+  {
+    "check": "negative: broken active link must fail",
+    "command": [
+      "C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "C:\\Users\\LENOVO\\AppData\\Local\\Temp\\pbl4-skills-negative-oa3c3v7y\\.agents\\scripts\\verify_skills.py"
+    ],
+    "exit_code": 1,
+    "output": "FAIL\nBroken enabled link: SUPPLY_CHAIN_SCAN.md -> ../../SKILL_ROUTING.md\nBroken enabled link: SUPPLY_CHAIN_SCAN.md -> ../../SOURCE_REGISTRY.md\nBroken enabled link: SUPPLY_CHAIN_SCAN.md -> ../../vendor/vercel-labs/web-design-guidelines/063bee94c3f4df8453406c830b0a7df0f2860278/UPSTREAM_SKILL.md\nBroken enabled link: SUPPLY_CHAIN_SCAN.md -> ../../vendor/vercel-labs/web-interface-guidelines/e3d624baaf29dc1fc645aff3e38f03e564d2d6b1/command.md\nBroken enabled link: skills\\vendor-fastapi\\SKILL.md -> absent-file.md\n"
+  },
+  {
+    "check": "negative: missing wrapper must fail",
+    "command": [
+      "C:\\Users\\LENOVO\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+      "C:\\Users\\LENOVO\\AppData\\Local\\Temp\\pbl4-skills-negative-oa3c3v7y\\.agents\\scripts\\verify_skills.py"
+    ],
+    "exit_code": 1,
+    "output": "FAIL\nUnexpected or missing active skills\nBroken enabled link: SKILL_ROUTING.md -> skills/vendor-fastapi/SKILL.md\nBroken enabled link: SUPPLY_CHAIN_SCAN.md -> ../../SKILL_ROUTING.md\nBroken enabled link: SUPPLY_CHAIN_SCAN.md -> ../../SOURCE_REGISTRY.md\nBroken enabled link: SUPPLY_CHAIN_SCAN.md -> ../../vendor/vercel-labs/web-design-guidelines/063bee94c3f4df8453406c830b0a7df0f2860278/UPSTREAM_SKILL.md\nBroken enabled link: SUPPLY_CHAIN_SCAN.md -> ../../vendor/vercel-labs/web-interface-guidelines/e3d624baaf29dc1fc645aff3e38f03e564d2d6b1/command.md\nBroken enabled link: THIRD_PARTY_SKILLS.md -> skills/vendor-fastapi/SKILL.md\n"
+  },
+  {
+    "check": "outside .agents baseline SHA256",
+    "result": "PASS",
+    "paths_compared": 159,
+    "changed": []
+  },
+  {
+    "check": "git diff whitespace",
+    "command": [
+      "git",
+      "diff",
+      "--check"
+    ],
+    "exit_code": 0,
+    "output": "warning: in the working copy of '.agents/SKILL_ROUTING.md', CRLF will be replaced by LF the next time Git touches it\nwarning: in the working copy of '.agents/SKILL_SCENARIOS.md', CRLF will be replaced by LF the next time Git touches it\nwarning: in the working copy of '.agents/THIRD_PARTY_SKILLS.md', CRLF will be replaced by LF the next time Git touches it\nwarning: in the working copy of '.agents/skills/release-gate/SKILL.md', CRLF will be replaced by LF the next time Git touches it\n"
+  }
+]

@@ -1,0 +1,372 @@
+{
+  "review_date": "2026-09-08",
+  "import_mode": "VENDORED_PINNED_WRAPPED",
+  "snapshots": [
+    {
+      "name": "impeccable",
+      "repo": "pbakaus/impeccable",
+      "skill_path": ".agents/skills/impeccable/SKILL.md",
+      "sha": "4db7f6ba4b6ef661bc8a721261b691b40648c08a",
+      "commit_date": "2026-09-07T17:12:34Z",
+      "vendor_path": "vendor/pbakaus/impeccable/4db7f6ba4b6ef661bc8a721261b691b40648c08a",
+      "files": [
+        {
+          "upstream_path": ".agents/skills/impeccable/SKILL.md",
+          "local_path": "vendor/pbakaus/impeccable/4db7f6ba4b6ef661bc8a721261b691b40648c08a/UPSTREAM_SKILL.md",
+          "git_blob_sha": "cd24dfe846ea1b1d88bb59e3886d73efc81d23be",
+          "git_mode": "100644",
+          "sha256": "0c20e5619ce94704f8a86b64e26f350ade0c6fb86b6b886c2881c01caec5a662",
+          "url": "https://raw.githubusercontent.com/pbakaus/impeccable/4db7f6ba4b6ef661bc8a721261b691b40648c08a/.agents/skills/impeccable/SKILL.md"
+        },
+        {
+          "upstream_path": ".agents/skills/impeccable/reference/operate.md",
+          "local_path": "vendor/pbakaus/impeccable/4db7f6ba4b6ef661bc8a721261b691b40648c08a/reference/operate.md",
+          "git_blob_sha": "524f2c3ae9fa497284e9699f3ca5320cce5d05cf",
+          "git_mode": "100644",
+          "sha256": "a9d2203acd45ca33a13d5c68b02b23ed512425ac15f0e8438318ed124b43729d",
+          "url": "https://raw.githubusercontent.com/pbakaus/impeccable/4db7f6ba4b6ef661bc8a721261b691b40648c08a/.agents/skills/impeccable/reference/operate.md"
+        },
+        {
+          "upstream_path": ".agents/skills/impeccable/reference/craft-floor.md",
+          "local_path": "vendor/pbakaus/impeccable/4db7f6ba4b6ef661bc8a721261b691b40648c08a/reference/craft-floor.md",
+          "git_blob_sha": "ae213ce801ebb2085033b309b4144e8d7e9996ba",
+          "git_mode": "100644",
+          "sha256": "e802e4f7bdc89050a9c0f2ca506e1d493a2316e6e810c0336c57aa073717ef3e",
+          "url": "https://raw.githubusercontent.com/pbakaus/impeccable/4db7f6ba4b6ef661bc8a721261b691b40648c08a/.agents/skills/impeccable/reference/craft-floor.md"
+        },
+        {
+          "upstream_path": ".agents/skills/impeccable/reference/layout.md",
+          "local_path": "vendor/pbakaus/impeccable/4db7f6ba4b6ef661bc8a721261b691b40648c08a/reference/layout.md",
+          "git_blob_sha": "aa547c742fc373bc459bdbb7977683441aa48ec0",
+          "git_mode": "100644",
+          "sha256": "0bc7d7971b3edf2acd0580e847458dc6d84129d90715b452799ace3bed815c7c",
+          "url": "https://raw.githubusercontent.com/pbakaus/impeccable/4db7f6ba4b6ef661bc8a721261b691b40648c08a/.agents/skills/impeccable/reference/layout.md"
+        },
+        {
+          "upstream_path": ".agents/skills/impeccable/reference/polish.md",
+          "local_path": "vendor/pbakaus/impeccable/4db7f6ba4b6ef661bc8a721261b691b40648c08a/reference/polish.md",
+          "git_blob_sha": "f93170f773cac058f51e289603aed7575d62a6a2",
+          "git_mode": "100644",
+          "sha256": "81666fc7f783b4e3514db6554e713dc0479bd9cdedb06e93d15f8b579aae869a",
+          "url": "https://raw.githubusercontent.com/pbakaus/impeccable/4db7f6ba4b6ef661bc8a721261b691b40648c08a/.agents/skills/impeccable/reference/polish.md"
+        },
+        {
+          "upstream_path": "LICENSE",
+          "local_path": "vendor/pbakaus/impeccable/4db7f6ba4b6ef661bc8a721261b691b40648c08a/LICENSE",
+          "git_blob_sha": "bb3f6d23b1f8025514a62a12b51b47d73e3c9aa9",
+          "git_mode": "100644",
+          "sha256": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812",
+          "url": "https://raw.githubusercontent.com/pbakaus/impeccable/4db7f6ba4b6ef661bc8a721261b691b40648c08a/LICENSE"
+        },
+        {
+          "upstream_path": "NOTICE.md",
+          "local_path": "vendor/pbakaus/impeccable/4db7f6ba4b6ef661bc8a721261b691b40648c08a/NOTICE.md",
+          "git_blob_sha": "0468271c904ae334cfaf27da6f8df3d5f419a1f0",
+          "git_mode": "100644",
+          "sha256": "c60a093c2845fd9fb82f9c6f742ece31f379f8190b535309d32d66c45ccffdcb",
+          "url": "https://raw.githubusercontent.com/pbakaus/impeccable/4db7f6ba4b6ef661bc8a721261b691b40648c08a/NOTICE.md"
+        }
+      ]
+    },
+    {
+      "name": "web-design-guidelines",
+      "repo": "vercel-labs/agent-skills",
+      "skill_path": "skills/web-design-guidelines/SKILL.md",
+      "sha": "063bee94c3f4df8453406c830b0a7df0f2860278",
+      "commit_date": "2026-08-28T13:36:07Z",
+      "vendor_path": "vendor/vercel-labs/web-design-guidelines/063bee94c3f4df8453406c830b0a7df0f2860278",
+      "files": [
+        {
+          "upstream_path": "skills/web-design-guidelines/SKILL.md",
+          "local_path": "vendor/vercel-labs/web-design-guidelines/063bee94c3f4df8453406c830b0a7df0f2860278/UPSTREAM_SKILL.md",
+          "git_blob_sha": "ceae92ab319216a68274168fba9b63b998b65997",
+          "git_mode": "100644",
+          "sha256": "f4647ca866a3accf763777f83e7682954f0187cd6bea7eea0399796652414e8f",
+          "url": "https://raw.githubusercontent.com/vercel-labs/agent-skills/063bee94c3f4df8453406c830b0a7df0f2860278/skills/web-design-guidelines/SKILL.md"
+        },
+        {
+          "upstream_path": "README.md",
+          "local_path": "vendor/vercel-labs/web-design-guidelines/063bee94c3f4df8453406c830b0a7df0f2860278/UPSTREAM_README.md",
+          "git_blob_sha": "04a1a5a46a22cfd430e2877b7c145e34fc2653ab",
+          "git_mode": "100644",
+          "sha256": "7c02f64b08fc6c4eef03c01d64f3e2ed478193ccfcbd14edba379abe23304651",
+          "url": "https://raw.githubusercontent.com/vercel-labs/agent-skills/063bee94c3f4df8453406c830b0a7df0f2860278/README.md"
+        }
+      ]
+    },
+    {
+      "name": "web-interface-guidelines",
+      "repo": "vercel-labs/web-interface-guidelines",
+      "skill_path": "command.md",
+      "sha": "e3d624baaf29dc1fc645aff3e38f03e564d2d6b1",
+      "commit_date": "2026-08-18T00:21:06Z",
+      "vendor_path": "vendor/vercel-labs/web-interface-guidelines/e3d624baaf29dc1fc645aff3e38f03e564d2d6b1",
+      "files": [
+        {
+          "upstream_path": "command.md",
+          "local_path": "vendor/vercel-labs/web-interface-guidelines/e3d624baaf29dc1fc645aff3e38f03e564d2d6b1/command.md",
+          "git_blob_sha": "e1e8e3460db7c1440e34642c4f7b885185ca5366",
+          "git_mode": "100644",
+          "sha256": "5a775e6411f790f518dbc9c1fa7c50a89e6873502d9a3530a6eb223a590bcfe8",
+          "url": "https://raw.githubusercontent.com/vercel-labs/web-interface-guidelines/e3d624baaf29dc1fc645aff3e38f03e564d2d6b1/command.md"
+        },
+        {
+          "upstream_path": "LICENSE",
+          "local_path": "vendor/vercel-labs/web-interface-guidelines/e3d624baaf29dc1fc645aff3e38f03e564d2d6b1/LICENSE",
+          "git_blob_sha": "b3575a3c1358eac4b9ee36a4c851872d81417760",
+          "git_mode": "100644",
+          "sha256": "6cd1609c9c12233507cdd2ce0d32e9a721e3c27494951be06b90090deeeb7af2",
+          "url": "https://raw.githubusercontent.com/vercel-labs/web-interface-guidelines/e3d624baaf29dc1fc645aff3e38f03e564d2d6b1/LICENSE"
+        }
+      ]
+    },
+    {
+      "name": "react-best-practices",
+      "repo": "vercel-labs/agent-skills",
+      "skill_path": "skills/react-best-practices/SKILL.md",
+      "sha": "063bee94c3f4df8453406c830b0a7df0f2860278",
+      "commit_date": "2026-08-28T13:36:07Z",
+      "vendor_path": "vendor/vercel-labs/react-best-practices/063bee94c3f4df8453406c830b0a7df0f2860278",
+      "files": [
+        {
+          "upstream_path": "skills/react-best-practices/SKILL.md",
+          "local_path": "vendor/vercel-labs/react-best-practices/063bee94c3f4df8453406c830b0a7df0f2860278/UPSTREAM_SKILL.md",
+          "git_blob_sha": "237988de4a66dd8a71d30a2c24ebe1a86b58d04e",
+          "git_mode": "100644",
+          "sha256": "71ed7794962fa6e803ee83030517b5b93a9f70fbfeb431ec4535c5480a8d8355",
+          "url": "https://raw.githubusercontent.com/vercel-labs/agent-skills/063bee94c3f4df8453406c830b0a7df0f2860278/skills/react-best-practices/SKILL.md"
+        },
+        {
+          "upstream_path": "skills/react-best-practices/rules/async-parallel.md",
+          "local_path": "vendor/vercel-labs/react-best-practices/063bee94c3f4df8453406c830b0a7df0f2860278/rules/async-parallel.md",
+          "git_blob_sha": "64133f6c31fec81eaaabd712586337d20122e09f",
+          "git_mode": "100644",
+          "sha256": "6d2f841896279e976dfcdc1ac89e70771ac188baadfd43c096b5706cb838b961",
+          "url": "https://raw.githubusercontent.com/vercel-labs/agent-skills/063bee94c3f4df8453406c830b0a7df0f2860278/skills/react-best-practices/rules/async-parallel.md"
+        },
+        {
+          "upstream_path": "skills/react-best-practices/rules/async-defer-await.md",
+          "local_path": "vendor/vercel-labs/react-best-practices/063bee94c3f4df8453406c830b0a7df0f2860278/rules/async-defer-await.md",
+          "git_blob_sha": "460b5e16baf9c66f85e4169eb9d43e4d07f2ce94",
+          "git_mode": "100644",
+          "sha256": "f3c142d090615abdcc99d31c123be37b31f0f1ed8d9ec9f7789a3bc6883ae0fb",
+          "url": "https://raw.githubusercontent.com/vercel-labs/agent-skills/063bee94c3f4df8453406c830b0a7df0f2860278/skills/react-best-practices/rules/async-defer-await.md"
+        },
+        {
+          "upstream_path": "skills/react-best-practices/rules/async-cheap-condition-before-await.md",
+          "local_path": "vendor/vercel-labs/react-best-practices/063bee94c3f4df8453406c830b0a7df0f2860278/rules/async-cheap-condition-before-await.md",
+          "git_blob_sha": "5799d7f6ee6e9d70422048ab0cae06ca021d22b2",
+          "git_mode": "100644",
+          "sha256": "03107c1f70a293cd58a8abc5474c5548e20ea4efdf01b6d45aae7ad0ac1cb32c",
+          "url": "https://raw.githubusercontent.com/vercel-labs/agent-skills/063bee94c3f4df8453406c830b0a7df0f2860278/skills/react-best-practices/rules/async-cheap-condition-before-await.md"
+        },
+        {
+          "upstream_path": "skills/react-best-practices/rules/client-event-listeners.md",
+          "local_path": "vendor/vercel-labs/react-best-practices/063bee94c3f4df8453406c830b0a7df0f2860278/rules/client-event-listeners.md",
+          "git_blob_sha": "aad4ae91605d715aad8e92b76bd7fb85c91d7cdf",
+          "git_mode": "100644",
+          "sha256": "242a873349febc1ce685e85617994784dbab92c2eaa68aed7fed5a83e7680e93",
+          "url": "https://raw.githubusercontent.com/vercel-labs/agent-skills/063bee94c3f4df8453406c830b0a7df0f2860278/skills/react-best-practices/rules/client-event-listeners.md"
+        },
+        {
+          "upstream_path": "skills/react-best-practices/rules/client-passive-event-listeners.md",
+          "local_path": "vendor/vercel-labs/react-best-practices/063bee94c3f4df8453406c830b0a7df0f2860278/rules/client-passive-event-listeners.md",
+          "git_blob_sha": "ce39a889efb4452ec4c044555ff818301dcf7ece",
+          "git_mode": "100644",
+          "sha256": "1f35016f9053de69e884ee9be00654e37979c2ca85f5e57764dc2626ff7acb4b",
+          "url": "https://raw.githubusercontent.com/vercel-labs/agent-skills/063bee94c3f4df8453406c830b0a7df0f2860278/skills/react-best-practices/rules/client-passive-event-listeners.md"
+        },
+        {
+          "upstream_path": "skills/react-best-practices/rules/rerender-derived-state-no-effect.md",
+          "local_path": "vendor/vercel-labs/react-best-practices/063bee94c3f4df8453406c830b0a7df0f2860278/rules/rerender-derived-state-no-effect.md",
+          "git_blob_sha": "3d9fe4050794ea6655add6bee50cfbc104e5dc31",
+          "git_mode": "100644",
+          "sha256": "cb11ec76f50aa7b6847269f02d79b120c889a30d9ecd2c1d578f75144419c77a",
+          "url": "https://raw.githubusercontent.com/vercel-labs/agent-skills/063bee94c3f4df8453406c830b0a7df0f2860278/skills/react-best-practices/rules/rerender-derived-state-no-effect.md"
+        },
+        {
+          "upstream_path": "skills/react-best-practices/rules/rerender-functional-setstate.md",
+          "local_path": "vendor/vercel-labs/react-best-practices/063bee94c3f4df8453406c830b0a7df0f2860278/rules/rerender-functional-setstate.md",
+          "git_blob_sha": "b004ef45e347503947fee397b6c3d163b0a317fb",
+          "git_mode": "100644",
+          "sha256": "5e68df6b2ae8058e67f476ff1ac67bde159f5a9d18df439e46eabcdeb7b52e58",
+          "url": "https://raw.githubusercontent.com/vercel-labs/agent-skills/063bee94c3f4df8453406c830b0a7df0f2860278/skills/react-best-practices/rules/rerender-functional-setstate.md"
+        },
+        {
+          "upstream_path": "skills/react-best-practices/rules/rerender-dependencies.md",
+          "local_path": "vendor/vercel-labs/react-best-practices/063bee94c3f4df8453406c830b0a7df0f2860278/rules/rerender-dependencies.md",
+          "git_blob_sha": "47a4d92685702e3a3b07073c62a61800fa0a6d7d",
+          "git_mode": "100644",
+          "sha256": "17eb5830956fb56486fd3cfc7431f5849d39751730c05ad9e77dd4f0c27169c5",
+          "url": "https://raw.githubusercontent.com/vercel-labs/agent-skills/063bee94c3f4df8453406c830b0a7df0f2860278/skills/react-best-practices/rules/rerender-dependencies.md"
+        },
+        {
+          "upstream_path": "skills/react-best-practices/rules/rerender-lazy-state-init.md",
+          "local_path": "vendor/vercel-labs/react-best-practices/063bee94c3f4df8453406c830b0a7df0f2860278/rules/rerender-lazy-state-init.md",
+          "git_blob_sha": "4ecb350fbadff3db805b72429276e672d42736dc",
+          "git_mode": "100644",
+          "sha256": "4ae844740f266fc8cbf050701230286624a2440ec5be67b9a63d9edc3c580573",
+          "url": "https://raw.githubusercontent.com/vercel-labs/agent-skills/063bee94c3f4df8453406c830b0a7df0f2860278/skills/react-best-practices/rules/rerender-lazy-state-init.md"
+        },
+        {
+          "upstream_path": "skills/react-best-practices/rules/rerender-no-inline-components.md",
+          "local_path": "vendor/vercel-labs/react-best-practices/063bee94c3f4df8453406c830b0a7df0f2860278/rules/rerender-no-inline-components.md",
+          "git_blob_sha": "d97592acefced05bc4a8538c77d226fa24c08534",
+          "git_mode": "100644",
+          "sha256": "1cc32907a770272524ba682eef9e7efdd8ad4533b6f89b718a1fcd7d1d0eb6a3",
+          "url": "https://raw.githubusercontent.com/vercel-labs/agent-skills/063bee94c3f4df8453406c830b0a7df0f2860278/skills/react-best-practices/rules/rerender-no-inline-components.md"
+        },
+        {
+          "upstream_path": "skills/react-best-practices/rules/rendering-conditional-render.md",
+          "local_path": "vendor/vercel-labs/react-best-practices/063bee94c3f4df8453406c830b0a7df0f2860278/rules/rendering-conditional-render.md",
+          "git_blob_sha": "7e866f5852dac80e0822e7f7c33476f5c9fc22f1",
+          "git_mode": "100644",
+          "sha256": "2ec2fa23c4148285144687050c52369adba3da2fbe3d486f8d3e0aad8f06f2bc",
+          "url": "https://raw.githubusercontent.com/vercel-labs/agent-skills/063bee94c3f4df8453406c830b0a7df0f2860278/skills/react-best-practices/rules/rendering-conditional-render.md"
+        },
+        {
+          "upstream_path": "skills/react-best-practices/rules/js-tosorted-immutable.md",
+          "local_path": "vendor/vercel-labs/react-best-practices/063bee94c3f4df8453406c830b0a7df0f2860278/rules/js-tosorted-immutable.md",
+          "git_blob_sha": "eae8b3f8aed2c7a893ceaae4cab55fa1c444b309",
+          "git_mode": "100644",
+          "sha256": "d0a5e1b0fec48a0a81397957e2f068e224329f7c42cb5feeed8aae6fa64025e8",
+          "url": "https://raw.githubusercontent.com/vercel-labs/agent-skills/063bee94c3f4df8453406c830b0a7df0f2860278/skills/react-best-practices/rules/js-tosorted-immutable.md"
+        },
+        {
+          "upstream_path": "skills/react-best-practices/rules/js-set-map-lookups.md",
+          "local_path": "vendor/vercel-labs/react-best-practices/063bee94c3f4df8453406c830b0a7df0f2860278/rules/js-set-map-lookups.md",
+          "git_blob_sha": "680a4892ee291c432bf8e769a44d0f1eb102b74b",
+          "git_mode": "100644",
+          "sha256": "a7fd781a6ba9ad49065961b6f9a90ef486bf6b648390e1a08704025f98e1642b",
+          "url": "https://raw.githubusercontent.com/vercel-labs/agent-skills/063bee94c3f4df8453406c830b0a7df0f2860278/skills/react-best-practices/rules/js-set-map-lookups.md"
+        },
+        {
+          "upstream_path": "README.md",
+          "local_path": "vendor/vercel-labs/react-best-practices/063bee94c3f4df8453406c830b0a7df0f2860278/UPSTREAM_README.md",
+          "git_blob_sha": "04a1a5a46a22cfd430e2877b7c145e34fc2653ab",
+          "git_mode": "100644",
+          "sha256": "7c02f64b08fc6c4eef03c01d64f3e2ed478193ccfcbd14edba379abe23304651",
+          "url": "https://raw.githubusercontent.com/vercel-labs/agent-skills/063bee94c3f4df8453406c830b0a7df0f2860278/README.md"
+        }
+      ]
+    },
+    {
+      "name": "webapp-testing",
+      "repo": "anthropics/skills",
+      "skill_path": "skills/webapp-testing/SKILL.md",
+      "sha": "41bbe19d1a1a7eaab5e7bb9050a417e5c6cffc8f",
+      "commit_date": "2026-09-03T16:37:13Z",
+      "vendor_path": "vendor/anthropics/webapp-testing/41bbe19d1a1a7eaab5e7bb9050a417e5c6cffc8f",
+      "files": [
+        {
+          "upstream_path": "skills/webapp-testing/SKILL.md",
+          "local_path": "vendor/anthropics/webapp-testing/41bbe19d1a1a7eaab5e7bb9050a417e5c6cffc8f/UPSTREAM_SKILL.md",
+          "git_blob_sha": "4726215301db64a0cc4d41fc3219c61f37a30f4a",
+          "git_mode": "100644",
+          "sha256": "51b7349e77ec63b7744a6f63647e7566a0b4d2e301121cc10e8c2113af6556a2",
+          "url": "https://raw.githubusercontent.com/anthropics/skills/41bbe19d1a1a7eaab5e7bb9050a417e5c6cffc8f/skills/webapp-testing/SKILL.md"
+        },
+        {
+          "upstream_path": "skills/webapp-testing/examples/console_logging.py",
+          "local_path": "vendor/anthropics/webapp-testing/41bbe19d1a1a7eaab5e7bb9050a417e5c6cffc8f/examples/console_logging.py.txt",
+          "git_blob_sha": "9329b5e232ed53d944bfe95e750070117d31b9ab",
+          "git_mode": "100644",
+          "sha256": "ea46877289acb82da7e7ce59d0bc37c8977cd57e2a006d0c88d7a1c625bf95da",
+          "url": "https://raw.githubusercontent.com/anthropics/skills/41bbe19d1a1a7eaab5e7bb9050a417e5c6cffc8f/skills/webapp-testing/examples/console_logging.py"
+        },
+        {
+          "upstream_path": "skills/webapp-testing/LICENSE.txt",
+          "local_path": "vendor/anthropics/webapp-testing/41bbe19d1a1a7eaab5e7bb9050a417e5c6cffc8f/LICENSE.txt",
+          "git_blob_sha": "4f881c52d1f72f4cfb720e339e2d35c3058d01a9",
+          "git_mode": "100644",
+          "sha256": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362",
+          "url": "https://raw.githubusercontent.com/anthropics/skills/41bbe19d1a1a7eaab5e7bb9050a417e5c6cffc8f/skills/webapp-testing/LICENSE.txt"
+        }
+      ]
+    },
+    {
+      "name": "fastapi",
+      "repo": "fastapi/fastapi",
+      "skill_path": "fastapi/.agents/skills/fastapi/SKILL.md",
+      "sha": "50113da16fec53b66b80d75e80a89296de4fa5a5",
+      "commit_date": "2026-09-01T20:59:53Z",
+      "vendor_path": "vendor/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5",
+      "files": [
+        {
+          "upstream_path": "fastapi/.agents/skills/fastapi/SKILL.md",
+          "local_path": "vendor/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/UPSTREAM_SKILL.md",
+          "git_blob_sha": "fc35b97ed9dc2ec0db51dee69c4ba358c5c8f3b8",
+          "git_mode": "100644",
+          "sha256": "989e5136ad015c175cca28669d051bfef2e20dad13a8385383885648607f5eb6",
+          "url": "https://raw.githubusercontent.com/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/fastapi/.agents/skills/fastapi/SKILL.md"
+        },
+        {
+          "upstream_path": "fastapi/.agents/skills/fastapi/references/dependencies.md",
+          "local_path": "vendor/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/references/dependencies.md",
+          "git_blob_sha": "a562dd9469851c085b4591ce748ca6689864a1d3",
+          "git_mode": "100644",
+          "sha256": "8b6b71a03fa14680905a81f53f1883b90c2ab7ac65eefa77c2664c2d038de469",
+          "url": "https://raw.githubusercontent.com/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/fastapi/.agents/skills/fastapi/references/dependencies.md"
+        },
+        {
+          "upstream_path": "fastapi/.agents/skills/fastapi/references/responses.md",
+          "local_path": "vendor/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/references/responses.md",
+          "git_blob_sha": "09081236a0ac06a15cc08d1eb25b01e00f69e564",
+          "git_mode": "100644",
+          "sha256": "7c921508bbd093697301ca9612038976cfb5b65bdc2dc42a0c02e2809d3652a7",
+          "url": "https://raw.githubusercontent.com/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/fastapi/.agents/skills/fastapi/references/responses.md"
+        },
+        {
+          "upstream_path": "fastapi/.agents/skills/fastapi/references/pydantic.md",
+          "local_path": "vendor/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/references/pydantic.md",
+          "git_blob_sha": "fadf99c1a9d52110d2039cc03b0ab80a95875e82",
+          "git_mode": "100644",
+          "sha256": "840ab962739861aed2ea77805dc46979c9a96abd8fc0043f197b3bd5d638e84b",
+          "url": "https://raw.githubusercontent.com/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/fastapi/.agents/skills/fastapi/references/pydantic.md"
+        },
+        {
+          "upstream_path": "fastapi/.agents/skills/fastapi/references/path-operations.md",
+          "local_path": "vendor/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/references/path-operations.md",
+          "git_blob_sha": "1292c17742536ea255813563d4757502bf209b2d",
+          "git_mode": "100644",
+          "sha256": "ed8d2a21123bcf63dd1e9aa61cc8e4e33a878cbbf1d09498a556a420302995ca",
+          "url": "https://raw.githubusercontent.com/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/fastapi/.agents/skills/fastapi/references/path-operations.md"
+        },
+        {
+          "upstream_path": "LICENSE",
+          "local_path": "vendor/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/LICENSE",
+          "git_blob_sha": "3e92463e6bd522a2a21e5f0a80d8089d6c4be20d",
+          "git_mode": "100644",
+          "sha256": "4ec89ffc81485b97fec584b2d4a961032eeffe834453894fd9c1274906cc744e",
+          "url": "https://raw.githubusercontent.com/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/LICENSE"
+        }
+      ]
+    },
+    {
+      "name": "verification-before-completion",
+      "repo": "obra/superpowers",
+      "skill_path": "skills/verification-before-completion/SKILL.md",
+      "sha": "b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+      "commit_date": "2026-08-12T16:53:21Z",
+      "vendor_path": "vendor/obra/verification-before-completion/b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+      "files": [
+        {
+          "upstream_path": "skills/verification-before-completion/SKILL.md",
+          "local_path": "vendor/obra/verification-before-completion/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/UPSTREAM_SKILL.md",
+          "git_blob_sha": "7d45333cc4a49c57a80df6c1fe2fa777a207afbc",
+          "git_mode": "100644",
+          "sha256": "2befe7fc55bcadaa3d97dd9e8efeb633d2561c0ebe74c5a8b17c4d9e7e4520b3",
+          "url": "https://raw.githubusercontent.com/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/verification-before-completion/SKILL.md"
+        },
+        {
+          "upstream_path": "LICENSE",
+          "local_path": "vendor/obra/verification-before-completion/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/LICENSE",
+          "git_blob_sha": "abf0390320aa14406af7a520b9b0739fdda9bf08",
+          "git_mode": "100644",
+          "sha256": "a37e0e9697144819e1d965176ac4ae5bc3fa02d11e7812036bbcadf6dafe2400",
+          "url": "https://raw.githubusercontent.com/obra/superpowers/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/LICENSE"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,180 @@
+"""Offline checks for the PBL4 skill integration; no upstream code is executed.
+
+Run: python .agents/scripts/verify_skills.py
+Run with --write-reports after a reviewed change to refresh scan inventories.
+This checks structure/provenance, not semantic behavior or sandbox enforcement.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+from pathlib import Path
+from urllib.parse import unquote
+
+ROOT = Path(__file__).resolve().parents[1]
+CORE = {
+    "architecture-guard",
+    "contract-change",
+    "protocol-change",
+    "distributed-debug",
+    "distributed-verification",
+    "doc-sync",
+    "release-gate",
+    "pbl4-ui-direction",
+}
+VENDORS = {
+    "impeccable",
+    "web-design-guidelines",
+    "react-best-practices",
+    "webapp-testing",
+    "fastapi",
+    "verification-before-completion",
+}
+SCAN = re.compile(
+    (
+        "main|master|latest|raw\\.githubusercontent\\.com|curl|wget|npx|pip "
+        "install|npm install|shell|subprocess|binary|download|remote.*fetc"
+        "h|fetch.*remote"
+    ),
+    re.I,
+)
+LINK = re.compile(r"\[[^\]\n]*\]\(([^)]+)\)")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--write-reports", action="store_true")
+    args = parser.parse_args()
+    errors = []
+    active = list((ROOT / "skills").glob("*/SKILL.md"))
+    expected = CORE | {"vendor-" + name for name in VENDORS}
+    if {p.parent.name for p in active} != expected:
+        errors.append("Unexpected or missing active skills")
+    if set(ROOT.rglob("SKILL.md")) != set(active):
+        errors.append("Unintended recursive SKILL.md discovery")
+    for p in active:
+        text = p.read_text(encoding="utf-8")
+        front = re.match(r"^---\n(.*?)\n---", text, re.S)
+        if not front or not re.search(r"^name: " + re.escape(p.parent.name) + r"$", front[1], re.M):
+            errors.append(f"Invalid skill name/frontmatter: {p}")
+        if not front or "description:" not in front[1]:
+            errors.append(f"Missing description: {p}")
+    manifest = json.loads((ROOT / "VENDOR_MANIFEST.json").read_text(encoding="utf-8"))
+    declared = set()
+    for item in manifest["snapshots"]:
+        if not re.fullmatch(r"[0-9a-f]{40}", item["sha"]):
+            errors.append("Invalid pinned SHA: " + item["name"])
+        for entry in item["files"]:
+            p = ROOT / entry["local_path"]
+            declared.add(p)
+            if not p.is_file():
+                errors.append("Missing vendor file: " + str(p))
+                continue
+            data = p.read_bytes()
+            if hashlib.sha256(data).hexdigest() != entry["sha256"]:
+                errors.append("SHA256 mismatch: " + str(p))
+            blob = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+            if blob != entry["git_blob_sha"]:
+                errors.append("Git blob mismatch: " + str(p))
+            prefix = "https://raw.githubusercontent.com/" + item["repo"] + "/" + item["sha"] + "/"
+            if entry["url"] != prefix + entry["upstream_path"]:
+                errors.append("Non-pinned provenance URL: " + str(p))
+            if p.name in {"SKILL.md", "AGENTS.md", "openai.yaml"} or p.suffix not in {
+                ".md",
+                ".txt",
+                "",
+            }:
+                errors.append("Active/executable-looking vendor file: " + str(p))
+    actual = {p for p in (ROOT / "vendor").rglob("*") if p.is_file()}
+    if actual != declared:
+        errors.append("Vendor manifest inventory differs from disk")
+    exclusions = []
+    for p in ROOT.rglob("*.md"):
+        raw = (ROOT / "vendor") in p.parents
+        text = p.read_text(encoding="utf-8")
+        if not raw and text.count("```") % 2:
+            errors.append("Unbalanced fenced block: " + str(p))
+        for target in LINK.findall(text):
+            target = target.strip().strip("<>").split("#", 1)[0]
+            if not target or re.match(r"[a-zA-Z][a-zA-Z0-9+.-]*:", target):
+                continue
+            q = (p.parent / unquote(target)).resolve()
+            if not q.exists():
+                if raw:
+                    exclusions.append((p.relative_to(ROOT).as_posix(), target))
+                else:
+                    errors.append(f"Broken enabled link: {p.relative_to(ROOT)} -> {target}")
+    findings = []
+    for p in sorted(actual | set(active)):
+        raw = p in actual
+        for number, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+            if SCAN.search(line):
+                classification = (
+                    "HISTORICAL_REFERENCE_DISABLED" if raw else "LOCAL_POLICY_OR_SCOPED_CONTEXT"
+                )
+                findings.append((p.relative_to(ROOT).as_posix(), number, classification, line))
+    if args.write_reports:
+        report = (
+            "# Supply-chain occurrence inventory\n\nGenerated by scripts/verify_"
+            "skills.py. Each matched line is classified below. "
+        )
+        report += (
+            "HISTORICAL_REFERENCE_DISABLED means unmodified inactive upstream "
+            "text (including ordinary uses of main/latest and illustrative cod"
+            "e), not authorization to execute/fetch. "
+        )
+        report += (
+            "LOCAL_POLICY_OR_SCOPED_CONTEXT means local prohibitions, applicab"
+            "ility boundaries or existing local-tool preflight. Review these r"
+            "ows for imperative installs/fetches; the scanner alone cannot pro"
+            "ve instruction safety.\n\n"
+        )
+        report += "| File | Line | Classification | Text |\n|---|---:|---|---|\n"
+        for path, number, classification, line in findings:
+            safe = (
+                line.replace("[", "&#91;")
+                .replace("]", "&#93;")
+                .replace("|", "&#124;")
+                .replace("`", "&#96;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            )
+            report += f"| {path} | {number} | {classification} | {safe} |\n"
+        (ROOT / "SUPPLY_CHAIN_SCAN.md").write_text(report, encoding="utf-8")
+        report = (
+            "# Disabled raw reference links\n\nUpstream snapshots preserve bytes"
+            " and may link to unimported commands, build assets or native/fram"
+            "ework references. "
+        )
+        report += (
+            "These links are disabled by every wrapper; do not resolve them by"
+            " downloading content. Enabled wrapper links are checked separatel"
+            "y and must all exist. "
+        )
+        report += (
+            "Renamed upstream entrypoints are provenance only. No omitted refe"
+            "rence is required by the enabled local workflow.\n\n"
+        )
+        report += "| Snapshot file | Disabled target |\n|---|---|\n"
+        for path, target in exclusions:
+            report += f"| {path} | {target} |\n"
+        (ROOT / "RAW_REFERENCE_EXCLUSIONS.md").write_text(report, encoding="utf-8")
+    if errors:
+        print("FAIL\n" + "\n".join(errors))
+        return 1
+    print(
+        f"PASS: {len(active)} intended skills; {len(actual)} pinned files hash-verified; "
+        "enabled links/fences valid; no raw discovery entrypoint or executable."
+    )
+    print(
+        f"Scan: {len(findings)} classified lines; {len(exclusions)} disabled raw links. "
+        "Semantic scenario evaluation is a separate manual gate."
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
