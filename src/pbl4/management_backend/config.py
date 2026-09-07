@@ -5,7 +5,7 @@ Canonical responsibility:
 - Loads settings from environment variables or explicit configuration files.
 
 Important boundary:
-- database_url must be provided via PBL4_DATABASE_URL; no default database is assumed.
+- database_url must be provided via DATABASE_URL; no default database is assumed.
 - Does NOT define Runtime training strategy, worker count, or synchronization parameters.
 
 Status:
@@ -27,7 +27,7 @@ class BackendConfig:
 
     host: str = "127.0.0.1"
     port: int | None = None
-    database_url: str | None = None  # Configured via PBL4_DATABASE_URL
+    database_url: str | None = None  # Configured via DATABASE_URL
     runtime_host: str = "127.0.0.1"
     runtime_management_port: int | None = None
     dataset_manager_host: str = "127.0.0.1"

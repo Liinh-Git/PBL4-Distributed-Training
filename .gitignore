@@ -43,7 +43,7 @@ Thumbs.db
 .env.*.local
 
 # ─── Runtime artifacts (MUST NOT enter source tree) ───────
-# These live under ${PBL4_HOME}/ at runtime.
+# These live under ${HOME}/ at runtime.
 # If used locally, they go under .var/ which is gitignored.
 .var/
 checkpoints/

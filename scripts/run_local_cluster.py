@@ -12,7 +12,7 @@ Key Architectural Invariants Demonstrated:
 2. Worker Identity: Workers start with only physical/node labels (e.g. node-a, node-b, node-c).
    Logical worker_id is assigned dynamically by Runtime during registration.
    No physical node is assumed to become worker_id=0.
-   No PBL4_WORKER_ID environment variable is injected.
+   No WORKER_ID environment variable is injected.
 3. Network Uniformity: Whichever worker session receives logical worker_id=0 uses the
    exact same DTP/1 over TCP connection path as all other workers.
 

@@ -93,12 +93,26 @@ PROHIBITED_PATHS: list[str] = [
     ".agents/skills/pbl4-release-gate",
 ]
 
-FORBIDDEN_DEPENDENCY_PATTERNS: list[str] = [
-    "sqlalchemy",
+FORBIDDEN_GLOBAL_DEPENDENCIES: list[str] = [
     "asyncpg",
-    "alembic",
     "structlog",
 ]
+
+FORBIDDEN_RUNTIME_DEPENDENCIES: list[str] = [
+    "sqlalchemy",
+    "alembic",
+    "asyncpg",
+    "structlog",
+]
+
+# Explicit whitelists for migration tooling declarations
+WHITELISTED_MIGRATION_TOOLING_EXTRAS: set[str] = {
+    "management-backend",
+}
+
+WHITELISTED_MIGRATION_TOOLING_GROUPS: set[str] = {
+    "dev",
+}
 
 
 def check_required_paths() -> bool:
@@ -170,7 +184,7 @@ def check_architecture() -> bool:
 
 
 def check_pyproject_dependencies() -> bool:
-    """Verify that pyproject.toml does not declare forbidden dependencies."""
+    """Verify that pyproject.toml respects architectural dependency boundaries."""
     pyproject_path = ROOT_DIR / "pyproject.toml"
     if not pyproject_path.exists():
         print("[FAIL] pyproject.toml not found", file=sys.stderr)
@@ -182,23 +196,49 @@ def check_pyproject_dependencies() -> bool:
         print(f"[FAIL] Error parsing pyproject.toml: {e}", file=sys.stderr)
         return False
 
-    # Extract all declared dependencies
-    declared: list[str] = []
-    project_deps = data.get("project", {}).get("dependencies", [])
-    declared.extend(project_deps)
-
-    for _extra, deps in data.get("project", {}).get("optional-dependencies", {}).items():
-        declared.extend(deps)
-
-    for _group, deps in data.get("dependency-groups", {}).items():
-        declared.extend(deps)
-
     found_forbidden: list[str] = []
-    for dep in declared:
+
+    # 1. Base project dependencies must not declare runtime forbidden dependencies
+    base_deps = data.get("project", {}).get("dependencies", [])
+    for dep in base_deps:
         dep_lower = dep.lower()
-        for forbidden in FORBIDDEN_DEPENDENCY_PATTERNS:
+        for forbidden in FORBIDDEN_RUNTIME_DEPENDENCIES:
             if forbidden in dep_lower:
-                found_forbidden.append(f"{forbidden} (found in '{dep}')")
+                found_forbidden.append(f"{forbidden} (found in base dependency '{dep}')")
+
+    # 2. Check optional dependencies: ONLY whitelisted extras can declare migration tooling
+    for extra, deps in data.get("project", {}).get("optional-dependencies", {}).items():
+        if extra in WHITELISTED_MIGRATION_TOOLING_EXTRAS:
+            for dep in deps:
+                dep_lower = dep.lower()
+                for forbidden in FORBIDDEN_GLOBAL_DEPENDENCIES:
+                    if forbidden in dep_lower:
+                        found_forbidden.append(f"{forbidden} (found in extra '{extra}': '{dep}')")
+        else:
+            # All other extras (worker, runtime, dataset-manager, cli, adapter, etc.) are strictly forbidden
+            for dep in deps:
+                dep_lower = dep.lower()
+                for forbidden in FORBIDDEN_RUNTIME_DEPENDENCIES:
+                    if forbidden in dep_lower:
+                        found_forbidden.append(
+                            f"{forbidden} "
+                            f"(found in non-persistence extra '{extra}': '{dep}')"
+                        )
+
+    # 3. Check dependency groups: ONLY whitelisted groups can declare migration tooling
+    for group, deps in data.get("dependency-groups", {}).items():
+        if group in WHITELISTED_MIGRATION_TOOLING_GROUPS:
+            for dep in deps:
+                dep_lower = dep.lower()
+                for forbidden in FORBIDDEN_GLOBAL_DEPENDENCIES:
+                    if forbidden in dep_lower:
+                        found_forbidden.append(f"{forbidden} (found in group '{group}': '{dep}')")
+        else:
+            for dep in deps:
+                dep_lower = dep.lower()
+                for forbidden in FORBIDDEN_RUNTIME_DEPENDENCIES:
+                    if forbidden in dep_lower:
+                        found_forbidden.append(f"{forbidden} (found in group '{group}': '{dep}')")
 
     if found_forbidden:
         print("[FAIL] Found forbidden dependencies in pyproject.toml:", file=sys.stderr)
