@@ -1,0 +1,84 @@
+[project]
+name = "pbl4-distributed-training"
+version = "0.1.0"
+description = "Distributed deep learning training infrastructure with parameter synchronization across devices"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12,<3.13"
+authors = [
+    { name = "PBL4 Team" },
+]
+
+# Base dependencies required by all components (pure stdlib in scaffold)
+dependencies = []
+
+[project.optional-dependencies]
+# Worker-specific dependencies
+worker = [
+    "torch>=2.2.0",
+    "torchvision>=0.17.0",
+    "numpy>=1.26.0",
+]
+
+# Runtime-specific dependencies
+runtime = [
+    "numpy>=1.26.0",
+]
+
+# Management Backend-specific dependencies (psycopg repository stack)
+management-backend = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "psycopg[binary,pool]>=3.1.0",
+    "pydantic>=2.6.0",
+    "websockets>=12.0",
+    "httpx>=0.27.0",
+]
+
+# Dataset Manager dependencies
+dataset-manager = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "numpy>=1.26.0",
+    "pydantic>=2.6.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.3.0",
+]
+
+[project.scripts]
+pbl4-runtime = "pbl4.runtime.entrypoint:main"
+pbl4-worker = "pbl4.worker.entrypoint:main"
+pbl4-dataset-manager = "pbl4.dataset_manager.entrypoint:main"
+pbl4-backend = "pbl4.management_backend.entrypoint:main"
+pblctl = "pbl4.cli.pblctl:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pbl4"]
+
+# ─── Ruff ─────────────────────────────────────────────────
+[tool.ruff]
+src = ["src", "scripts"]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["pbl4"]

@@ -1,0 +1,64 @@
+# ─── Python ───────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+.eggs/
+
+# ─── Virtual environments ─────────────────────────────────
+.venv/
+venv/
+ENV/
+
+# ─── uv ───────────────────────────────────────────────────
+# Do NOT ignore uv.lock — it is the dependency lock file
+
+# ─── Testing / Coverage ──────────────────────────────────
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ─── Node / Frontend ─────────────────────────────────────
+node_modules/
+web/dist/
+
+# ─── IDE ──────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ─── Environment / Secrets ────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ─── Runtime artifacts (MUST NOT enter source tree) ───────
+# These live under ${PBL4_HOME}/ at runtime.
+# If used locally, they go under .var/ which is gitignored.
+.var/
+checkpoints/
+dataset_store/
+worker_cache/
+logs/
+
+# ─── Local PostgreSQL data ────────────────────────────────
+pgdata/
+postgres-data/
+
+# ─── Alembic auto-generated ──────────────────────────────
+# Do NOT ignore migrations/ — migration scripts are tracked
+
+# ─── OS / Temporary ──────────────────────────────────────
+*.tmp
+*.bak
+*.log

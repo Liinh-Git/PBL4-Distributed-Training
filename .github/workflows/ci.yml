@@ -1,0 +1,65 @@
+name: CI — Fast Lane
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  python:
+    name: Python Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.9.27"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --only-group dev
+
+      - name: Format check
+        run: uv run ruff format --check src scripts
+
+      - name: Lint
+        run: uv run ruff check src scripts
+
+      - name: Compile sources
+        run: uv run python -m compileall src scripts
+
+      - name: Architecture boundary check
+        run: uv run python scripts/check_architecture.py
+
+      - name: Scaffold verification
+        run: uv run python scripts/verify_scaffold.py
+
+  frontend:
+    name: Frontend Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: web
+
+      - name: Type check
+        run: npm run typecheck
+        working-directory: web
+
+      - name: Build
+        run: npm run build
+        working-directory: web
