@@ -1,45 +1,23 @@
-"""Dataset Partitioner — partitioning of preprocessed datasets into worker shards.
+"""Seeded sample permutation followed by round-robin shard assignment."""
 
-CANONICAL REFERENCES
---------------------
-- 02. Mô hình miền
-- 03. Mô hình dữ liệu
-- 04. Cấu trúc mã nguồn
-- docs/IMPLEMENTATION_CONTRACT.md -> Module-to-Canonical-Document mapping
+from random import Random
 
-OWNS
-----
-- Partitioning preprocessed dataset into disjoint shards according to the Dataset Build
-  contract's shard_count parameter.
-- Generating deterministic sample-to-shard assignments based on partition strategy/algorithm
-  and partition seed from the Dataset Build specification.
-- Producing metadata for shard manifest generation.
-
-MUST NOT OWN
-------------
-- Runtime expected_workers or SynchronizationPolicy membership (Dataset partitioning is a
-  Dataset Build concern; equality of shard_count and expected_workers in one V1 profile
-  does not establish architectural ownership).
-- Runtime step batch scheduling (owned by Runtime BatchScheduler).
-- Worker session assignment or rank selection (owned by Runtime WorkerRegistry).
-- Shard file persistence or HTTP transmission (owned by Storage / DatasetService).
-
-CRITICAL V1 INVARIANTS
-----------------------
-- Shard count, partition algorithm, and partition seed are owned by the Dataset Build contract.
-- Dataset Manager MUST NOT depend on Runtime.expected_workers or SynchronizationPolicy membership.
-- Partitioning is strictly deterministic given partition algorithm, partition seed, and shard_count.
-
-IMPLEMENTATION STATUS
----------------------
-Scaffold only. Core behavior is intentionally not implemented.
-"""
-
-from __future__ import annotations
+import numpy as np
 
 
 class Partitioner:
-    """Partitions a dataset into shards for distribution to workers."""
-
-    def __init__(self) -> None:
-        raise NotImplementedError
+    def partition(
+        self, sample_count: int, shard_count: int, partition_seed: int
+    ) -> tuple[np.ndarray, ...]:
+        if (
+            type(sample_count) is not int
+            or sample_count <= 0
+            or type(shard_count) is not int
+            or shard_count <= 0
+            or type(partition_seed) is not int
+        ):
+            raise ValueError("Invalid partition configuration")
+        order = list(range(sample_count))
+        # A local PRNG cannot alter unrelated caller/global random state.
+        Random(partition_seed).shuffle(order)
+        return tuple(np.asarray(order[i::shard_count], dtype=np.int64) for i in range(shard_count))
