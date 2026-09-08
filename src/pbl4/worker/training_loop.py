@@ -1,47 +1,129 @@
-"""Training Loop — worker-side iterative training execution.
+"""Worker-local compute/application semantics. DTP transport composes outside this class."""
 
-CANONICAL REFERENCES
---------------------
-- 02. Mô hình miền
-- 03. Mô hình dữ liệu
-- 04. Cấu trúc mã nguồn
-- docs/IMPLEMENTATION_CONTRACT.md -> Module-to-Canonical-Document mapping
+from dataclasses import dataclass
+from threading import Lock
 
-OWNS
-----
-- Worker iteration cycle:
-  batch read -> forward -> loss -> backward -> export gradient ->
-  send gradient -> receive updated parameters -> load parameters into model.
-- Coordinating local ModelAdapter forward/backward execution.
+from pbl4.adapter.base import LocalGradient, ModelAdapter, TensorBundle
+from pbl4.worker.shard_cache import CachedShard
 
-MUST NOT OWN
-------------
-- Canonical optimizer updates: worker does NOT call optimizer.step() on the canonical model.
-- Synchronization barrier decisions (owned by Runtime SynchronizationPolicy).
-- Shard HTTP downloading (owned by ShardDownloader).
-- Management telemetry persistence (Management Backend is not accessed as training path).
 
-CRITICAL V1 INVARIANTS
-----------------------
-- Worker sends contributions and receives canonical parameters strictly via DTP/1.
-- Canonical model mutation belongs exclusively to Parameter Server.
+@dataclass(frozen=True, slots=True)
+class StepAssignment:
+    attempt_id: str
+    session_id: int
+    worker_id: int
+    operation_id: int
+    step_id: int
+    input_model_version: int
+    batch_id: int
+    batch_ordinal: int
+    expected_sample_count: int
 
-IMPLEMENTATION STATUS
----------------------
-Scaffold only. Core behavior is intentionally not implemented.
-"""
+    def __post_init__(self) -> None:
+        if (
+            not self.attempt_id
+            or any(
+                type(value) is not int or value < 0
+                for value in (
+                    self.session_id,
+                    self.worker_id,
+                    self.operation_id,
+                    self.step_id,
+                    self.input_model_version,
+                    self.batch_id,
+                    self.batch_ordinal,
+                )
+            )
+            or type(self.expected_sample_count) is not int
+            or self.expected_sample_count <= 0
+        ):
+            raise ValueError("Invalid STEP_START assignment")
 
-from __future__ import annotations
+
+@dataclass(frozen=True, slots=True)
+class ComputedGradient:
+    assignment: StepAssignment
+    local_gradient: LocalGradient
+
+
+@dataclass(frozen=True, slots=True)
+class ParameterAppliedEligibility:
+    attempt_id: str
+    session_id: int
+    worker_id: int
+    operation_id: int
+    step_id: int
+    model_version: int
 
 
 class TrainingLoop:
-    """Worker-side training loop.
+    def __init__(self, adapter: ModelAdapter, shard: CachedShard, model_version: int):
+        if type(model_version) is not int or model_version < 0:
+            raise ValueError("Invalid local model version")
+        self._adapter = adapter
+        self._shard = shard
+        self._model_version = model_version
+        self._lock = Lock()
+        self._pending: StepAssignment | None = None
+        self._eligibility: ParameterAppliedEligibility | None = None
 
-    Cycle: forward → loss → backward → export gradient →
-           send gradient → receive parameters → load parameters.
+    @property
+    def local_model_version(self) -> int:
+        with self._lock:
+            return self._model_version
 
-    Does NOT call optimizer.step() on the canonical model.
-    """
+    def compute(self, assignment: StepAssignment) -> ComputedGradient:
+        with self._lock:
+            if self._pending is not None:
+                raise ValueError("Previous operation awaits canonical parameters")
+            if assignment.input_model_version != self._model_version:
+                raise ValueError("STEP_START uses the wrong local model version")
+            x, y, sample_ids = self._shard.load_batch(assignment.batch_id)
+            if len(x) != assignment.expected_sample_count:
+                raise ValueError("Assigned physical batch sample count mismatch")
+            # sample_ids are verified by the cache; workers never choose a replacement.
+            if len(sample_ids) != len(x):
+                raise ValueError("Invalid cached batch")
+            gradient = self._adapter.compute_loss_and_gradients(x, y)
+            if (
+                gradient.sample_count != assignment.expected_sample_count
+                or gradient.bundle.parameter_manifest_hash
+                != self._adapter.manifest.parameter_manifest_hash
+            ):
+                raise ValueError("Local gradient does not match the assignment/model")
+            self._pending = assignment
+            self._eligibility = None
+            return ComputedGradient(assignment, gradient)
 
-    def __init__(self) -> None:
-        raise NotImplementedError
+    def apply_parameters(
+        self, assignment: StepAssignment, target_model_version: int, bundle: TensorBundle
+    ) -> ParameterAppliedEligibility:
+        with self._lock:
+            if self._pending != assignment:
+                raise ValueError("Canonical parameters do not match the pending operation")
+            if (
+                type(target_model_version) is not int
+                or target_model_version != assignment.input_model_version + 1
+                or self._model_version != assignment.input_model_version
+            ):
+                raise ValueError("Wrong canonical output model version")
+            self._adapter.apply_parameters(bundle)
+            self._model_version = target_model_version
+            self._pending = None
+            self._eligibility = ParameterAppliedEligibility(
+                assignment.attempt_id,
+                assignment.session_id,
+                assignment.worker_id,
+                assignment.operation_id,
+                assignment.step_id,
+                target_model_version,
+            )
+            return self._eligibility
+
+    def consume_parameter_applied(self) -> ParameterAppliedEligibility:
+        with self._lock:
+            if self._eligibility is None:
+                raise ValueError("Local parameter application is not ACK-eligible")
+            eligibility = self._eligibility
+            self._eligibility = None
+            return eligibility

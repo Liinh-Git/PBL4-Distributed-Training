@@ -1,31 +1,23 @@
-"""Worker configuration.
-
-Canonical responsibility:
-- Holds process deployment configuration for a training worker (host, ports, paths).
-
-Important boundary:
-- worker_id is NOT configured here; logical rank is assigned by Runtime during registration.
-- Does NOT configure cluster-wide expected_workers or synchronization strategies.
-
-Status:
-- Scaffold only.
-"""
-
-from __future__ import annotations
+"""Worker deployment configuration; logical rank comes from Runtime registration."""
 
 from dataclasses import dataclass
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class WorkerConfig:
-    """Configuration for a Worker process.
-
-    Workers start without an assigned logical rank. The logical worker_id (0..N-1)
-    is assigned by Runtime during registration/session establishment.
-    """
-
     node_label: str = "node-unknown"
     runtime_host: str = "127.0.0.1"
-    runtime_port: int | None = None
-    cache_dir: str = ""
+    runtime_port: int = 9000
+    cache_dir: str = "var/worker-cache"
+    heartbeat_interval_seconds: float = 5.0
     log_level: str = "INFO"
+
+    def __post_init__(self) -> None:
+        if (
+            not self.node_label
+            or not self.runtime_host
+            or not 0 < self.runtime_port < 65536
+            or not self.cache_dir
+            or self.heartbeat_interval_seconds <= 0
+        ):
+            raise ValueError("Invalid Worker configuration")
