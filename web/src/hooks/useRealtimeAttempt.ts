@@ -61,20 +61,39 @@ export function useRealtimeAttempt(attemptId: string | null): UseRealtimeAttempt
 
     const offStatus = client.onStatus(setWsStatus)
     const offMessage = client.onMessage((msg: RealtimeMessage) => {
+      if (msg.type === 'SNAPSHOT') {
+        const payload = msg.data as { snapshot?: AttemptSnapshot }
+        if (payload?.snapshot) {
+          setSnapshot(payload.snapshot)
+        }
+      }
+      if (msg.type === 'GAP') {
+        fetchInitial()
+      }
       if (msg.type === 'RUNTIME_EVENT' || msg.type === 'MANAGEMENT_EVENT') {
         const ev = msg.data as EventListItem
-        setEvents(prev => [ev, ...prev].slice(0, 500))
+        setEvents((prev) => {
+          const exists = prev.some(
+            (e) =>
+              (e.event_id && ev.event_id && e.event_id === ev.event_id) ||
+              (e.runtime_event_seq !== undefined &&
+                ev.runtime_event_seq !== undefined &&
+                e.runtime_event_seq === ev.runtime_event_seq)
+          )
+          if (exists) return prev
+          return [ev, ...prev].slice(0, 500)
+        })
       }
       if (msg.type === 'ATTEMPT_STATE_CHANGE') {
         const data = msg.data as Partial<AttemptDetail>
-        setAttempt(prev => prev ? { ...prev, ...data } : prev)
+        setAttempt((prev) => (prev ? { ...prev, ...data } : prev))
       }
       if (msg.type === 'WORKER_STATE_CHANGE') {
-        attemptsApi.workers(attemptId).then(r => setWorkers(r.data)).catch(() => {})
+        attemptsApi.workers(attemptId).then((r) => setWorkers(r.data)).catch(() => {})
       }
       if (msg.type === 'STEP_COMMITTED') {
         const step = msg.data as StepListItem
-        setSteps(prev => [...prev, step])
+        setSteps((prev) => [...prev, step])
       }
     })
 

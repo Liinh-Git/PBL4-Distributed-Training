@@ -267,10 +267,14 @@ export interface CheckpointListItem {
 export type EventSeverity = 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL';
 
 export interface EventListItem {
-  event_id: string;
-  scope: { type: string; id: string | null };
+  event_id?: string;
+  attempt_id?: string;
+  runtime_event_seq?: number;
+  scope?: { type: string; id: string | null };
   event_type: string;
   severity: EventSeverity;
+  source_component?: string;
+  payload?: Record<string, unknown>;
   occurred_at: string;
 }
 

@@ -136,8 +136,7 @@ function JobCreateForm() {
           training_strategy: form.training_strategy,
         },
       })
-      const frozen = await jobsApi.freeze(job.job_id)
-      await jobsApi.start(frozen.job_id)
+      await jobsApi.start(job.job_id)
       navigate('/current-job')
     } catch (e) {
       setServerError(errMsg(e))
