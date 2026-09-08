@@ -69,7 +69,7 @@ def create_build(
                 %s, %s, 'CREATED', %s,
                 %s, %s, %s, %s,
                 %s, %s, %s, %s,
-                '', '', '{}', '', %s
+                NULL, NULL, NULL, NULL, %s
             )
             RETURNING *
             """,

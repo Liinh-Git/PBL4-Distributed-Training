@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Header, Query, status
 
 from pbl4.management_backend import db
 from pbl4.management_backend.schemas.common import ListResponse, PageInfo
@@ -141,10 +141,7 @@ def list_datasets(
 )
 def get_dataset(dataset_id: str):
     with db.get_connection() as conn:
-        try:
-            detail = dataset_service.get_dataset(conn, dataset_id)
-        except dataset_service.DatasetNotFoundError:
-            raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found.")
+        detail = dataset_service.get_dataset(conn, dataset_id)
     return DatasetDetail(
         dataset_id=detail["dataset_id"],
         name=detail["name"],
@@ -165,19 +162,20 @@ def get_dataset(dataset_id: str):
     status_code=status.HTTP_202_ACCEPTED,
     summary="Create a new dataset build",
 )
-def create_build(body: DatasetBuildCreateRequest):
+def create_build(
+    body: DatasetBuildCreateRequest,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+):
     with db.transaction() as conn:
-        try:
-            build_row, cmd_row = dataset_service.create_build(
-                conn,
-                dataset_id=body.dataset_id,
-                profile=body.profile,
-                batch_size=body.batch_size,
-                partition_seed=body.partition_seed,
-                preprocessing=body.preprocessing.model_dump() if body.preprocessing else {},
-            )
-        except dataset_service.DatasetNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+        build_row, cmd_row = dataset_service.create_build(
+            conn,
+            dataset_id=body.dataset_id,
+            profile=body.profile,
+            batch_size=body.batch_size,
+            partition_seed=body.partition_seed,
+            preprocessing=body.preprocessing.model_dump() if body.preprocessing else {},
+            idempotency_key=idempotency_key,
+        )
     return BuildCommandResponse(
         command_id=str(cmd_row["command_id"]),
         command_type=cmd_row["command_type"],
@@ -239,10 +237,7 @@ def list_builds(
 )
 def get_build(dataset_build_id: str):
     with db.get_connection() as conn:
-        try:
-            row = dataset_service.get_build(conn, dataset_build_id)
-        except dataset_service.DatasetBuildNotFoundError:
-            raise HTTPException(status_code=404, detail=f"Build '{dataset_build_id}' not found.")
+        row = dataset_service.get_build(conn, dataset_build_id)
     return _build_row_to_detail(row)
 
 
@@ -253,21 +248,20 @@ def get_build(dataset_build_id: str):
     summary="Rebuild a dataset build",
 )
 def rebuild_build(
-    dataset_build_id: str, body: DatasetBuildRebuildRequest = DatasetBuildRebuildRequest()
+    dataset_build_id: str,
+    body: DatasetBuildRebuildRequest | None = None,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ):
+    req = body or DatasetBuildRebuildRequest()
     with db.transaction() as conn:
-        try:
-            new_build, cmd_row = dataset_service.rebuild_build(
-                conn,
-                dataset_build_id,
-                batch_size=body.batch_size,
-                partition_seed=body.partition_seed,
-                preprocessing=body.preprocessing.model_dump() if body.preprocessing else None,
-            )
-        except dataset_service.DatasetBuildNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
-        except dataset_service.DatasetBuildStateError as e:
-            raise HTTPException(status_code=409, detail=str(e))
+        new_build, cmd_row = dataset_service.rebuild_build(
+            conn,
+            dataset_build_id,
+            batch_size=req.batch_size,
+            partition_seed=req.partition_seed,
+            preprocessing=req.preprocessing.model_dump() if req.preprocessing else None,
+            idempotency_key=idempotency_key,
+        )
     return BuildCommandResponse(
         command_id=str(cmd_row["command_id"]),
         command_type=cmd_row["command_type"],
@@ -287,15 +281,11 @@ def rebuild_build(
     summary="Deprecate a READY dataset build",
 )
 def deprecate_build(
-    dataset_build_id: str, body: DatasetBuildDeprecateRequest = DatasetBuildDeprecateRequest()
+    dataset_build_id: str,
+    body: DatasetBuildDeprecateRequest | None = None,
 ):
     with db.transaction() as conn:
-        try:
-            row = dataset_service.deprecate_build(conn, dataset_build_id)
-        except dataset_service.DatasetBuildNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
-        except dataset_service.DatasetBuildStateError as e:
-            raise HTTPException(status_code=409, detail=str(e))
+        row = dataset_service.deprecate_build(conn, dataset_build_id)
     return DatasetBuildDeprecateResponse(
         dataset_build_id=row["dataset_build_id"],
         state=row["state"],
@@ -311,14 +301,7 @@ def deprecate_build(
 )
 def delete_build(dataset_build_id: str):
     with db.transaction() as conn:
-        try:
-            build_row, cmd_row = dataset_service.delete_build(conn, dataset_build_id)
-        except dataset_service.DatasetBuildNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
-        except dataset_service.DatasetBuildStateError as e:
-            raise HTTPException(status_code=409, detail=str(e))
-        except dataset_service.DatasetBuildReferenceError as e:
-            raise HTTPException(status_code=409, detail=str(e))
+        build_row, cmd_row = dataset_service.delete_build(conn, dataset_build_id)
     return BuildCommandResponse(
         command_id=str(cmd_row["command_id"]),
         command_type=cmd_row["command_type"],
@@ -328,3 +311,14 @@ def delete_build(dataset_build_id: str):
         dataset_build_id=build_row["dataset_build_id"],
         dataset_build_state=build_row["state"],
     )
+
+
+@router.post(
+    "/api/v1/dataset-builds/{dataset_build_id}/delete",
+    response_model=BuildCommandResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Delete a dataset build (POST alias)",
+)
+def delete_build_post(dataset_build_id: str):
+    return delete_build(dataset_build_id)
+
