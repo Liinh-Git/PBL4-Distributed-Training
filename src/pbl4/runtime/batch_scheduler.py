@@ -1,49 +1,79 @@
-"""Batch Scheduler — deterministic batch assignment and ordering.
+"""Deterministic scheduling of pinned physical batches; never reshuffle samples."""
 
-CANONICAL REFERENCES
---------------------
-- 02. Mô hình miền
-- 03. Mô hình dữ liệu
-- 04. Cấu trúc mã nguồn
-- docs/IMPLEMENTATION_CONTRACT.md -> Module-to-Canonical-Document mapping
+from dataclasses import dataclass
 
-OWNS
-----
-- Deterministic batch ordering and schedule permutation over already-materialized physical
-  batch IDs.
-- Canonical scheduling flow:
-  physical materialized batches
-      ↓
-  deterministic per-epoch ordering/permutation (parameterized by attempt training_seed)
-      ↓
-  batch_ordinal -> batch_id mapping for worker consumption in their assigned shard.
+from pbl4.common.hashing import sha256_canonical_json
+from pbl4.runtime.synchronization.context import BatchAssignment
 
-MUST NOT OWN
-------------
-- Repartitioning, reshuffling, or scheduling individual samples (Dataset Manager has already
-  materialized physical batches; Runtime MUST NOT repartition or reshuffle individual samples).
-- Step completion or barrier decisions (owned by SynchronizationPolicy).
-- Update readiness or contribution admission (owned by SynchronizationPolicy).
-- Checkpoint gating decisions (owned by CheckpointPolicy).
-- Raw data loading or shard extraction (workers read their own shards).
 
-CRITICAL V1 INVARIANTS
-----------------------
-- Schedules already-materialized batch identities; Runtime MUST NOT repartition or reshuffle
-  individual samples.
-- Batch ordering is deterministic given attempt training_seed and pinned dataset manifest.
-- BatchScheduler does not make synchronization or checkpoint gating decisions.
-
-IMPLEMENTATION STATUS
----------------------
-Scaffold only. Core behavior is intentionally not implemented.
-"""
-
-from __future__ import annotations
+@dataclass(frozen=True, slots=True)
+class RecoveryCursor:
+    epoch: int
+    next_batch_ordinal: int
 
 
 class BatchScheduler:
-    """Computes deterministic batch assignments for workers."""
+    """A pure mapping from a recovery cursor to assignments.
 
-    # Implementation pending runtime scheduler phase.
-    pass
+    Hash ordering fixes the permutation independently of Python/NumPy RNG versions.
+    Coordinator advances the cursor only after its progression gates succeed.
+    """
+
+    def __init__(self, batches: tuple[BatchAssignment, ...], training_seed: int, epochs: int):
+        if type(training_seed) is not int or type(epochs) is not int or epochs <= 0:
+            raise ValueError("Invalid training seed or epoch count")
+        self._batches = tuple(batches)
+        self._seed = training_seed
+        self._epochs = epochs
+        by_worker: dict[int, dict[int, BatchAssignment]] = {}
+        for batch in self._batches:
+            worker = by_worker.setdefault(batch.worker_id, {})
+            if batch.batch_id in worker:
+                raise ValueError("Duplicate physical batch")
+            worker[batch.batch_id] = batch
+        if not by_worker:
+            raise ValueError("No physical batches")
+        ids = set(next(iter(by_worker.values())))
+        if any(set(worker) != ids for worker in by_worker.values()):
+            raise ValueError("Workers must have the same physical batch ID set")
+        self._ids = tuple(sorted(ids))
+        self._by_worker = by_worker
+
+    def _validate_cursor(self, cursor: RecoveryCursor) -> None:
+        if (
+            type(cursor.epoch) is not int
+            or type(cursor.next_batch_ordinal) is not int
+            or not 0 <= cursor.epoch <= self._epochs
+            or not 0 <= cursor.next_batch_ordinal < len(self._ids)
+            or (cursor.epoch == self._epochs and cursor.next_batch_ordinal != 0)
+        ):
+            raise ValueError("Invalid recovery cursor")
+
+    def assignments(self, cursor: RecoveryCursor) -> tuple[BatchAssignment, ...]:
+        self._validate_cursor(cursor)
+        if cursor.epoch == self._epochs:
+            raise StopIteration("Training schedule exhausted")
+        ordered = sorted(
+            self._ids,
+            key=lambda batch_id: sha256_canonical_json([self._seed, cursor.epoch, batch_id]),
+        )
+        batch_id = ordered[cursor.next_batch_ordinal]
+        return tuple(
+            BatchAssignment(
+                worker_id,
+                worker[batch_id].shard_id,
+                batch_id,
+                cursor.next_batch_ordinal,
+                worker[batch_id].sample_count,
+            )
+            for worker_id, worker in sorted(self._by_worker.items())
+        )
+
+    def next_cursor(self, cursor: RecoveryCursor) -> RecoveryCursor:
+        self._validate_cursor(cursor)
+        if cursor.epoch == self._epochs:
+            raise StopIteration("Training schedule exhausted")
+        ordinal = cursor.next_batch_ordinal + 1
+        if ordinal == len(self._ids):
+            return RecoveryCursor(cursor.epoch + 1, 0)
+        return RecoveryCursor(cursor.epoch, ordinal)
