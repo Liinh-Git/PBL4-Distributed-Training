@@ -56,3 +56,12 @@ def validate_model_id(model_id: str) -> dict[str, Any]:
         supported = ", ".join(f"'{m}'" for m in _V1_MODELS)
         raise ValueError(f"Unsupported model_id '{model_id}'. V1 only supports: {supported}.")
     return model
+
+
+def is_supported_model(model_id: str) -> bool:
+    """Return True if model_id or its canonical profile is supported."""
+    return model_id in _V1_MODELS or model_id == CANONICAL_MODEL_PROFILE
+
+
+get_model_spec = get_model
+list_supported_models = list_models

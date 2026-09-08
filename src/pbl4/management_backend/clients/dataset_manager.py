@@ -39,9 +39,15 @@ class DatasetManagerUnavailableError(Exception):
 class DatasetManagerClient:
     """HTTP client for Management Backend → Dataset Manager communication."""
 
-    def __init__(self, base_url: str | None = None, timeout: float = 5.0) -> None:
+    def __init__(
+        self,
+        base_url: str | None = None,
+        timeout: float = 5.0,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
         self._base_url = base_url.rstrip("/") if base_url else None
         self._timeout = timeout
+        self._transport = transport
         if self._base_url:
             logger.info("DatasetManagerClient configured with base_url: %s", self._base_url)
         else:
@@ -82,7 +88,7 @@ class DatasetManagerClient:
             "preprocessing": preprocessing or {},
         }
         try:
-            with httpx.Client(timeout=self._timeout) as client:
+            with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
                 resp = client.post(url, json=payload, headers=headers)
                 resp.raise_for_status()
                 return resp.json()
@@ -97,7 +103,7 @@ class DatasetManagerClient:
 
         url = f"{self._base_url}/api/v1/dataset-builds/{dataset_build_id}"
         try:
-            with httpx.Client(timeout=self._timeout) as client:
+            with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
                 resp = client.get(url)
                 if resp.status_code == 404:
                     return None
@@ -135,7 +141,7 @@ class DatasetManagerClient:
             "preprocessing": preprocessing or {},
         }
         try:
-            with httpx.Client(timeout=self._timeout) as client:
+            with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
                 resp = client.post(url, json=payload, headers=headers)
                 resp.raise_for_status()
                 return resp.json()
@@ -155,7 +161,7 @@ class DatasetManagerClient:
 
         url = f"{self._base_url}/api/v1/dataset-builds/{dataset_build_id}/deprecate"
         try:
-            with httpx.Client(timeout=self._timeout) as client:
+            with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
                 resp = client.post(url, json={"reason": reason})
                 resp.raise_for_status()
                 return resp.json()
@@ -170,7 +176,7 @@ class DatasetManagerClient:
 
         url = f"{self._base_url}/api/v1/dataset-builds/{dataset_build_id}/purge"
         try:
-            with httpx.Client(timeout=self._timeout) as client:
+            with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
                 resp = client.post(url, json={})
                 resp.raise_for_status()
                 return resp.json()
@@ -187,7 +193,7 @@ class DatasetManagerClient:
 
         url = f"{self._base_url}/api/v1/dataset-builds/{dataset_build_id}/registration-ack"
         try:
-            with httpx.Client(timeout=self._timeout) as client:
+            with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
                 resp = client.post(url, json=ack_payload)
                 resp.raise_for_status()
                 return resp.json()
@@ -204,7 +210,7 @@ class DatasetManagerClient:
 
         url = f"{self._base_url}/artifacts/v1/dataset-builds/{dataset_build_id}/manifest.json"
         try:
-            with httpx.Client(timeout=self._timeout) as client:
+            with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
                 resp = client.get(url)
                 resp.raise_for_status()
                 return resp.json(), resp.content

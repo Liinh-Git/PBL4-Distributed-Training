@@ -59,15 +59,19 @@ def compute_request_hash(
     path: str,
     query_params: dict[str, Any] | None = None,
     body: dict[str, Any] | None = None,
+    body_obj: dict[str, Any] | None = None,
 ) -> str:
     """Compute deterministic SHA-256 hash over canonical request identity tuple."""
     payload = {
         "operation": operation,
         "path": path,
         "query": query_params or {},
-        "body": body or {},
+        "body": body_obj if body_obj is not None else (body or {}),
     }
     return canonical_json_hash(payload)
+
+
+build_request_hash = compute_request_hash
 
 
 def acquire_or_get_record(

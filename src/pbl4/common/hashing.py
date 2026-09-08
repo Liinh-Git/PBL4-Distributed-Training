@@ -46,15 +46,20 @@ def sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
-def canonical_json_bytes(value: Any) -> bytes:
-    """Deterministic UTF-8 JSON serialization per canonical data model specification."""
+def canonical_json_dumps(value: Any) -> str:
+    """Deterministic JSON string per canonical data model specification."""
     return json.dumps(
         value,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
-    ).encode("utf-8")
+    )
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    """Deterministic UTF-8 JSON serialization per canonical data model specification."""
+    return canonical_json_dumps(value).encode("utf-8")
 
 
 def canonical_json_hash(value: Any) -> str:

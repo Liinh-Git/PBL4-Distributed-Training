@@ -49,13 +49,18 @@ class DatasetBuildNotFoundError(Exception):
 
 
 class DatasetBuildStateError(Exception):
+    code = "INVALID_STATE"
+
     def __init__(self, msg: str, current_state: str = "") -> None:
         super().__init__(msg)
         self.current_state = current_state
 
 
 class DatasetBuildReferenceError(Exception):
-    pass
+    code = "DATASET_BUILD_IN_USE"
+
+
+DatasetBuildInUseError = DatasetBuildReferenceError
 
 
 class DatasetManifestVerificationError(Exception):
