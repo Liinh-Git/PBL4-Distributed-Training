@@ -1,9 +1,25 @@
-"""Backend repositories — PostgreSQL data access layer.
+"""Repositories package — public re-exports."""
 
-Reference: Canonical Data Model & Backend Architecture (Google Drive)
+from management_backend.repositories import (
+    attempt_repository,
+    checkpoint_repository,
+    command_repository,
+    dataset_build_repository,
+    dataset_repository,
+    event_repository,
+    job_repository,
+    step_repository,
+    worker_session_repository,
+)
 
-All database persistence in this layer uses `psycopg` with explicit SQL queries.
-No SQLAlchemy ORM or asyncpg.
-"""
-
-from __future__ import annotations
+__all__ = [
+    "attempt_repository",
+    "checkpoint_repository",
+    "command_repository",
+    "dataset_build_repository",
+    "dataset_repository",
+    "event_repository",
+    "job_repository",
+    "step_repository",
+    "worker_session_repository",
+]
