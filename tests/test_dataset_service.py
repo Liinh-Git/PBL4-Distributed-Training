@@ -303,3 +303,71 @@ def test_invalid_api_request_has_canonical_error_envelope(tmp_path):
     assert response.json()["data"] is None
     assert response.json()["error"]["code"] == "INVALID_REQUEST"
     service.close()
+
+
+# ── Issue C: /healthz canonical local-service tests ───────────────────────────
+
+
+def test_c1_healthz_returns_all_required_fields(tmp_path):
+    """C1: healthy empty service returns all canonical fields."""
+    config = manager_config(tmp_path)
+    service = DatasetService(config, TestExecutor(config), start_worker=False)
+    with TestClient(create_app(config, service)) as client:
+        response = client.get("/healthz")
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["status"] == "ok"
+    assert data["service"] == "dataset-manager"
+    assert "version" in data
+    assert data["queue_depth"] == 0
+    assert data["active_build_id"] is None
+    assert data["storage_writable"] is True
+    service.close()
+
+
+def test_c2_healthz_reflects_queued_and_active_build(tmp_path):
+    """C2: queue depth and active_build_id reflected in health snapshot."""
+    release = threading.Event()
+    config = manager_config(tmp_path, queue_capacity=2)
+    executor = TestExecutor(config, release)
+    service = DatasetService(config, executor)
+    first = service.submit(build_request("one"), "key-one")
+    assert executor.entered.wait(5)
+    # One build is active, none in queue yet
+    h = service.health()
+    assert h["active_build_id"] == first["dataset_build_id"]
+    assert h["queue_depth"] == 0
+    service.submit(build_request("two"), "key-two")
+    h2 = service.health()
+    assert h2["queue_depth"] == 1
+    release.set()
+    service.close()
+
+
+def test_c3_storage_not_writable_reports_degraded(tmp_path, monkeypatch):
+    """C3: if storage probe fails, status=degraded and storage_writable=False."""
+    config = manager_config(tmp_path)
+    service = DatasetService(config, TestExecutor(config), start_worker=False)
+
+    def fail_probe():
+        raise OSError("read-only")
+
+    monkeypatch.setattr(service, "_probe_storage_writable", lambda: False)
+    h = service.health()
+    assert h["status"] == "degraded"
+    assert h["storage_writable"] is False
+    service.close()
+
+
+def test_c4_registering_does_not_make_health_degraded(tmp_path):
+    """C4: a build in REGISTERING state does NOT degrade health (no Backend dependency)."""
+    config = manager_config(tmp_path)
+    executor = TestExecutor(config)
+    service = DatasetService(config, executor)
+    created = service.submit(build_request(), "reg-key")
+    wait_for_state(service, created["dataset_build_id"], DatasetBuildState.REGISTERING)
+    # Service is still locally healthy even though Backend ACK hasn't arrived
+    h = service.health()
+    assert h["status"] == "ok"
+    assert h["storage_writable"] is True
+    service.close()

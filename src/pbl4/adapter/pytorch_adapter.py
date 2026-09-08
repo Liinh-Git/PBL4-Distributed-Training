@@ -2,6 +2,7 @@
 
 import math
 from collections.abc import Callable
+from typing import Literal
 
 import numpy as np
 import torch
@@ -22,9 +23,17 @@ class PyTorchAdapter(ModelAdapter):
         model: nn.Module,
         loss: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
         manifest_schema_version: int = 1,
+        *,
+        local_gradient_reduction: Literal["mean"],
     ):
+        if local_gradient_reduction != "mean":
+            raise ValueError(
+                f"PyTorchAdapter only supports local_gradient_reduction='mean' for "
+                f"correct distributed weighted aggregation; got {local_gradient_reduction!r}"
+            )
         self._model = model
         self._loss = loss
+        self._local_gradient_reduction = local_gradient_reduction
         specs = []
         offset = 0
         for tensor_id, (name, parameter) in enumerate(model.named_parameters()):

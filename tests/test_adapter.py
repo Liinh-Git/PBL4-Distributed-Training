@@ -9,10 +9,16 @@ from pbl4.adapter.base import TensorBundle
 from pbl4.adapter.models.small_cnn import SmallCNN
 from pbl4.adapter.pytorch_adapter import PyTorchAdapter
 
+F = functional  # short alias used in Issue-D tests
+
 
 def adapter() -> PyTorchAdapter:
     torch.manual_seed(7)
-    return PyTorchAdapter(SmallCNN(), functional.cross_entropy)
+    return PyTorchAdapter(
+        SmallCNN(),
+        functional.cross_entropy,
+        local_gradient_reduction="mean",
+    )
 
 
 def batch() -> tuple[np.ndarray, np.ndarray]:
@@ -113,3 +119,99 @@ def test_small_cnn_is_only_a_multi_step_smoke_model():
         )
         model_adapter.apply_parameters(updated)
     assert np.isfinite(model_adapter.compute_loss_and_gradients(x, y).loss)
+
+
+# ── Issue D: Local gradient mean-semantics tests ───────────────────────────────
+
+
+def test_d1_local_gradient_matches_mean_reduction_reference():
+    """D1: adapter gradient equals direct PyTorch mean-loss backward."""
+    torch.manual_seed(99)
+    model = SmallCNN()
+    model_adapter = PyTorchAdapter(
+        model,
+        F.cross_entropy,
+        local_gradient_reduction="mean",
+    )
+    x, y = batch()
+
+    result = model_adapter.compute_loss_and_gradients(x, y)
+
+    # Recompute reference with explicit mean reduction
+    device = next(model.parameters()).device
+    inputs = torch.from_numpy(np.ascontiguousarray(x)).to(device)
+    labels = torch.from_numpy(np.ascontiguousarray(y)).to(device)
+    model.zero_grad(set_to_none=True)
+    ref_loss = F.cross_entropy(model(inputs), labels, reduction="mean")
+    ref_loss.backward()
+    ref_grads = [p.grad.detach().cpu().numpy().copy() for p in model.parameters()]
+
+    for actual, reference in zip(result.bundle.tensors, ref_grads, strict=True):
+        np.testing.assert_allclose(actual, reference, rtol=1e-5, atol=1e-6)
+
+
+def test_d2_non_mean_reduction_is_rejected():
+    """D2: summed local gradients cannot be configured as the distributed contract."""
+
+    def summed_loss(logits, labels):
+        return F.cross_entropy(logits, labels, reduction="sum")
+
+    with pytest.raises(ValueError, match="mean"):
+        PyTorchAdapter(
+            SmallCNN(),
+            summed_loss,
+            local_gradient_reduction="sum",
+        )
+
+    PyTorchAdapter(
+        SmallCNN(),
+        F.cross_entropy,
+        local_gradient_reduction="mean",
+    )
+
+
+def test_d3_weighted_aggregation_equivalence():
+    """D3: worker mean-gradients + Runtime weighted average == full-batch gradient."""
+    torch.manual_seed(77)
+    model = SmallCNN()
+
+    rng = np.random.default_rng(42)
+    b1 = 2
+    b2 = 3
+    x_full = rng.normal(size=(b1 + b2, 3, 2, 2)).astype(np.float32)
+    y_full = rng.integers(0, 10, size=b1 + b2).astype(np.int64)
+
+    # Worker-1 gradient on batch 1
+    adapter1 = PyTorchAdapter(
+        model,
+        F.cross_entropy,
+        local_gradient_reduction="mean",
+    )
+    grad1 = adapter1.compute_loss_and_gradients(x_full[:b1], y_full[:b1])
+
+    # Worker-2 gradient on batch 2 (same model params — share weight via export/apply)
+    adapter2 = PyTorchAdapter(
+        model,
+        F.cross_entropy,
+        local_gradient_reduction="mean",
+    )
+    grad2 = adapter2.compute_loss_and_gradients(x_full[b1:], y_full[b1:])
+
+    # Runtime weighted aggregation: g = sum(b_i * g_i) / sum(b_i)
+    total = b1 + b2
+    agg = [
+        (b1 * g1 + b2 * g2) / total
+        for g1, g2 in zip(grad1.bundle.tensors, grad2.bundle.tensors, strict=True)
+    ]
+
+    # Reference: single full-batch mean gradient
+    device = next(model.parameters()).device
+    model.zero_grad(set_to_none=True)
+    inputs = torch.from_numpy(np.ascontiguousarray(x_full)).to(device)
+    labels = torch.from_numpy(np.ascontiguousarray(y_full)).to(device)
+    ref_loss = F.cross_entropy(model(inputs), labels, reduction="mean")
+    ref_loss.backward()
+    ref_grads = [p.grad.detach().cpu().numpy().copy() for p in model.parameters()]
+
+    for actual, reference in zip(agg, ref_grads, strict=True):
+        np.testing.assert_allclose(actual, reference, rtol=1e-4, atol=1e-5)

@@ -217,3 +217,71 @@ def test_manifest_rejects_unsafe_paths_and_noncanonical_json():
         )
     with pytest.raises(ValueError):
         DatasetManifest(b'{"z": 1, "a": 2}')
+
+
+# ── Issue E: DatasetStorage path validation tests ─────────────────────────────
+
+
+def test_e_storage_safe_rejects_invalid_paths(tmp_path):
+    """E: _safe() rejects absolute paths, '..', NUL, backslash, and empty paths."""
+    storage = DatasetStorage(tmp_path)
+    published = storage.materialize(config(), samples())
+
+    # Absolute path
+    with pytest.raises(ValueError, match="absolute"):
+        storage.resolve_artifact(published, "/absolute/path")
+
+    # Parent-directory traversal
+    with pytest.raises(ValueError):
+        storage.resolve_artifact(published, "../outside")
+
+    with pytest.raises(ValueError):
+        storage.resolve_artifact(published, "shards/../../outside")
+
+    # Backslash (cross-platform traversal ambiguity)
+    with pytest.raises(ValueError, match="forward-slash"):
+        storage.resolve_artifact(published, "shards\\..\\outside")
+
+    # NUL byte
+    with pytest.raises(ValueError, match="NUL"):
+        storage.resolve_artifact(published, "shards/\x00batch")
+
+    # Windows drive letter (lexical check)
+    with pytest.raises(ValueError, match="absolute"):
+        storage.resolve_artifact(published, "C:/something")
+
+    # Empty string
+    with pytest.raises(ValueError):
+        storage.resolve_artifact(published, "")
+
+
+def test_e_storage_safe_accepts_canonical_paths(tmp_path):
+    """E: _safe() accepts legitimate canonical artifact relative paths."""
+    storage = DatasetStorage(tmp_path)
+    published = storage.materialize(config(), samples())
+    root = DatasetStorage(tmp_path).verify(published).value
+    shard_ref = root["shards"][0]["relative_shard_manifest_path"]
+    # Should not raise
+    path = storage.resolve_artifact(published, shard_ref)
+    assert path.is_file()
+
+
+# ── Issue F: Existing build full verification before reuse ────────────────────
+
+
+def test_f_corrupt_existing_build_detected_before_reuse(tmp_path):
+    """F: materialize() fast-path detects corruption before returning existing build."""
+    storage = DatasetStorage(tmp_path)
+    published = storage.materialize(config(), samples())
+
+    # Corrupt a batch artifact while leaving root manifest untouched
+    root = DatasetStorage(tmp_path).verify(published).value
+    shard_path = published.directory / root["shards"][0]["relative_shard_manifest_path"]
+    shard = __import__("json").loads(shard_path.read_bytes())
+    batch_path = published.directory / shard["batches"][0]["relative_filename"]
+    original = batch_path.read_bytes()
+    batch_path.write_bytes(original[:-1] + bytes([original[-1] ^ 0xFF]))
+
+    # Call materialize again with same build identity/config
+    with pytest.raises(ValueError):
+        storage.materialize(config(), samples())

@@ -209,7 +209,8 @@ def test_abort_during_checkpoint_cannot_commit_or_resurrect(tmp_path, monkeypatc
             aborting.result(timeout=2)
         finally:
             release.set()
-        assert writing.result(timeout=5).state == "COMPLETE"
+        # Physical write may have completed, but Attempt was aborted → must NOT be published
+        assert writing.result(timeout=5) is None
     assert coordinator.snapshot()["state"] == "ABORTED"
     assert coordinator.snapshot()["step_state"] != "COMMITTED"
     assert "committed_at" not in coordinator.snapshot()["milestones"]
@@ -297,3 +298,127 @@ def test_abort_linearizes_after_inflight_canonical_update(tmp_path, monkeypatch)
     assert state["step_state"] != "COMMITTED"
     with pytest.raises(ValueError):
         coordinator.checkpoint()
+
+
+# ── Issue A: Checkpoint / Abort + Failure race tests ─────────────────────────
+
+
+def test_a1_abort_during_checkpoint_write_does_not_publish(tmp_path, monkeypatch):
+    """A1: abort() during blocking write → checkpoint not published as latest."""
+    coordinator, manager = running(tmp_path)
+    op, _ = updated(coordinator)
+    applied(coordinator, op)
+    before = coordinator.snapshot()
+    entered, release = Event(), Event()
+    original = manager.write
+
+    def delayed(snapshot):
+        entered.set()
+        assert release.wait(5)
+        return original(snapshot)
+
+    monkeypatch.setattr(manager, "write", delayed)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        writing = pool.submit(coordinator.checkpoint)
+        assert entered.wait(5)
+        pool.submit(coordinator.abort).result(timeout=2)
+        release.set()
+        result = writing.result(timeout=5)
+    # Physical file may exist but must NOT be the published recovery point
+    assert result is None
+    snap = coordinator.snapshot()
+    assert snap["state"] == "ABORTED"
+    assert snap["step_state"] != "COMMITTED"
+    assert "committed_at" not in snap["milestones"]
+    assert snap["latest_checkpoint_id"] is None
+    assert snap["epoch"] == before["epoch"]
+    assert snap["next_batch_ordinal"] == before["next_batch_ordinal"]
+
+    events = coordinator._events.drain()
+    assert all(event.event_type != "checkpoint.saved" for event in events)
+
+
+def test_a2_worker_failure_during_checkpoint_write_does_not_publish(tmp_path, monkeypatch):
+    """A2: worker_failed() during blocking write → checkpoint not published."""
+    coordinator, manager = running(tmp_path)
+    op, _ = updated(coordinator)
+    applied(coordinator, op)
+    before = coordinator.snapshot()
+    entered, release = Event(), Event()
+    original = manager.write
+
+    def delayed(snapshot):
+        entered.set()
+        assert release.wait(5)
+        return original(snapshot)
+
+    monkeypatch.setattr(manager, "write", delayed)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        writing = pool.submit(coordinator.checkpoint)
+        assert entered.wait(5)
+        coordinator.worker_failed(0, 1)
+        release.set()
+        result = writing.result(timeout=5)
+    assert result is None
+    snap = coordinator.snapshot()
+    assert snap["state"] == "FAILED"
+    assert snap["step_state"] != "COMMITTED"
+    assert "committed_at" not in snap["milestones"]
+    assert snap["latest_checkpoint_id"] is None
+    assert snap["epoch"] == before["epoch"]
+    assert snap["next_batch_ordinal"] == before["next_batch_ordinal"]
+
+    events = coordinator._events.drain()
+    assert all(event.event_type != "checkpoint.saved" for event in events)
+
+
+def test_a3_normal_checkpoint_still_publishes_and_advances_cursor(tmp_path):
+    """A3: normal (no race) checkpoint still publishes and advances cursor."""
+    coordinator, manager = running(tmp_path)
+    op, _ = updated(coordinator)
+    applied(coordinator, op)
+    complete = coordinator.checkpoint()
+    assert complete is not None
+    assert complete.state == "COMPLETE"
+    snap = coordinator.snapshot()
+    assert snap["state"] == "RUNNING"
+    assert snap["step_state"] == "COMMITTED"
+    assert snap["latest_checkpoint_id"] == complete.snapshot.checkpoint_id
+    assert "committed_at" in snap["milestones"]
+    assert manager.verify(complete).model.model_version == 8
+
+
+def test_a4_previous_valid_checkpoint_survives_aborted_step(tmp_path, monkeypatch):
+    """A4: good checkpoint from step N remains valid after step N+1 is aborted."""
+    coordinator, manager = running(tmp_path)
+    # Step 0: normal path
+    op0, _ = updated(coordinator)
+    applied(coordinator, op0)
+    previous = coordinator.checkpoint()
+    assert previous is not None
+
+    # Step 1: abort during write
+    op1, _ = updated(coordinator)
+    applied(coordinator, op1)
+    entered, release = Event(), Event()
+    original = manager.write
+
+    def delayed(snapshot):
+        entered.set()
+        assert release.wait(5)
+        return original(snapshot)
+
+    monkeypatch.setattr(manager, "write", delayed)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        writing = pool.submit(coordinator.checkpoint)
+        assert entered.wait(5)
+        pool.submit(coordinator.abort).result(timeout=2)
+        release.set()
+        result = writing.result(timeout=5)
+
+    assert result is None
+    snap = coordinator.snapshot()
+    assert snap["state"] == "ABORTED"
+    assert snap["latest_checkpoint_id"] == previous.snapshot.checkpoint_id
+    # The previous step's checkpoint is still independently verifiable
+    assert manager.verify(previous).model.model_version == 8

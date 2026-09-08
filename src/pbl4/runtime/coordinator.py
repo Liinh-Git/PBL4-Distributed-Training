@@ -247,12 +247,17 @@ class Coordinator:
                         return None
                 continue
             with self._lock:
+                if (
+                    self._state != "RUNNING"
+                    or self._step_state != "CHECKPOINTING"
+                    or self._operation != operation
+                    or not self._policy.synchronization_complete
+                ):
+                    return None
                 self._latest = complete
                 self._checkpoint_state = "COMPLETE"
                 self._milestones["checkpoint_completed_at"] = _now()
                 self._event("checkpoint.saved", {"checkpoint_id": snapshot.checkpoint_id})
-                if self._state != "RUNNING":
-                    return complete
                 if not self._checkpoint_policy.allows_commit(
                     synchronization_complete=self._policy.synchronization_complete,
                     checkpoint_state=self._checkpoint_state,

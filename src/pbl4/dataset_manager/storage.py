@@ -45,11 +45,29 @@ class DatasetStorage:
 
     @staticmethod
     def _safe(root: Path, relative: str) -> Path:
-        candidate = (root / Path(*relative.split("/"))).resolve()
+        # Explicitly reject invalid path syntax before any OS resolution.
+        if not isinstance(relative, str) or not relative:
+            raise ValueError("Artifact relative path must be a nonempty string")
+        # Reject NUL bytes (null-byte injection)
+        if "\x00" in relative:
+            raise ValueError("Artifact path contains NUL byte")
+        # Reject backslashes (cross-platform traversal ambiguity)
+        if "\\" in relative:
+            raise ValueError("Artifact path must use forward-slash separators")
+        # Reject absolute paths (leading /, Windows drive letters like C:)
+        if relative.startswith("/") or (len(relative) >= 2 and relative[1] == ":"):
+            raise ValueError("Artifact path must be relative, not absolute")
+        # Reject '..' segments to prevent parent-directory traversal
+        parts = relative.split("/")
+        if any(part == ".." for part in parts):
+            raise ValueError("Artifact path must not contain '..' segments")
+        if any(part == "" for part in parts):
+            raise ValueError("Artifact path must not contain empty segments")
+        candidate = (root / Path(*parts)).resolve()
         if candidate == root or root not in candidate.parents:
             raise ValueError("Artifact path escapes build root")
         current = root
-        for part in Path(*relative.split("/")).parts:
+        for part in parts:
             current = current / part
             if current.is_symlink():
                 raise ValueError("Artifact path crosses a symlink")
@@ -122,6 +140,8 @@ class DatasetStorage:
                 existing = self.load(config.dataset_build_id)
                 if existing.dataset_manifest_hash != root.sha256:
                     raise ValueError("Immutable Dataset Build content conflict")
+                # Full tree verification before declaring existing build reusable.
+                self.verify(existing)
                 return existing
             os.rename(workspace, final)
             self._fsync_directory(self._root)

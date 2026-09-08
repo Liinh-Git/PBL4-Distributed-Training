@@ -99,7 +99,7 @@ def create_app(
 
     @app.get("/healthz")
     def health(request: Request):
-        return _success(request, {"status": "ok"})
+        return _success(request, dataset_service.health())
 
     @app.post("/api/v1/dataset-builds")
     def create_build(

@@ -15,6 +15,7 @@ class StepAssignment:
     operation_id: int
     step_id: int
     input_model_version: int
+    shard_id: int
     batch_id: int
     batch_ordinal: int
     expected_sample_count: int
@@ -30,6 +31,7 @@ class StepAssignment:
                     self.operation_id,
                     self.step_id,
                     self.input_model_version,
+                    self.shard_id,
                     self.batch_id,
                     self.batch_ordinal,
                 )
@@ -78,6 +80,11 @@ class TrainingLoop:
                 raise ValueError("Previous operation awaits canonical parameters")
             if assignment.input_model_version != self._model_version:
                 raise ValueError("STEP_START uses the wrong local model version")
+            if assignment.shard_id != self._shard.key.shard_id:
+                raise ValueError(
+                    f"STEP_START shard assignment {assignment.shard_id!r} does not match "
+                    f"locally cached shard {self._shard.key.shard_id!r}"
+                )
             x, y, sample_ids = self._shard.load_batch(assignment.batch_id)
             if len(x) != assignment.expected_sample_count:
                 raise ValueError("Assigned physical batch sample count mismatch")

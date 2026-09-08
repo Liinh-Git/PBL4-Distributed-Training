@@ -1,5 +1,6 @@
 """Persistent single-worker Dataset Build orchestration and artifact state gates."""
 
+import contextlib
 import json
 import os
 import shutil
@@ -231,6 +232,40 @@ class DatasetService:
             self._condition.notify_all()
         if self._thread is not None:
             self._thread.join(timeout=5)
+
+    def health(self) -> dict[str, object]:
+        """Return a thread-safe snapshot of local Dataset Manager health.
+
+        Health reflects local service capability only.  Backend/PostgreSQL
+        reachability and REGISTERING state do NOT affect health status.
+        """
+        with self._condition:
+            queue_depth = len(self._queue)
+            active_build_id = self._active
+        storage_writable = self._probe_storage_writable()
+        status = "ok" if storage_writable else "degraded"
+        return {
+            "status": status,
+            "service": "dataset-manager",
+            "version": "1",
+            "queue_depth": queue_depth,
+            "active_build_id": active_build_id,
+            "storage_writable": storage_writable,
+        }
+
+    def _probe_storage_writable(self) -> bool:
+        """Cheap local writability probe; never holds the service lock."""
+        store = Path(self.config.store_dir)
+        probe = store / f".health-probe-{uuid4().hex}"
+        try:
+            store.mkdir(parents=True, exist_ok=True)
+            probe.write_bytes(b"")
+            return True
+        except OSError:
+            return False
+        finally:
+            with contextlib.suppress(OSError):
+                probe.unlink(missing_ok=True)
 
     def submit(self, request: dict[str, Any], idempotency_key: str) -> dict[str, object]:
         if not idempotency_key:
