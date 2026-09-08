@@ -9,7 +9,8 @@ CANONICAL REFERENCES
 OWNS
 ----
 - Wire-level protocol constants for MCP/1.
-- Frame formatting constants (e.g. 4-byte big-endian length prefix).
+- Frame formatting constants (4-byte big-endian length prefix).
+- Default maximum MCP/1 JSON body size.
 
 MUST NOT OWN
 ------------
@@ -25,9 +26,17 @@ CRITICAL V1 INVARIANTS
 
 IMPLEMENTATION STATUS
 ---------------------
-Scaffold only. Core behavior is intentionally not implemented.
+Implemented per the approved MCP/1 wire specification: each frame is a 4-byte
+unsigned big-endian json_length followed by json_length bytes of UTF-8 JSON.
 """
 
 from __future__ import annotations
 
-# MCP/1 message type and version constants TBD during implementation per canonical specification.
+# MCP/1 protocol version carried in every JSON envelope
+MCP_PROTOCOL_VERSION: int = 1
+
+# Frame format: 4-byte unsigned big-endian length prefix + UTF-8 JSON body
+LENGTH_PREFIX_BYTES: int = 4
+
+# Default upper bound for a single MCP/1 JSON body (4 MiB)
+DEFAULT_MAX_MESSAGE_BYTES: int = 4 * 1024 * 1024

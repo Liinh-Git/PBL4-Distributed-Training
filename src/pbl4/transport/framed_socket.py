@@ -25,23 +25,66 @@ CRITICAL V1 INVARIANTS
 
 IMPLEMENTATION STATUS
 ---------------------
-Scaffold only. Core behavior is intentionally not implemented.
+Implemented — Python stdlib blocking sockets only. Partial reads/writes are
+handled internally; EOF mid-stream, timeouts, and connection errors surface
+as TransportError (common.errors).
 """
 
 from __future__ import annotations
 
 import socket
 
+from pbl4.common.errors import TransportError
+
 
 def recv_exact(sock: socket.socket, n: int) -> bytes:
     """Read exactly n bytes from sock.
 
+    TCP is a byte stream: recv() may return fewer bytes than requested and
+    consecutive reads may be coalesced, so this loops until exactly n bytes
+    have been accumulated.
+
     Raises:
-        TransportError: if peer closes connection before n bytes arrive.
+        TransportError: if the peer closes the connection before n bytes
+            arrive, if the socket times out, or if the connection errors.
     """
-    raise NotImplementedError("recv_exact is not yet implemented")
+    if n < 0:
+        raise TransportError(f"recv_exact requires a non-negative byte count, got {n}")
+    chunks = bytearray()
+    while len(chunks) < n:
+        try:
+            chunk = sock.recv(n - len(chunks))
+        except TimeoutError as exc:
+            raise TransportError(
+                f"Timed out after reading {len(chunks)} of {n} expected bytes"
+            ) from exc
+        except ConnectionError as exc:
+            raise TransportError(f"Connection error while reading: {exc}") from exc
+        if not chunk:
+            raise TransportError(
+                f"Peer closed the connection after {len(chunks)} of {n} expected bytes"
+            )
+        chunks.extend(chunk)
+    return bytes(chunks)
 
 
 def send_all(sock: socket.socket, data: bytes) -> None:
-    """Send all bytes in data, handling partial writes."""
-    raise NotImplementedError("send_all is not yet implemented")
+    """Send all bytes in data, handling partial writes.
+
+    Raises:
+        TransportError: if the socket times out, the connection errors, or the
+            socket reports an empty send before all bytes are written.
+    """
+    view = memoryview(data)
+    total = len(view)
+    sent = 0
+    while sent < total:
+        try:
+            sent_now = sock.send(view[sent:])
+        except TimeoutError as exc:
+            raise TransportError(f"Timed out after sending {sent} of {total} bytes") from exc
+        except ConnectionError as exc:
+            raise TransportError(f"Connection error while sending: {exc}") from exc
+        if sent_now <= 0:
+            raise TransportError(f"Socket reported an empty send after {sent} of {total} bytes")
+        sent += sent_now
