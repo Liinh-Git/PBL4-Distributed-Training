@@ -1,42 +1,42 @@
-"""Update Plan — synchronization decision output for gradient aggregation.
+"""Immutable contribution selection for generic aggregation and update services."""
 
-CANONICAL REFERENCES
---------------------
-- 02. Mô hình miền
-- 03. Mô hình dữ liệu
-- 04. Cấu trúc mã nguồn
-- docs/IMPLEMENTATION_CONTRACT.md -> Module-to-Canonical-Document mapping
+from dataclasses import dataclass
 
-OWNS
-----
-- Immutable carrier describing synchronization decision output for an update iteration.
-- Identifying admitted worker contributions to aggregate, sample weights, and target ModelVersion.
-
-MUST NOT OWN
-------------
-- Aggregation execution (owned by Aggregator).
-- Update arithmetic (owned by SgdUpdater).
-- Admission or barrier evaluation (owned by SynchronizationPolicy).
-
-CRITICAL V1 INVARIANTS
-----------------------
-- UpdatePlan is immutable once emitted by the synchronization policy.
-- Aggregator operates exclusively on the contribution set specified in the UpdatePlan.
-
-IMPLEMENTATION STATUS
----------------------
-Scaffold only. Core behavior is intentionally not implemented.
-"""
-
-from __future__ import annotations
+from pbl4.runtime.contribution import Contribution
 
 
+@dataclass(frozen=True, slots=True)
 class UpdatePlan:
-    """Describes the decision output of a SynchronizationPolicy.
+    attempt_id: str
+    training_strategy: str
+    operation_id: int
+    step_id: int
+    input_model_version: int
+    update_policy: str
+    contributions: tuple[Contribution, ...]
 
-    Contains which contributions to include in the next update
-    and any associated metadata.
-    """
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "contributions", tuple(self.contributions))
+        if not self.contributions:
+            raise ValueError("Empty contribution selection")
+        keys = [c.logical_key for c in self.contributions]
+        if len(set(keys)) != len(keys):
+            raise ValueError("Duplicate contribution selection")
+        for c in self.contributions:
+            if (c.attempt_id, c.operation_id, c.step_id, c.model_version) != (
+                self.attempt_id,
+                self.operation_id,
+                self.step_id,
+                self.input_model_version,
+            ):
+                raise ValueError("Contribution does not belong to this update")
+            if type(c.sample_count) is not int or c.sample_count <= 0:
+                raise ValueError("Invalid sample count")
 
-    def __init__(self) -> None:
-        raise NotImplementedError
+    @property
+    def identity(self) -> tuple[str, str, int]:
+        return self.attempt_id, self.training_strategy, self.operation_id
+
+    @property
+    def total_sample_count(self) -> int:
+        return sum(c.sample_count for c in self.contributions)

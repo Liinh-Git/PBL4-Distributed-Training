@@ -28,11 +28,24 @@ data model specifications.
 from __future__ import annotations
 
 import hashlib
+import json
 
 
 def sha256_bytes(data: bytes) -> str:
     """Return hex-encoded SHA-256 digest of raw bytes."""
     return hashlib.sha256(data).hexdigest()
+
+
+def canonical_json_bytes(value: object) -> bytes:
+    """Serialize the canonical V1 JSON representation before hashing."""
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+
+
+def sha256_canonical_json(value: object) -> str:
+    """Hash canonical JSON rather than presentation whitespace or key order."""
+    return sha256_bytes(canonical_json_bytes(value))
 
 
 def sha256_file(path: str) -> str:
