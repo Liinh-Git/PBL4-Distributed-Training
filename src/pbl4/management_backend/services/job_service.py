@@ -12,7 +12,6 @@ V1 invariants:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import uuid
@@ -20,6 +19,7 @@ from datetime import UTC, datetime
 
 import psycopg
 
+from pbl4.common.hashing import canonical_json_hash
 from pbl4.management_backend.repositories import (
     attempt_repository,
     job_repository,
@@ -53,19 +53,13 @@ def _new_job_id() -> str:
     return f"job_{uuid.uuid4().hex[:12]}"
 
 
-def _canonical_json(d: dict) -> str:
-    """Deterministic JSON serialization for hashing."""
-    return json.dumps(d, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-
-
-def _hash_contract(resolved: dict) -> str:
-    """SHA-256 of the canonical resolved contract."""
-    return hashlib.sha256(_canonical_json(resolved).encode()).hexdigest()
+hash_contract = canonical_json_hash
+_hash_contract = canonical_json_hash
 
 
 def _validate_contract(requested_contract: dict) -> list[str]:
     """Basic contract validation. Returns list of error messages (empty = valid)."""
-    errors = []
+    errors: list[str] = []
     required_fields = [
         "dataset_build_id",
         "model_id",
@@ -174,9 +168,15 @@ def update_job(
             current_state=current["state"],
         )
     if requested_contract is not None:
-        errors = _validate_contract(requested_contract)
+        rc = current["requested_contract"]
+        if isinstance(rc, str):
+            rc = json.loads(rc)
+        # Shallow merge update
+        merged_rc = {**rc, **requested_contract}
+        errors = _validate_contract(merged_rc)
         if errors:
             raise JobValidationError("Contract validation failed", errors)
+        requested_contract = merged_rc
 
     row = job_repository.update_job(
         conn,
@@ -202,7 +202,7 @@ def validate_job(conn: psycopg.Connection, job_id: str) -> dict:
 
     errors = _validate_contract(rc)
     resolved_preview = None
-    warnings = []
+    warnings: list[str] = []
 
     if not errors:
         try:
@@ -241,7 +241,7 @@ def freeze_job(conn: psycopg.Connection, job_id: str) -> dict:
         raise JobValidationError("Contract validation failed before freeze", errors)
 
     resolved = _resolve_contract(conn, rc)
-    contract_hash = _hash_contract(resolved)
+    contract_hash = canonical_json_hash(resolved)
     now = datetime.now(UTC)
 
     row = job_repository.freeze_job(
@@ -282,7 +282,6 @@ def clone_job(conn: psycopg.Connection, job_id: str, *, display_name: str | None
         requested_contract=rc,
         created_at=now,
     )
-    # Patch cloned_from_job_id (create_job doesn't set it)
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE jobs SET cloned_from_job_id = %s WHERE job_id = %s",
@@ -308,7 +307,8 @@ def archive_job(conn: psycopg.Connection, job_id: str) -> dict:
     active = attempt_repository.get_active_attempt(conn)
     if active and active.get("job_id") == job_id:
         raise JobStateError(
-            f"Job '{job_id}' has an active attempt '{active['attempt_id']}'; stop it before archiving.",
+            f"Job '{job_id}' has an active attempt '{active['attempt_id']}'; "
+            "stop it before archiving.",
             current_state=current["state"],
         )
 

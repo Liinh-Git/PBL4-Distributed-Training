@@ -152,11 +152,12 @@ def test_validate_contract_ok():
 
 
 def test_hash_contract_deterministic():
-    from pbl4.management_backend.services.job_service import _hash_contract
+    from pbl4.common.hashing import canonical_json_hash
+    from pbl4.management_backend.services.contract_resolver import hash_contract
 
     contract = {"a": 1, "b": [2, 3]}
-    h1 = _hash_contract(contract)
-    h2 = _hash_contract(contract)
+    h1 = hash_contract(contract)
+    h2 = canonical_json_hash(contract)
     assert h1 == h2
     assert len(h1) == 64  # SHA-256 hex
 

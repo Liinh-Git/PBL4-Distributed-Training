@@ -14,6 +14,7 @@ import uuid
 from datetime import UTC, datetime
 
 import psycopg
+import psycopg.errors
 
 from pbl4.management_backend.repositories import (
     attempt_repository,
@@ -24,6 +25,7 @@ from pbl4.management_backend.repositories import (
     step_repository,
     worker_session_repository,
 )
+from pbl4.management_backend.services import job_service
 
 logger = logging.getLogger(__name__)
 
@@ -59,24 +61,30 @@ def _new_command_id() -> str:
 # ─── Start / Retry / Resume ──────────────────────────────────────────────────
 
 
-def start_job(conn: psycopg.Connection, job_id: str, note: str | None = None) -> tuple[dict, dict]:
-    """Start a FRESH attempt for a READY job.
+def start_job(
+    conn: psycopg.Connection, job_id: str, note: str | None = None
+) -> tuple[dict, dict]:
+    """Start a FRESH attempt for a DRAFT or READY job.
 
+    If job is in DRAFT state, it is frozen to READY first (freeze-on-start).
     Returns (attempt_row, command_row).
     Raises AttemptConflictError if another attempt is already active (V1 constraint).
     """
     job = job_repository.get_job(conn, job_id)
     if job is None:
         raise JobNotReadyError(f"Job '{job_id}' not found.")
-    if job["state"] != "READY":
+    if job["state"] == "DRAFT":
+        job = job_service.freeze_job(conn, job_id)
+    elif job["state"] != "READY":
         raise JobNotReadyError(
-            f"Job '{job_id}' is in state '{job['state']}'; must be READY to start."
+            f"Job '{job_id}' is in state '{job['state']}'; must be DRAFT or READY to start."
         )
 
     active = attempt_repository.get_active_attempt(conn)
     if active:
         raise AttemptConflictError(
-            f"Active attempt '{active['attempt_id']}' already running (V1: only one active at a time)."
+            f"Active attempt '{active['attempt_id']}' already running "
+            "(V1: only one active at a time)."
         )
 
     attempt_id = _new_attempt_id()
@@ -98,14 +106,20 @@ def start_job(conn: psycopg.Connection, job_id: str, note: str | None = None) ->
         requested_at=now,
     )
 
-    attempt_row = attempt_repository.create_attempt(
-        conn,
-        attempt_id=attempt_id,
-        job_id=job_id,
-        contract_hash=job["contract_hash"],
-        execution_mode="FRESH",
-        created_at=now,
-    )
+    try:
+        with conn.savepoint():
+            attempt_row = attempt_repository.create_attempt(
+                conn,
+                attempt_id=attempt_id,
+                job_id=job_id,
+                contract_hash=job["contract_hash"],
+                execution_mode="FRESH",
+                created_at=now,
+            )
+    except psycopg.errors.UniqueViolation as exc:
+        raise AttemptConflictError(
+            f"Active attempt already running for job '{job_id}' (V1: only one active at a time)."
+        ) from exc
 
     logger.info("Attempt created: %s (job=%s, cmd=%s)", attempt_id, job_id, command_id)
     return attempt_row, cmd_row
@@ -135,18 +149,28 @@ def retry_job(conn: psycopg.Connection, job_id: str) -> tuple[dict, dict]:
         command_type="START_ATTEMPT",
         target_type="ATTEMPT",
         target_id=attempt_id,
-        request={"job_id": job_id, "attempt_id": attempt_id, "execution_mode": "RETRY_FROM_START"},
+        request={
+            "job_id": job_id,
+            "attempt_id": attempt_id,
+            "execution_mode": "RETRY_FROM_START",
+        },
         requested_at=now,
     )
 
-    attempt_row = attempt_repository.create_attempt(
-        conn,
-        attempt_id=attempt_id,
-        job_id=job_id,
-        contract_hash=job["contract_hash"],
-        execution_mode="RETRY_FROM_START",
-        created_at=now,
-    )
+    try:
+        with conn.savepoint():
+            attempt_row = attempt_repository.create_attempt(
+                conn,
+                attempt_id=attempt_id,
+                job_id=job_id,
+                contract_hash=job["contract_hash"],
+                execution_mode="RETRY_FROM_START",
+                created_at=now,
+            )
+    except psycopg.errors.UniqueViolation as exc:
+        raise AttemptConflictError(
+            f"Active attempt already running for job '{job_id}' (V1: only one active at a time)."
+        ) from exc
 
     logger.info("Retry attempt created: %s (job=%s)", attempt_id, job_id)
     return attempt_row, cmd_row
@@ -193,17 +217,25 @@ def resume_job(conn: psycopg.Connection, job_id: str, checkpoint_id: str) -> tup
         requested_at=now,
     )
 
-    attempt_row = attempt_repository.create_attempt(
-        conn,
-        attempt_id=attempt_id,
-        job_id=job_id,
-        contract_hash=job["contract_hash"],
-        execution_mode="RESUME",
-        resume_from_checkpoint_id=checkpoint_id,
-        created_at=now,
-    )
+    try:
+        with conn.savepoint():
+            attempt_row = attempt_repository.create_attempt(
+                conn,
+                attempt_id=attempt_id,
+                job_id=job_id,
+                contract_hash=job["contract_hash"],
+                execution_mode="RESUME",
+                resume_from_checkpoint_id=checkpoint_id,
+                created_at=now,
+            )
+    except psycopg.errors.UniqueViolation as exc:
+        raise AttemptConflictError(
+            f"Active attempt already running for job '{job_id}' (V1: only one active at a time)."
+        ) from exc
 
-    logger.info("Resume attempt created: %s (job=%s, ckpt=%s)", attempt_id, job_id, checkpoint_id)
+    logger.info(
+        "Resume attempt created: %s (job=%s, ckpt=%s)", attempt_id, job_id, checkpoint_id
+    )
     return attempt_row, cmd_row
 
 
@@ -368,7 +400,8 @@ def request_checkpoint(
         raise AttemptNotFoundError(f"Attempt '{attempt_id}' not found.")
     if attempt["state"] != "RUNNING":
         raise AttemptStateError(
-            f"Attempt '{attempt_id}' is '{attempt['state']}'; checkpoint can only be requested when RUNNING.",
+            f"Attempt '{attempt_id}' is '{attempt['state']}'; "
+            "checkpoint can only be requested when RUNNING.",
             current_state=attempt["state"],
         )
 

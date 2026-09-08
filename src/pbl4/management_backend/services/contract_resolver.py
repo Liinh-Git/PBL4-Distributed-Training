@@ -22,7 +22,10 @@ from typing import Any
 
 import psycopg
 
+from pbl4.common.hashing import canonical_json_hash
+from pbl4.management_backend.config import get_settings
 from pbl4.management_backend.repositories import dataset_build_repository
+from pbl4.management_backend.services.model_catalog import validate_model_id
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +44,7 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
 
     Raises ContractResolutionError if any field cannot be resolved.
     """
-    errors = []
+    errors: list[str] = []
 
     dsb_id = requested_contract.get("dataset_build_id", "")
     if not dsb_id:
@@ -63,13 +66,21 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
     if isinstance(preprocessing, str):
         preprocessing = json.loads(preprocessing)
 
-    # V1 expected_workers: default to 1 (will be overridden by runtime on HELLO)
-    # This can be wired to topology config when cluster management is available
-    expected_workers = 1
+    # V1 expected_workers: resolved via strategy context configuration (defaults to 3)
+    settings = get_settings()
+    expected_workers = int(
+        requested_contract.get("expected_workers") or settings.expected_workers
+    )
 
     model_id = requested_contract.get("model_id", "")
+    model_def = None
     if not model_id:
         errors.append("model_id is required.")
+    else:
+        try:
+            model_def = validate_model_id(model_id)
+        except ValueError as e:
+            errors.append(str(e))
 
     training_strategy = requested_contract.get("training_strategy", "strict_bsp")
     if training_strategy != "strict_bsp":
@@ -80,21 +91,23 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
     if errors:
         raise ContractResolutionError("Contract resolution failed", errors)
 
+    assert model_def is not None
+
     resolved: dict[str, Any] = {
         "dataset": {
             "dataset_build_id": build["dataset_build_id"],
             "dataset_manifest_hash": build.get("dataset_manifest_hash", ""),
             "task_type": _get_task_type(conn, build["dataset_id"]),
-            "input_shape": input_shape,
+            "input_shape": input_shape or model_def.get("input_shape", [3, 32, 32]),
             "dtype": build.get("dtype", "float32"),
-            "num_classes": build.get("num_classes", 0),
+            "num_classes": build.get("num_classes", model_def.get("num_classes", 10)),
             "batch_size": build["batch_size"],
             "shard_count": build["shard_count"],
             "preprocessing": preprocessing,
         },
         "model": {
             "model_id": model_id,
-            "profile": "CNN_IMAGE_CLASSIFICATION_V1",  # V1: single supported profile
+            "profile": model_def["profile"],
             "parameter_manifest_hash": "",  # populated by Runtime on HELLO
         },
         "training": {
@@ -106,11 +119,24 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
             "training_strategy": training_strategy,
             "expected_workers": expected_workers,
         },
-        "update_policy": {"type": "SGD"},
-        "checkpoint_policy": {"type": "BEST_LOSS", "schema_version": 1},
+        "update_policy": {
+            "type": model_def.get("default_optimizer", "plain_sgd_without_momentum"),
+            "learning_rate": float(requested_contract.get("learning_rate", 0.01)),
+        },
+        "checkpoint_policy": {
+            "cadence": model_def.get(
+                "default_checkpoint_cadence", "after_each_model_update_blocking"
+            ),
+            "schema_version": 1,
+        },
         "protocols": {"dtp_version": 1, "mcp_version": 1},
     }
     return resolved
+
+
+def hash_contract(resolved_contract: dict[str, Any]) -> str:
+    """Return hex-encoded SHA-256 digest of canonical resolved contract."""
+    return canonical_json_hash(resolved_contract)
 
 
 def _get_task_type(conn: psycopg.Connection, dataset_id: str) -> str:
