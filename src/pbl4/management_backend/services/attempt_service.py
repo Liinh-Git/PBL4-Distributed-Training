@@ -61,9 +61,7 @@ def _new_command_id() -> str:
 # ─── Start / Retry / Resume ──────────────────────────────────────────────────
 
 
-def start_job(
-    conn: psycopg.Connection, job_id: str, note: str | None = None
-) -> tuple[dict, dict]:
+def start_job(conn: psycopg.Connection, job_id: str, note: str | None = None) -> tuple[dict, dict]:
     """Start a FRESH attempt for a DRAFT or READY job.
 
     If job is in DRAFT state, it is frozen to READY first (freeze-on-start).
@@ -233,9 +231,7 @@ def resume_job(conn: psycopg.Connection, job_id: str, checkpoint_id: str) -> tup
             f"Active attempt already running for job '{job_id}' (V1: only one active at a time)."
         ) from exc
 
-    logger.info(
-        "Resume attempt created: %s (job=%s, ckpt=%s)", attempt_id, job_id, checkpoint_id
-    )
+    logger.info("Resume attempt created: %s (job=%s, ckpt=%s)", attempt_id, job_id, checkpoint_id)
     return attempt_row, cmd_row
 
 

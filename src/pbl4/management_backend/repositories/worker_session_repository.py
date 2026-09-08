@@ -40,9 +40,15 @@ def upsert_session(
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (session_id) DO UPDATE SET
                 state = EXCLUDED.state,
-                last_heartbeat_at = COALESCE(EXCLUDED.last_heartbeat_at, worker_sessions.last_heartbeat_at),
-                disconnected_at = COALESCE(EXCLUDED.disconnected_at, worker_sessions.disconnected_at),
-                failure_code = COALESCE(EXCLUDED.failure_code, worker_sessions.failure_code)
+                last_heartbeat_at = COALESCE(
+                    EXCLUDED.last_heartbeat_at, worker_sessions.last_heartbeat_at
+                ),
+                disconnected_at = COALESCE(
+                    EXCLUDED.disconnected_at, worker_sessions.disconnected_at
+                ),
+                failure_code = COALESCE(
+                    EXCLUDED.failure_code, worker_sessions.failure_code
+                )
             RETURNING *
             """,
             (

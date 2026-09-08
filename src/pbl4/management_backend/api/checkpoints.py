@@ -116,7 +116,6 @@ def list_checkpoints(
 )
 def get_checkpoint(checkpoint_id: str):
     with db.get_connection() as conn:
-        rows = checkpoint_repository.list_checkpoints(conn, limit=1, cursor=None)
         row = checkpoint_repository.get_checkpoint(conn, checkpoint_id)
         if row is None:
             raise HTTPException(status_code=404, detail=f"Checkpoint '{checkpoint_id}' not found.")

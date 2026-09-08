@@ -72,7 +72,9 @@ def get_command(command_id: str):
         try:
             row = command_service.get_command(conn, command_id)
         except command_service.CommandNotFoundError:
-            raise HTTPException(status_code=404, detail=f"Command '{command_id}' not found.")
+            raise HTTPException(
+                status_code=404, detail=f"Command '{command_id}' not found."
+            ) from None
 
     import json
 

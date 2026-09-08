@@ -109,20 +109,26 @@ def test_contract_resolver_rejections():
     ):
         # Unsupported model
         with pytest.raises(ContractResolutionError) as exc_info:
-            resolve(conn, {
-                "dataset_build_id": "cifar10-v1-build",
-                "model_id": "vgg16",
-                "training_strategy": "strict_bsp",
-                "epochs": 5,
-            })
+            resolve(
+                conn,
+                {
+                    "dataset_build_id": "cifar10-v1-build",
+                    "model_id": "vgg16",
+                    "training_strategy": "strict_bsp",
+                    "epochs": 5,
+                },
+            )
         assert any("Unsupported model_id" in err for err in exc_info.value.errors)
 
         # Unsupported strategy
         with pytest.raises(ContractResolutionError) as exc_info:
-            resolve(conn, {
-                "dataset_build_id": "cifar10-v1-build",
-                "model_id": "resnet18_groupnorm",
-                "training_strategy": "asynchronous_parameter_server",
-                "epochs": 5,
-            })
+            resolve(
+                conn,
+                {
+                    "dataset_build_id": "cifar10-v1-build",
+                    "model_id": "resnet18_groupnorm",
+                    "training_strategy": "asynchronous_parameter_server",
+                    "epochs": 5,
+                },
+            )
         assert any("Unsupported training_strategy" in err for err in exc_info.value.errors)

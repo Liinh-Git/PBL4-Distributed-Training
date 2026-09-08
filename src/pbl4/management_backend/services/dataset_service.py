@@ -379,9 +379,7 @@ def deprecate_build(conn: psycopg.Connection, dataset_build_id: str) -> dict:
     try:
         get_client().deprecate(dataset_build_id)
     except Exception as exc:
-        logger.warning(
-            "Downstream deprecation dispatch failed for %s: %s", dataset_build_id, exc
-        )
+        logger.warning("Downstream deprecation dispatch failed for %s: %s", dataset_build_id, exc)
 
     logger.info("Dataset build deprecated: %s", dataset_build_id)
     return row
@@ -484,9 +482,7 @@ def verify_and_register_build(
             {"registration_id": registration_id, "state": "READY"},
         )
     except Exception as exc:
-        logger.warning(
-            "Downstream registration-ack failed for %s: %s", dataset_build_id, exc
-        )
+        logger.warning("Downstream registration-ack failed for %s: %s", dataset_build_id, exc)
 
     logger.info("Dataset build registered as READY: %s", dataset_build_id)
     return updated_row or {}

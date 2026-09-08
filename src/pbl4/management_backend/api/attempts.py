@@ -301,9 +301,7 @@ def list_steps(
     cursor: Annotated[str | None, Query()] = None,
 ):
     with db.get_connection() as conn:
-        rows = attempt_service.list_attempt_steps(
-            conn, attempt_id, limit=limit + 1, cursor=cursor
-        )
+        rows = attempt_service.list_attempt_steps(conn, attempt_id, limit=limit + 1, cursor=cursor)
 
     has_more = len(rows) > limit
     next_cursor = str(rows[limit]["step_id"]) if has_more else None

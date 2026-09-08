@@ -193,9 +193,7 @@ def create_app() -> FastAPI:
         return _error_response(409, "INVALID_STATE", str(exc), request)
 
     @app.exception_handler(AttemptConflictError)
-    async def attempt_conflict_handler(
-        request: Request, exc: AttemptConflictError
-    ) -> JSONResponse:
+    async def attempt_conflict_handler(request: Request, exc: AttemptConflictError) -> JSONResponse:
         return _error_response(409, "ACTIVE_ATTEMPT_EXISTS", str(exc), request)
 
     @app.exception_handler(DatasetBuildReferenceError)

@@ -55,7 +55,6 @@ async def test_attempt_broadcast_hub_backpressure():
         items.append(q.get_nowait())
 
     has_overflow_sentinel = any(
-        isinstance(it, dict) and it.get("type") == "BACKPRESSURE_OVERFLOW"
-        for it in items
+        isinstance(it, dict) and it.get("type") == "BACKPRESSURE_OVERFLOW" for it in items
     )
     assert has_overflow_sentinel is True

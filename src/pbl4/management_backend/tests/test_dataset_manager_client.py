@@ -33,12 +33,14 @@ def test_dataset_manager_client_internal_paths():
     records = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        records.append({
-            "method": request.method,
-            "url": str(request.url),
-            "headers": dict(request.headers),
-            "content": request.content.decode("utf-8") if request.content else "",
-        })
+        records.append(
+            {
+                "method": request.method,
+                "url": str(request.url),
+                "headers": dict(request.headers),
+                "content": request.content.decode("utf-8") if request.content else "",
+            }
+        )
         if request.url.path.endswith("/manifest.json"):
             return httpx.Response(
                 200,
@@ -63,6 +65,7 @@ def test_dataset_manager_client_internal_paths():
     assert records[-1]["url"] == "http://mock-dm:8001/api/v1/dataset-builds"
     assert records[-1]["headers"]["idempotency-key"] == "idemp-123"
     import json
+
     assert json.loads(records[-1]["content"])["command_id"] == "cmd-456"
 
     # 2. get_build

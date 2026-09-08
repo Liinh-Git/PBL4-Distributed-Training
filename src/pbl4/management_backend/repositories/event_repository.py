@@ -152,9 +152,7 @@ def list_events(
     params.append(limit)
 
     order_clause = (
-        "ORDER BY runtime_event_seq ASC"
-        if after_seq is not None
-        else "ORDER BY event_id DESC"
+        "ORDER BY runtime_event_seq ASC" if after_seq is not None else "ORDER BY event_id DESC"
     )
 
     sql = f"""

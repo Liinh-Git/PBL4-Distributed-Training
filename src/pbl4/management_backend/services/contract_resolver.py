@@ -68,9 +68,7 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
 
     # V1 expected_workers: resolved via strategy context configuration (defaults to 3)
     settings = get_settings()
-    expected_workers = int(
-        requested_contract.get("expected_workers") or settings.expected_workers
-    )
+    expected_workers = int(requested_contract.get("expected_workers") or settings.expected_workers)
 
     model_id = requested_contract.get("model_id", "")
     model_def = None

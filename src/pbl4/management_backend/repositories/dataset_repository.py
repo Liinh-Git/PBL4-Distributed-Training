@@ -55,7 +55,10 @@ def list_datasets(
     limit: int = 50,
     cursor: str | None = None,
 ) -> list[dict]:
-    """List datasets with optional filters and cursor pagination (created_at DESC, dataset_id DESC)."""
+    """List datasets with optional filters and cursor pagination.
+
+    Ordered by created_at DESC, dataset_id DESC.
+    """
     conditions = []
     params: list[Any] = []
 
