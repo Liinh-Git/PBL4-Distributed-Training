@@ -9,10 +9,12 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from pbl4.management_backend.schemas.common import StrictWriteModel
+
 # ─── Dataset ──────────────────────────────────────────────────────────────────
 
 
-class DatasetCreateRequest(BaseModel):
+class DatasetCreateRequest(StrictWriteModel):
     """POST /api/v1/datasets — DatasetSourceV1."""
 
     name: str = Field(min_length=1)
@@ -53,27 +55,27 @@ class DatasetDetail(DatasetItem):
 # ─── Dataset Build ────────────────────────────────────────────────────────────
 
 
-class NormalizationConfig(BaseModel):
+class NormalizationConfig(StrictWriteModel):
     mean: list[float]
     std: list[float]
 
 
-class PreprocessingConfig(BaseModel):
+class PreprocessingConfig(StrictWriteModel):
     input_shape: list[int] | None = None
     normalization: NormalizationConfig | None = None
 
 
-class DatasetBuildCreateRequest(BaseModel):
+class DatasetBuildCreateRequest(StrictWriteModel):
     """POST /api/v1/dataset-builds — DatasetBuildCreateV1."""
 
     dataset_id: str
     profile: str
     batch_size: int = Field(gt=0)
     partition_seed: int = Field(ge=0)
-    preprocessing: PreprocessingConfig
+    preprocessing: PreprocessingConfig | None = None
 
 
-class DatasetBuildRebuildRequest(BaseModel):
+class DatasetBuildRebuildRequest(StrictWriteModel):
     """POST /api/v1/dataset-builds/{id}/rebuild — optional overrides."""
 
     batch_size: int | None = Field(default=None, gt=0)
@@ -81,11 +83,11 @@ class DatasetBuildRebuildRequest(BaseModel):
     preprocessing: PreprocessingConfig | None = None
 
 
-class DatasetBuildDeprecateRequest(BaseModel):
+class DatasetBuildDeprecateRequest(StrictWriteModel):
     reason: str | None = None
 
 
-class DatasetBuildDeleteRequest(BaseModel):
+class DatasetBuildDeleteRequest(StrictWriteModel):
     reason: str | None = None
 
 
@@ -107,7 +109,7 @@ class DatasetBuildListItem(BaseModel):
     profile: str
     batch_size: int
     shard_count: int
-    sample_count: int
+    sample_count: int | None = None
     created_at: datetime
     ready_at: datetime | None = None
 
@@ -122,7 +124,7 @@ class DatasetBuildDetail(BaseModel):
     batch_size: int
     shard_count: int
     partition_seed: int
-    sample_count: int
+    sample_count: int | None = None
     manifest_summary: ManifestSummary | None = None
     references: list[BuildReference] = []
     error: str | None = None

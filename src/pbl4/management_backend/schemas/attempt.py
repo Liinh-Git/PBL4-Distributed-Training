@@ -9,6 +9,8 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
+from pbl4.management_backend.schemas.common import StrictWriteModel
+
 # ─── Attempt ─────────────────────────────────────────────────────────────────
 
 
@@ -90,7 +92,7 @@ class AttemptDetail(BaseModel):
     ended_at: datetime | None = None
 
 
-class AbortAttemptRequest(BaseModel):
+class AbortAttemptRequest(StrictWriteModel):
     reason: str | None = None
 
 
@@ -103,7 +105,7 @@ class AbortAttemptResponse(BaseModel):
     attempt_id: str
 
 
-class CheckpointRequestBody(BaseModel):
+class CheckpointRequestBody(StrictWriteModel):
     reason: str | None = None
 
 

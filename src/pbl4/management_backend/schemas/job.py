@@ -10,10 +10,12 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from pbl4.management_backend.schemas.common import StrictWriteModel
+
 # ─── Requested Contract (user input) ─────────────────────────────────────────
 
 
-class RequestedContractV1(BaseModel):
+class RequestedContractV1(StrictWriteModel):
     dataset_build_id: str
     model_id: str
     epochs: int = Field(ge=1)
@@ -56,11 +58,13 @@ class ResolvedSynchronization(BaseModel):
 
 class ResolvedUpdatePolicy(BaseModel):
     type: str
+    learning_rate: float | None = None
 
 
 class ResolvedCheckpointPolicy(BaseModel):
-    type: str
-    schema_version: int
+    cadence: str | None = None
+    type: str | None = None
+    schema_version: int = 1
 
 
 class ResolvedProtocols(BaseModel):
@@ -73,31 +77,35 @@ class ResolvedContractV1(BaseModel):
     model: ResolvedModel
     training: ResolvedTraining
     synchronization: ResolvedSynchronization
-    update_policy: ResolvedUpdatePolicy
-    checkpoint_policy: ResolvedCheckpointPolicy
-    protocols: ResolvedProtocols
+    update_policy: ResolvedUpdatePolicy | None = None
+    checkpoint_policy: ResolvedCheckpointPolicy | None = None
+    protocols: ResolvedProtocols | None = None
 
 
 # ─── Request Bodies ───────────────────────────────────────────────────────────
 
 
-class JobCreateRequest(BaseModel):
+class JobCreateRequest(StrictWriteModel):
     display_name: str = Field(min_length=1)
     description: str = ""
     requested_contract: RequestedContractV1
 
 
-class JobPatchRequest(BaseModel):
+class JobPatchRequest(StrictWriteModel):
     display_name: str | None = None
     description: str | None = None
     requested_contract: dict[str, Any] | None = None
 
 
-class JobStartRequest(BaseModel):
+class JobCloneRequest(StrictWriteModel):
+    display_name: str | None = None
+
+
+class JobStartRequest(StrictWriteModel):
     note: str | None = None
 
 
-class JobResumeRequest(BaseModel):
+class JobResumeRequest(StrictWriteModel):
     checkpoint_id: str
 
 
