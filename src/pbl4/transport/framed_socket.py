@@ -37,7 +37,7 @@ import socket
 from pbl4.common.errors import TransportError
 
 
-def recv_exact(sock: socket.socket, n: int) -> bytes:
+def recv_exact(sock: socket.socket, n_bytes: int) -> bytes:
     """Read exactly n bytes from sock.
 
     TCP is a byte stream: recv() may return fewer bytes than requested and
@@ -48,21 +48,21 @@ def recv_exact(sock: socket.socket, n: int) -> bytes:
         TransportError: if the peer closes the connection before n bytes
             arrive, if the socket times out, or if the connection errors.
     """
-    if n < 0:
-        raise TransportError(f"recv_exact requires a non-negative byte count, got {n}")
+    if n_bytes < 0:
+        raise TransportError(f"recv_exact requires a non-negative byte count, got {n_bytes}")
     chunks = bytearray()
-    while len(chunks) < n:
+    while len(chunks) < n_bytes:
         try:
-            chunk = sock.recv(n - len(chunks))
+            chunk = sock.recv(n_bytes - len(chunks))
         except TimeoutError as exc:
             raise TransportError(
-                f"Timed out after reading {len(chunks)} of {n} expected bytes"
+                f"Timed out after reading {len(chunks)} of {n_bytes} expected bytes"
             ) from exc
         except ConnectionError as exc:
             raise TransportError(f"Connection error while reading: {exc}") from exc
         if not chunk:
             raise TransportError(
-                f"Peer closed the connection after {len(chunks)} of {n} expected bytes"
+                f"Peer closed the connection after {len(chunks)} of {n_bytes} expected bytes"
             )
         chunks.extend(chunk)
     return bytes(chunks)

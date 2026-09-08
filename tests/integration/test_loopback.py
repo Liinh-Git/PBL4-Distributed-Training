@@ -14,7 +14,12 @@ import unittest
 from pbl4.management_backend.gateways.runtime_gateway import RuntimeGateway
 from pbl4.management_protocol.messages import McpEnvelope
 from pbl4.protocol.codec import DTPFrame
-from pbl4.protocol.constants import MESSAGE_TYPE_PARAMETER_META
+from pbl4.protocol.constants import (
+    MESSAGE_TYPE_HELLO,
+    MESSAGE_TYPE_HELLO_ACK,
+    UNASSIGNED_WORKER_ID,
+    UNBOUND_SESSION,
+)
 from pbl4.protocol.messages import build_frame
 from pbl4.runtime.management_endpoint import (
     ManagementConnection,
@@ -41,34 +46,42 @@ class ParameterServerLoopbackTest(unittest.TestCase):
     def test_two_workers_hello_and_reply_over_tcp(self) -> None:
         received: queue.Queue[DTPFrame] = queue.Queue()
         server = ParameterServer("127.0.0.1", 0)
+        next_worker_rank = 0
 
         def on_frame(connection: WorkerConnection, frame: DTPFrame) -> None:
+            nonlocal next_worker_rank
             received.put(frame)
-            reply = build_frame(
-                MESSAGE_TYPE_PARAMETER_META,
-                b"canonical-params",
-                session_id=frame.header.session_id,
-                worker_id=frame.header.worker_id,
-            )
-            server.send_frame(connection, reply)
+            if frame.header.message_type == MESSAGE_TYPE_HELLO:
+                assigned_session_id = 100 + next_worker_rank
+                assigned_worker_id = next_worker_rank
+                next_worker_rank += 1
+                reply = build_frame(
+                    MESSAGE_TYPE_HELLO_ACK,
+                    session_id=assigned_session_id,
+                    worker_id=assigned_worker_id,
+                )
+                server.send_frame(connection, reply)
 
         server.on_frame = on_frame
         server.start()
         port = server.bound_address[1]
         workers: list[WorkerClient] = []
         try:
-            for index in range(2):
+            for _ in range(2):
                 worker = WorkerClient("127.0.0.1", port, timeout=5.0)
                 worker.connect()
-                worker.send_hello(session_id=100 + index)
+                worker.send_hello()
                 workers.append(worker)
             for index, worker in enumerate(workers):
                 reply = worker.recv_frame()
-                self.assertEqual(reply.header.message_type, MESSAGE_TYPE_PARAMETER_META)
+                self.assertEqual(reply.header.message_type, MESSAGE_TYPE_HELLO_ACK)
                 self.assertEqual(reply.header.session_id, 100 + index)
-                self.assertEqual(reply.payload, b"canonical-params")
-            sessions = {received.get(timeout=5.0).header.session_id for _ in range(2)}
-            self.assertEqual(sessions, {100, 101})
+                self.assertEqual(reply.header.worker_id, index)
+            hello_frames = [received.get(timeout=5.0) for _ in range(2)]
+            for frame in hello_frames:
+                self.assertEqual(frame.header.message_type, MESSAGE_TYPE_HELLO)
+                self.assertEqual(frame.header.session_id, UNBOUND_SESSION)
+                self.assertEqual(frame.header.worker_id, UNASSIGNED_WORKER_ID)
         finally:
             for worker in workers:
                 worker.close()
@@ -88,7 +101,7 @@ class ParameterServerLoopbackTest(unittest.TestCase):
             # A healthy worker must still be served after the violation.
             worker = WorkerClient("127.0.0.1", port, timeout=5.0)
             worker.connect()
-            worker.send_hello(session_id=1)
+            worker.send_hello()
             worker.close()
         finally:
             server.stop()

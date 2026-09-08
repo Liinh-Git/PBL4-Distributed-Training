@@ -44,6 +44,7 @@ from pbl4.protocol.constants import (
     NO_OPERATION,
     NO_TENSOR,
     UNASSIGNED_WORKER_ID,
+    UNBOUND_SESSION,
 )
 from pbl4.protocol.messages import build_frame
 from pbl4.transport.framed_socket import recv_exact, send_all
@@ -95,17 +96,18 @@ class WorkerClient:
             max_payload_bytes=max_payload_bytes,
         )
 
-    def send_hello(self, session_id: int, payload: bytes = b"") -> None:
+    def send_hello(self, payload: bytes = b"") -> None:
         """Send a HELLO registration frame.
 
-        worker_id carries the UNASSIGNED_WORKER_ID sentinel; the Runtime
-        assigns the logical rank during the registration handshake.
+        Carries wire sentinels: session_id=UNBOUND_SESSION (0) and
+        worker_id=UNASSIGNED_WORKER_ID. The Runtime assigns active session
+        and logical worker rank in HELLO_ACK.
         """
         self.send_frame(
             build_frame(
                 MESSAGE_TYPE_HELLO,
                 payload,
-                session_id=session_id,
+                session_id=UNBOUND_SESSION,
                 worker_id=UNASSIGNED_WORKER_ID,
                 operation_id=NO_OPERATION,
                 tensor_id=NO_TENSOR,

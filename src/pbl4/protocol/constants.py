@@ -11,7 +11,7 @@ OWNS
 - Fixed wire protocol constants (MAGIC, HEADER_SIZE_BYTES, HEADER_BYTE_ORDER).
 - Fixed wire field sizing (OPERATION_ID_BYTES).
 - DTP/1 protocol version (DTP_PROTOCOL_VERSION).
-- Wire sentinel values for unset worker/tensor/chunk/operation fields.
+- Wire sentinel values for unset session/worker/tensor/chunk/operation fields.
 - DTP/1 message type codes.
 - Defensive default upper bound for a single DTP payload.
 
@@ -57,7 +57,9 @@ OPERATION_ID_BYTES: int = 8
 # DTP/1 protocol version carried in every frame header
 DTP_PROTOCOL_VERSION: int = 1
 
-# ─── Sentinel values (maximum uint32/uint64 representations) ────────────────
+# ─── Sentinel values (maximum uint32/uint64 representations / unbound zero) ───
+# Sentinel: session_id before the Runtime assigns an active session
+UNBOUND_SESSION: int = 0
 # Sentinel: worker_id before the Runtime assigns a logical rank
 UNASSIGNED_WORKER_ID: int = 0xFFFFFFFF
 # Sentinel: the frame does not target a logical training operation
@@ -67,14 +69,32 @@ NO_TENSOR: int = 0xFFFFFFFF
 # Sentinel: chunk_index does not refer to a concrete chunk
 NO_CHUNK: int = 0xFFFFFFFF
 
-# ─── Message type codes ─────────────────────────────────────────────────────
-# Fixed by the approved DTP/1 wire specification:
+# ─── Canonical DTP/1 message type codes (03. Mô hình dữ liệu) ────────────────
+# Handshake & Dataset Provisioning (0x0001 - 0x0005)
 MESSAGE_TYPE_HELLO: int = 0x0001
+MESSAGE_TYPE_HELLO_ACK: int = 0x0002
+MESSAGE_TYPE_DATASET_ASSIGNMENT: int = 0x0003
+MESSAGE_TYPE_SHARD_READY: int = 0x0004
+MESSAGE_TYPE_SHARD_ERROR: int = 0x0005
+
+# Model Initialization & Parameter Distribution (0x0010 - 0x0014)
+MESSAGE_TYPE_MODEL_MANIFEST: int = 0x0010
+MESSAGE_TYPE_MODEL_INIT: int = 0x0011
+MESSAGE_TYPE_PARAMETER_META: int = 0x0012
+MESSAGE_TYPE_PARAMETER_CHUNK: int = 0x0013
+MESSAGE_TYPE_READY: int = 0x0014
+
+# Training Loop & Gradient Synchronization (0x0020 - 0x0024)
+MESSAGE_TYPE_STEP_START: int = 0x0020
 MESSAGE_TYPE_GRADIENT_META: int = 0x0021
-# Provisional pending canonical confirmation (centralized for one-line fixes):
-MESSAGE_TYPE_DATASET_ASSIGNMENT: int = 0x0010
-MESSAGE_TYPE_STEP_START: int = 0x0011
-MESSAGE_TYPE_PARAMETER_META: int = 0x0022
+MESSAGE_TYPE_GRADIENT_CHUNK: int = 0x0022
+MESSAGE_TYPE_GRADIENT_END: int = 0x0023
+MESSAGE_TYPE_PARAMETER_APPLIED: int = 0x0024
+
+# Lifecycle, Telemetry & Control (0x0030 - 0x0032, 0x00FF)
+MESSAGE_TYPE_HEARTBEAT: int = 0x0030
+MESSAGE_TYPE_EPOCH_END: int = 0x0031
+MESSAGE_TYPE_STOP: int = 0x0032
 MESSAGE_TYPE_ERROR: int = 0x00FF
 
 # Defensive upper bound for a single DTP payload on the wire (provisional).

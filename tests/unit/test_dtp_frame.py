@@ -16,6 +16,7 @@ from pbl4.protocol.constants import (
     NO_OPERATION,
     NO_TENSOR,
     UNASSIGNED_WORKER_ID,
+    UNBOUND_SESSION,
 )
 from pbl4.protocol.header import DTPHeader
 from pbl4.protocol.messages import build_frame, message_type_name
@@ -23,7 +24,7 @@ from pbl4.transport.framed_socket import recv_exact
 from tests.unit.fake_sockets import ScriptedRecvSocket
 
 # Golden bytes for a HELLO header per the approved DTP/1 wire specification:
-# magic b"DPB4", version 1, type 0x0001, flags 0, session_id 1,
+# magic b"DPB4", version 1, type 0x0001, flags 0, session_id UNBOUND_SESSION (0),
 # worker_id UNASSIGNED (0xFFFFFFFF), operation_id NO_OPERATION (2^64-1),
 # tensor_id/chunk_index sentinels, payload_length 0, payload_crc32 0.
 GOLDEN_HELLO_HEADER = bytes.fromhex(
@@ -31,7 +32,7 @@ GOLDEN_HELLO_HEADER = bytes.fromhex(
     "0001"  # protocol_version 1
     "0001"  # message_type HELLO
     "00000000"  # flags 0
-    "0000000000000001"  # session_id 1
+    "0000000000000000"  # session_id UNBOUND_SESSION (0)
     "FFFFFFFF"  # worker_id UNASSIGNED_WORKER_ID
     "FFFFFFFFFFFFFFFF"  # operation_id NO_OPERATION
     "FFFFFFFF"  # tensor_id NO_TENSOR
@@ -47,7 +48,7 @@ def make_header(**overrides: object) -> DTPHeader:
         "protocol_version": 1,
         "message_type": MESSAGE_TYPE_HELLO,
         "flags": 0,
-        "session_id": 1,
+        "session_id": UNBOUND_SESSION,
         "worker_id": UNASSIGNED_WORKER_ID,
         "operation_id": NO_OPERATION,
         "tensor_id": NO_TENSOR,
@@ -70,7 +71,7 @@ class DTPHeaderTest(unittest.TestCase):
         self.assertEqual(header.protocol_version, 1)
         self.assertEqual(header.message_type, MESSAGE_TYPE_HELLO)
         self.assertEqual(header.flags, 0)
-        self.assertEqual(header.session_id, 1)
+        self.assertEqual(header.session_id, UNBOUND_SESSION)
         self.assertEqual(header.worker_id, UNASSIGNED_WORKER_ID)
         self.assertEqual(header.operation_id, NO_OPERATION)
         self.assertEqual(header.tensor_id, NO_TENSOR)
@@ -145,13 +146,13 @@ class DTPFrameTest(unittest.TestCase):
         self.assertEqual(decoded.payload, b"0123456789")
 
     def test_empty_payload_carries_zero_crc(self) -> None:
-        frame = build_frame(MESSAGE_TYPE_HELLO, b"", session_id=1)
+        frame = build_frame(MESSAGE_TYPE_HELLO, b"", session_id=UNBOUND_SESSION)
         self.assertEqual(frame.header.payload_length, 0)
         self.assertEqual(frame.header.payload_crc32, 0)
         self.assertEqual(DTPFrame.unpack(frame.pack()).payload, b"")
 
     def test_crc_mismatch_rejected(self) -> None:
-        frame = build_frame(MESSAGE_TYPE_HELLO, b"hello", session_id=1)
+        frame = build_frame(MESSAGE_TYPE_HELLO, b"hello", session_id=UNBOUND_SESSION)
         tampered = frame.header.pack() + b"hellO"
         with self.assertRaises(ProtocolError):
             DTPFrame.unpack(tampered)
@@ -184,15 +185,37 @@ class DTPFrameTest(unittest.TestCase):
         def send_fn(sock: object, data: bytes) -> None:
             captured.append(data)
 
-        frame = build_frame(MESSAGE_TYPE_HELLO, b"abc", session_id=1)
+        frame = build_frame(MESSAGE_TYPE_HELLO, b"abc", session_id=UNBOUND_SESSION)
         frame.write_to(None, send_fn)
         self.assertEqual(captured, [frame.pack()])
 
 
 class MessageTypeNameTest(unittest.TestCase):
-    def test_known_codes_map_to_names(self) -> None:
-        self.assertEqual(message_type_name(MESSAGE_TYPE_HELLO), "HELLO")
-        self.assertEqual(message_type_name(MESSAGE_TYPE_GRADIENT_META), "GRADIENT_META")
+    def test_all_19_canonical_codes_map_to_names(self) -> None:
+        expected = {
+            0x0001: "HELLO",
+            0x0002: "HELLO_ACK",
+            0x0003: "DATASET_ASSIGNMENT",
+            0x0004: "SHARD_READY",
+            0x0005: "SHARD_ERROR",
+            0x0010: "MODEL_MANIFEST",
+            0x0011: "MODEL_INIT",
+            0x0012: "PARAMETER_META",
+            0x0013: "PARAMETER_CHUNK",
+            0x0014: "READY",
+            0x0020: "STEP_START",
+            0x0021: "GRADIENT_META",
+            0x0022: "GRADIENT_CHUNK",
+            0x0023: "GRADIENT_END",
+            0x0024: "PARAMETER_APPLIED",
+            0x0030: "HEARTBEAT",
+            0x0031: "EPOCH_END",
+            0x0032: "STOP",
+            0x00FF: "ERROR",
+        }
+        self.assertEqual(len(expected), 19)
+        for code, name in expected.items():
+            self.assertEqual(message_type_name(code), name)
 
     def test_unknown_code_formats_hex(self) -> None:
         self.assertEqual(message_type_name(0x1234), "UNKNOWN(0x1234)")
