@@ -111,11 +111,8 @@ def list_attempts(
 )
 def get_attempt(attempt_id: str):
     with db.get_connection() as conn:
-        try:
-            row = attempt_service.get_attempt(conn, attempt_id)
-            workers = attempt_service.list_attempt_workers(conn, attempt_id)
-        except attempt_service.AttemptNotFoundError:
-            raise HTTPException(status_code=404, detail=f"Attempt '{attempt_id}' not found.")
+        row = attempt_service.get_attempt(conn, attempt_id)
+        workers = attempt_service.list_attempt_workers(conn, attempt_id)
     active_sessions = [w for w in workers if w["state"] not in ("DISCONNECTED", "FAILED")]
     return AttemptDetail(
         attempt_id=row["attempt_id"],
@@ -142,10 +139,7 @@ def get_attempt(attempt_id: str):
 )
 def get_attempt_snapshot(attempt_id: str):
     with db.get_connection() as conn:
-        try:
-            snap = attempt_service.get_attempt_snapshot(conn, attempt_id)
-        except attempt_service.AttemptNotFoundError:
-            raise HTTPException(status_code=404, detail=f"Attempt '{attempt_id}' not found.")
+        snap = attempt_service.get_attempt_snapshot(conn, attempt_id)
     sessions = snap.get("workers", [])
     return AttemptSnapshot(
         attempt_id=snap["attempt_id"],
@@ -167,16 +161,12 @@ def get_attempt_snapshot(attempt_id: str):
     status_code=status.HTTP_202_ACCEPTED,
     summary="Abort an active attempt",
 )
-def abort_attempt(attempt_id: str, body: AbortAttemptRequest = AbortAttemptRequest()):
+def abort_attempt(attempt_id: str, body: AbortAttemptRequest | None = None):
+    req = body or AbortAttemptRequest()
     with db.transaction() as conn:
-        try:
-            cmd_row = attempt_service.abort_attempt(conn, attempt_id, reason=body.reason)
-        except attempt_service.AttemptNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
-        except attempt_service.AttemptStateError as e:
-            raise HTTPException(status_code=409, detail=str(e))
+        cmd_row = attempt_service.abort_attempt(conn, attempt_id, reason=req.reason)
 
-    get_gateway().send_abort_attempt(str(cmd_row["command_id"]), attempt_id, reason=body.reason)
+    get_gateway().send_abort_attempt(str(cmd_row["command_id"]), attempt_id, reason=req.reason)
 
     return AbortAttemptResponse(
         command_id=str(cmd_row["command_id"]),
@@ -194,16 +184,12 @@ def abort_attempt(attempt_id: str, body: AbortAttemptRequest = AbortAttemptReque
     status_code=status.HTTP_202_ACCEPTED,
     summary="Request an out-of-schedule checkpoint",
 )
-def request_checkpoint(attempt_id: str, body: CheckpointRequestBody = CheckpointRequestBody()):
+def request_checkpoint(attempt_id: str, body: CheckpointRequestBody | None = None):
+    req = body or CheckpointRequestBody()
     with db.transaction() as conn:
-        try:
-            cmd_row = attempt_service.request_checkpoint(conn, attempt_id, reason=body.reason)
-        except attempt_service.AttemptNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
-        except attempt_service.AttemptStateError as e:
-            raise HTTPException(status_code=409, detail=str(e))
+        cmd_row = attempt_service.request_checkpoint(conn, attempt_id, reason=req.reason)
 
-    get_gateway().send_checkpoint_request(str(cmd_row["command_id"]), attempt_id)
+    get_gateway().send_checkpoint_request(str(cmd_row["command_id"]), attempt_id, reason=req.reason)
 
     return CheckpointRequestResponse(
         command_id=str(cmd_row["command_id"]),
@@ -221,14 +207,12 @@ def request_checkpoint(attempt_id: str, body: CheckpointRequestBody = Checkpoint
 )
 def get_join_spec(attempt_id: str):
     with db.get_connection() as conn:
-        try:
-            spec = attempt_service.get_join_spec(conn, attempt_id)
-        except attempt_service.AttemptNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
-        except attempt_service.AttemptStateError as e:
-            raise HTTPException(status_code=409, detail=str(e))
+        spec = attempt_service.get_join_spec(conn, attempt_id)
     if spec is None:
-        raise HTTPException(status_code=503, detail="Runtime not connected; join spec unavailable.")
+        raise HTTPException(
+            status_code=503,
+            detail="Runtime not connected; join spec unavailable.",
+        )
     return spec
 
 
@@ -239,10 +223,7 @@ def get_join_spec(attempt_id: str):
 )
 def list_workers(attempt_id: str):
     with db.get_connection() as conn:
-        try:
-            workers = attempt_service.list_attempt_workers(conn, attempt_id)
-        except attempt_service.AttemptNotFoundError:
-            raise HTTPException(status_code=404, detail=f"Attempt '{attempt_id}' not found.")
+        workers = attempt_service.list_attempt_workers(conn, attempt_id)
     items = [_session_to_item(w) for w in workers]
     return ListResponse(data=items, page=PageInfo())
 
@@ -254,10 +235,7 @@ def list_workers(attempt_id: str):
 )
 def get_worker(attempt_id: str, worker_id: int):
     with db.get_connection() as conn:
-        try:
-            detail = attempt_service.get_worker(conn, attempt_id, worker_id)
-        except attempt_service.AttemptNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+        detail = attempt_service.get_worker(conn, attempt_id, worker_id)
     active = detail.get("active_session")
     history = detail.get("historical_sessions", [])
     return WorkerDetail(
@@ -277,19 +255,18 @@ def list_attempt_events(
     severity: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
     cursor: Annotated[str | None, Query()] = None,
+    after_seq: Annotated[int | None, Query()] = None,
 ):
     with db.get_connection() as conn:
-        try:
-            rows = attempt_service.list_attempt_events(
-                conn,
-                attempt_id,
-                event_type=event_type,
-                severity=severity,
-                limit=limit + 1,
-                cursor=cursor,
-            )
-        except attempt_service.AttemptNotFoundError:
-            raise HTTPException(status_code=404, detail=f"Attempt '{attempt_id}' not found.")
+        rows = attempt_service.list_attempt_events(
+            conn,
+            attempt_id,
+            event_type=event_type,
+            severity=severity,
+            limit=limit + 1,
+            cursor=cursor,
+            after_seq=after_seq,
+        )
 
     has_more = len(rows) > limit
     next_cursor = str(rows[limit]["event_id"]) if has_more else None
@@ -324,12 +301,9 @@ def list_steps(
     cursor: Annotated[str | None, Query()] = None,
 ):
     with db.get_connection() as conn:
-        try:
-            rows = attempt_service.list_attempt_steps(
-                conn, attempt_id, limit=limit + 1, cursor=cursor
-            )
-        except attempt_service.AttemptNotFoundError:
-            raise HTTPException(status_code=404, detail=f"Attempt '{attempt_id}' not found.")
+        rows = attempt_service.list_attempt_steps(
+            conn, attempt_id, limit=limit + 1, cursor=cursor
+        )
 
     has_more = len(rows) > limit
     next_cursor = str(rows[limit]["step_id"]) if has_more else None
@@ -357,10 +331,7 @@ def list_steps(
 )
 def get_step(attempt_id: str, step_id: int):
     with db.get_connection() as conn:
-        try:
-            step = attempt_service.get_step(conn, attempt_id, step_id)
-        except attempt_service.AttemptNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+        step = attempt_service.get_step(conn, attempt_id, step_id)
     worker_steps = step.get("worker_steps", [])
     return StepDetail(
         training_strategy=step["training_strategy"],

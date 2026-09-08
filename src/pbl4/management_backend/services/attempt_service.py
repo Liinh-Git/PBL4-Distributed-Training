@@ -330,6 +330,7 @@ def list_attempt_events(
     severity: str | None = None,
     limit: int = 100,
     cursor: str | None = None,
+    after_seq: int | None = None,
 ) -> list[dict]:
     _ = get_attempt(conn, attempt_id)
     return event_repository.list_events(
@@ -339,6 +340,7 @@ def list_attempt_events(
         severity=severity,
         limit=limit,
         cursor=cursor,
+        after_seq=after_seq,
     )
 
 

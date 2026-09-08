@@ -70,6 +70,42 @@ def insert_event(
     return _row_to_dict(row) if row else None
 
 
+def get_event_by_seq(
+    conn: psycopg.Connection, attempt_id: str, runtime_event_seq: int
+) -> dict | None:
+    """Fetch an event for an attempt by its runtime_event_seq."""
+    sql = "SELECT * FROM events WHERE attempt_id = %s AND runtime_event_seq = %s"
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, (attempt_id, runtime_event_seq))
+        row = cur.fetchone()
+    return _row_to_dict(row) if row else None
+
+
+def get_latest_runtime_event_seq(conn: psycopg.Connection, attempt_id: str) -> int | None:
+    """Fetch the maximum runtime_event_seq recorded for an attempt."""
+    sql = "SELECT MAX(runtime_event_seq) FROM events WHERE attempt_id = %s"
+    with conn.cursor() as cur:
+        cur.execute(sql, (attempt_id,))
+        row = cur.fetchone()
+        return row[0] if row and row[0] is not None else None
+
+
+def list_events_after_seq(
+    conn: psycopg.Connection, attempt_id: str, after_seq: int, limit: int = 500
+) -> list[dict]:
+    """Fetch runtime events for an attempt with seq strictly greater than after_seq, ascending."""
+    sql = """
+        SELECT * FROM events
+        WHERE attempt_id = %s AND runtime_event_seq > %s
+        ORDER BY runtime_event_seq ASC
+        LIMIT %s
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, (attempt_id, after_seq, limit))
+        rows = cur.fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
 def list_events(
     conn: psycopg.Connection,
     *,
@@ -80,6 +116,7 @@ def list_events(
     severity: str | None = None,
     limit: int = 100,
     cursor: str | None = None,
+    after_seq: int | None = None,
 ) -> list[dict]:
     conditions = []
     params: list[Any] = []
@@ -99,6 +136,9 @@ def list_events(
     if severity:
         conditions.append("severity = %s")
         params.append(severity)
+    if after_seq is not None:
+        conditions.append("runtime_event_seq > %s")
+        params.append(after_seq)
 
     if cursor:
         try:
@@ -111,10 +151,16 @@ def list_events(
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(limit)
 
+    order_clause = (
+        "ORDER BY runtime_event_seq ASC"
+        if after_seq is not None
+        else "ORDER BY event_id DESC"
+    )
+
     sql = f"""
         SELECT * FROM events
         {where}
-        ORDER BY event_id DESC
+        {order_clause}
         LIMIT %s
     """
     with conn.cursor(row_factory=dict_row) as cur:
