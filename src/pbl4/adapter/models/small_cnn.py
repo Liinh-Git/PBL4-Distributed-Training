@@ -1,16 +1,17 @@
-"""Small CNN architecture for lightweight integration and testing.
+"""Small smoke-test CNN. This is not the canonical reference workload."""
 
-Canonical responsibility:
-- Constructs a lightweight convolutional network for fast verification runs.
+from torch import nn
 
-Important boundary:
-- Minimal model implementation; parameter layouts strictly follow ParameterManifest.
-- Runtime remains framework-neutral.
 
-Status:
-- Scaffold only.
-"""
+class SmallCNN(nn.Module):
+    def __init__(self, num_classes: int = 10):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 4, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1, 1)),
+        )
+        self.classifier = nn.Linear(4, num_classes)
 
-from __future__ import annotations
-
-# Model definition TBD during implementation.
+    def forward(self, inputs):
+        return self.classifier(self.features(inputs).flatten(1))
