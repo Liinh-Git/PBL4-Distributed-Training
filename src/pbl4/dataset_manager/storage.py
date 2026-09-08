@@ -168,6 +168,20 @@ class DatasetStorage:
             raise ValueError("Artifact is not a regular published file")
         return path
 
+    def purge(self, dataset_build_id: str, dataset_manifest_hash: str) -> None:
+        """Remove one verified immutable build selected by its full identity."""
+        published = self.load(dataset_build_id)
+        if published.dataset_manifest_hash != dataset_manifest_hash:
+            raise ValueError("Refusing to purge a Dataset Build with mismatched identity")
+        self.verify(published)
+        expected = self._root / self._directory_key(dataset_build_id)
+        if published.directory.resolve() != expected or expected.parent != self._root:
+            raise ValueError("Refusing to purge outside the Dataset Store")
+        shutil.rmtree(expected)
+        if expected.exists():
+            raise OSError("Dataset Build artifact removal did not complete")
+        self._fsync_directory(self._root)
+
     def _verify_tree(self, directory: Path, expected_root_hash: str) -> DatasetManifest:
         manifest_path = self._safe(directory, "dataset-manifest.json")
         manifest = DatasetManifest(manifest_path.read_bytes())

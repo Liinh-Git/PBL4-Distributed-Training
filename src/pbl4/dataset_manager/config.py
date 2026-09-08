@@ -23,6 +23,8 @@ class DatasetManagerConfig:
     max_source_bytes: int = 512 * 1024 * 1024
     queue_capacity: int = 8
     download_chunk_size: int = 1024 * 1024
+    public_base_url: str = "http://127.0.0.1:9200"
+    source_download_timeout_seconds: float = 30.0
     log_level: str = "INFO"
 
     def __post_init__(self) -> None:
@@ -32,6 +34,8 @@ class DatasetManagerConfig:
             or self.max_source_bytes <= 0
             or self.queue_capacity <= 0
             or self.download_chunk_size <= 0
+            or not self.public_base_url.startswith(("http://", "https://"))
+            or self.source_download_timeout_seconds <= 0
         ):
             raise ValueError("Invalid Dataset Manager configuration")
         if Path(self.store_dir).resolve() == Path(self.temp_dir).resolve():

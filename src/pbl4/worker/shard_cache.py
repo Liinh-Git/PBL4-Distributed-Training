@@ -3,7 +3,9 @@
 import io
 import json
 import os
+import re
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -22,7 +24,7 @@ class ShardCacheKey:
     def __post_init__(self) -> None:
         if (
             not self.dataset_build_id
-            or len(self.dataset_manifest_hash) != 64
+            or re.fullmatch(r"[0-9a-f]{64}", self.dataset_manifest_hash) is None
             or type(self.shard_id) is not int
             or self.shard_id < 0
         ):
@@ -155,7 +157,19 @@ class ShardCache:
                 if existing.root_manifest != root or existing.shard_manifest != shard:
                     raise ValueError("Immutable cache entry conflict")
                 return existing
-            os.rename(workspace, final)
+            for attempt in range(5):
+                try:
+                    os.rename(workspace, final)
+                    break
+                except OSError as exc:
+                    if final.exists():
+                        existing = self.load(key)
+                        if existing.root_manifest != root or existing.shard_manifest != shard:
+                            raise ValueError("Immutable cache entry conflict") from exc
+                        return existing
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.01 * (2**attempt))
             cached = CachedShard(key, final, root, shard)
             self.verify(cached)
             return cached

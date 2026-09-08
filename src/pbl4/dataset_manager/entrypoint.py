@@ -1,44 +1,36 @@
-"""Console entrypoint for pbl4-dataset-manager process.
-
-Canonical responsibility:
-- Parses CLI arguments and launches the Dataset Manager service.
-
-Important boundary:
-- Operates strictly in the dataset provisioning plane; does NOT launch Parameter Server.
-
-Status:
-- Scaffold only. Core process loop is intentionally not implemented.
-"""
-
-from __future__ import annotations
+"""Console entrypoint for the independent Dataset Manager HTTP process."""
 
 import argparse
-import sys
+
+import uvicorn
+
+from pbl4.dataset_manager.app import create_app
+from pbl4.dataset_manager.config import DatasetManagerConfig
 
 
 def main() -> None:
-    """Entrypoint for pbl4-dataset-manager process."""
     parser = argparse.ArgumentParser(
         prog="pbl4-dataset-manager",
         description="PBL4 Dataset Ingestion, Partitioning, and Serving Service.",
     )
-    parser.add_argument(
-        "--host",
-        type=str,
-        default="127.0.0.1",
-        help="Host interface to bind (default: 127.0.0.1)",
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=9200)
+    parser.add_argument("--store-dir", default="var/datasets")
+    parser.add_argument("--temp-dir", default="var/datasets-tmp")
+    parser.add_argument("--queue-capacity", type=int, default=8)
+    parser.add_argument("--public-base-url")
+    args = parser.parse_args()
+    config = DatasetManagerConfig(
+        host=args.host,
+        port=args.port,
+        store_dir=args.store_dir,
+        temp_dir=args.temp_dir,
+        queue_capacity=args.queue_capacity,
+        public_base_url=args.public_base_url or f"http://{args.host}:{args.port}",
     )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=None,
-        help="Port to listen on.",
+    uvicorn.run(
+        create_app(config), host=config.host, port=config.port, log_level=config.log_level.lower()
     )
-    parser.parse_args()
-
-    # Dataset Manager service loop is pending implementation
-    print("pbl4-dataset-manager: service implementation pending", file=sys.stderr)
-    sys.exit(1)
 
 
 if __name__ == "__main__":
