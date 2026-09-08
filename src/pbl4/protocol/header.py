@@ -45,6 +45,7 @@ from pbl4.protocol.constants import (
     KNOWN_MESSAGE_TYPES,
     MAGIC,
     MESSAGE_TYPE_DATASET_ASSIGNMENT,
+    MESSAGE_TYPE_ERROR,
     MESSAGE_TYPE_GRADIENT_CHUNK,
     MESSAGE_TYPE_GRADIENT_END,
     MESSAGE_TYPE_GRADIENT_META,
@@ -122,6 +123,25 @@ class DTPHeader:
                 raise ProtocolError("HELLO must carry the canonical unbound identity sentinels")
             if bound_identity is not None:
                 raise ProtocolError("HELLO is invalid after a connection is bound")
+            return
+
+        if self.message_type == MESSAGE_TYPE_ERROR and self.session_id == UNBOUND_SESSION:
+            expected = (
+                UNASSIGNED_WORKER_ID,
+                NO_OPERATION,
+                NO_TENSOR,
+                NO_CHUNK,
+            )
+            actual = (
+                self.worker_id,
+                self.operation_id,
+                self.tensor_id,
+                self.chunk_index,
+            )
+            if actual != expected or bound_identity is not None:
+                raise ProtocolError(
+                    "Pre-registration ERROR must use the canonical unbound identity sentinels"
+                )
             return
 
         if self.session_id == UNBOUND_SESSION or self.worker_id == UNASSIGNED_WORKER_ID:

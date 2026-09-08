@@ -222,8 +222,7 @@ def check_pyproject_dependencies() -> bool:
                 for forbidden in FORBIDDEN_RUNTIME_DEPENDENCIES:
                     if forbidden in dep_lower:
                         found_forbidden.append(
-                            f"{forbidden} "
-                            f"(found in non-persistence extra '{extra}': '{dep}')"
+                            f"{forbidden} (found in non-persistence extra '{extra}': '{dep}')"
                         )
 
     # 3. Check dependency groups: ONLY whitelisted groups can declare migration tooling

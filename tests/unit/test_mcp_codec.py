@@ -5,17 +5,18 @@ from __future__ import annotations
 import json
 import struct
 import unittest
-from dataclasses import dataclass, field
 
 from pbl4.common.errors import ProtocolError, TransportError
 from pbl4.management_protocol.codec import McpCodec
 from pbl4.management_protocol.messages import (
     CommandResult,
     CorrelationTracker,
+    DatasetBuildResolved,
     McpEnvelope,
+    MgmtHelloAck,
     RuntimeEvent,
     StartAttempt,
-    runtime_event_envelope,
+    StateSnapshot,
 )
 from pbl4.transport.framed_socket import recv_exact
 from tests.unit.fake_sockets import ScriptedRecvSocket
@@ -127,6 +128,94 @@ class FramingAndEnvelopeTest(unittest.TestCase):
 
 
 class PayloadSchemaTest(unittest.TestCase):
+    def test_optional_dataset_catalog_and_command_timing(self) -> None:
+        DatasetBuildResolved.from_dict(
+            {
+                "dataset_build_id": "d",
+                "state": "BUILDING",
+                "manifest_uri": "file:///manifest.json",
+                "artifact_base_url": "file:///artifacts",
+                "dataset_manifest_hash": "hash",
+                "profile": "CNN_IMAGE_CLASSIFICATION_V1",
+                "shard_count": 2,
+                "batch_size": 8,
+            }
+        )
+        CommandResult.from_dict(
+            {
+                "command_id": "c",
+                "target_type": "ATTEMPT",
+                "target_id": "a",
+                "status": "SUCCEEDED",
+                "result_code": "DONE",
+                "message": "done",
+            }
+        )
+
+    def test_hello_ack_event_cursor_is_conditional_on_active_attempt(self) -> None:
+        base = {
+            "runtime_instance_id": "runtime-1",
+            "selected_protocol_version": 1,
+            "runtime_boot_time": "2026-09-08T00:00:00Z",
+            "active_attempt_id": None,
+            "active_job_id": None,
+            "active_attempt_state": None,
+            "snapshot_required": True,
+        }
+        MgmtHelloAck.from_dict(base)
+        active = dict(base)
+        active.update(active_attempt_id="a", active_job_id="j", active_attempt_state="RUNNING")
+        with self.assertRaises(ProtocolError):
+            MgmtHelloAck.from_dict(active)
+        active["last_runtime_event_seq"] = 0
+        MgmtHelloAck.from_dict(active)
+
+    def test_snapshot_workers_require_base_and_allow_diagnostics(self) -> None:
+        base = {
+            "runtime_instance_id": "runtime-1",
+            "active_job_id": None,
+            "active_attempt_id": None,
+            "attempt_state": None,
+            "training_strategy": None,
+            "checkpoint_policy": None,
+            "epoch": None,
+            "current_operation_id": None,
+            "current_batch_ordinal": None,
+            "model_version": None,
+            "workers": [
+                {
+                    "worker_id": 0,
+                    "session_id": "7",
+                    "node_label": "node",
+                    "state": "READY",
+                    "last_heartbeat_at": None,
+                    "shard_id": 0,
+                    "local_model_version": 0,
+                    "diagnostic": {"queue_depth": 1},
+                }
+            ],
+            "strategy_state": {},
+            "checkpoint_state": None,
+            "latest_checkpoint_id": None,
+            "recovery_cursor": {},
+            "dataset_build_id": None,
+            "dataset_manifest_hash": None,
+            "last_runtime_event_seq": 0,
+            "management_event_gap_count": 0,
+            "captured_at": "2026-09-08T00:00:00Z",
+        }
+        StateSnapshot.from_dict(base)
+        for mutation in ("missing", "wrong"):
+            bad = dict(base)
+            worker = dict(base["workers"][0])
+            if mutation == "missing":
+                del worker["state"]
+            else:
+                worker["worker_id"] = "zero"
+            bad["workers"] = [worker]
+            with self.subTest(mutation=mutation), self.assertRaises(ProtocolError):
+                StateSnapshot.from_dict(bad)
+
     def test_command_result_status_and_noop_rules(self) -> None:
         base = {
             "command_id": "c",
@@ -210,7 +299,7 @@ class PayloadSchemaTest(unittest.TestCase):
                 RuntimeEvent.from_dict(bad)
 
 
-class CorrelationAndMappingTest(unittest.TestCase):
+class CorrelationTest(unittest.TestCase):
     def test_unsolicited_event_can_interleave_request_and_result(self) -> None:
         tracker = CorrelationTracker()
         request = envelope("GET_STATE", message_id="request")
@@ -261,27 +350,47 @@ class CorrelationAndMappingTest(unittest.TestCase):
         )
         self.assertEqual(tracker.accept(response), "GET_STATE")
 
-    def test_runtime_event_mapper_preserves_semantics(self) -> None:
-        @dataclass
-        class FakeEvent:
-            attempt_id: str = "a"
-            job_id: str = "j"
-            runtime_event_seq: int = 2
-            event_type: str = "model.updated"
-            event_schema_version: int = 1
-            occurred_at: str = "2026-09-08T00:00:00Z"
-            source_component: str = "coordinator"
-            severity: str = "INFO"
-            details: dict[str, object] = field(default_factory=lambda: {"model_version": 3})
-
-        mapped = runtime_event_envelope(
-            FakeEvent(),
-            message_id="wire",
-            sent_at="2026-09-08T00:00:01Z",
+    def test_response_type_unknown_duplicate_and_unsolicited_error(self) -> None:
+        tracker = CorrelationTracker()
+        tracker.register_request(envelope("GET_STATE", message_id="request"))
+        wrong = envelope(
+            "COMMAND_RESULT",
+            {
+                "command_id": "c",
+                "target_type": "ATTEMPT",
+                "target_id": "a",
+                "status": "SUCCEEDED",
+                "result_code": "DONE",
+                "message": "done",
+            },
+            correlation_id="request",
+        )
+        with self.assertRaises(ProtocolError):
+            tracker.accept(wrong)
+        error = envelope(
+            "ERROR",
+            {"code": "BAD", "category": "PROTOCOL", "message": "bad", "details": {}},
+            message_id="error",
             runtime_instance_id="runtime-1",
         )
-        self.assertEqual(mapped.payload.runtime_event_seq, 2)
-        self.assertIsNone(mapped.correlation_id)
+        self.assertIsNone(tracker.accept(error))
+        correlated = envelope(
+            "ERROR",
+            {"code": "BAD", "category": "PROTOCOL", "message": "bad", "details": {}},
+            message_id="correlated-error",
+            correlation_id="request",
+        )
+        self.assertEqual(tracker.accept(correlated), "GET_STATE")
+        with self.assertRaises(ProtocolError):
+            tracker.accept(correlated)
+        unknown = envelope(
+            "ERROR",
+            {"code": "BAD", "category": "PROTOCOL", "message": "bad", "details": {}},
+            message_id="unknown-error",
+            correlation_id="never-registered",
+        )
+        with self.assertRaises(ProtocolError):
+            tracker.accept(unknown)
 
 
 if __name__ == "__main__":

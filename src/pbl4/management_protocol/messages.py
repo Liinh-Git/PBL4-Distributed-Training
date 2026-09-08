@@ -149,9 +149,9 @@ class MgmtHelloAck(McpPayload):
         "active_attempt_id": ("nullable", "string"),
         "active_job_id": ("nullable", "string"),
         "active_attempt_state": ("nullable", "string"),
-        "last_runtime_event_seq": "nonnegative_int",
         "snapshot_required": "bool",
     }
+    OPTIONAL = {"last_runtime_event_seq": ("nullable", "nonnegative_int")}
 
     def _validate(self, data: dict[str, object]) -> None:
         if (
@@ -159,6 +159,8 @@ class MgmtHelloAck(McpPayload):
             or data["snapshot_required"] is not True
         ):
             raise ProtocolError("MGMT_HELLO_ACK must select V1 and require a snapshot")
+        if data["active_attempt_id"] is not None and data.get("last_runtime_event_seq") is None:
+            raise ProtocolError("Active Attempt MGMT_HELLO_ACK requires last_runtime_event_seq")
 
 
 class GetState(McpPayload):
@@ -192,17 +194,19 @@ class StateSnapshot(McpPayload):
 
     def _validate(self, data: dict[str, object]) -> None:
         required_worker = {
-            "worker_id",
-            "session_id",
-            "node_label",
-            "state",
-            "last_heartbeat_at",
-            "shard_id",
-            "local_model_version",
+            "worker_id": "nonnegative_int",
+            "session_id": "string",
+            "node_label": "string",
+            "state": "string",
+            "last_heartbeat_at": ("nullable", "string"),
+            "shard_id": ("nullable", "nonnegative_int"),
+            "local_model_version": ("nullable", "nonnegative_int"),
         }
         for worker in data["workers"]:
-            if not isinstance(worker, dict) or set(worker) != required_worker:
+            if not isinstance(worker, dict) or not set(required_worker) <= set(worker):
                 raise ProtocolError("STATE_SNAPSHOT worker projection has invalid fields")
+            if any(not _valid(worker[name], kind) for name, kind in required_worker.items()):
+                raise ProtocolError("STATE_SNAPSHOT worker projection has invalid field types")
             _validate_json(worker, "payload.workers")
 
 
@@ -268,9 +272,8 @@ class DatasetBuildResolved(McpPayload):
         "profile": "string",
         "shard_count": "positive_int",
         "batch_size": "positive_int",
-        "catalog_version": "positive_int",
     }
-    ENUMS = {"state": frozenset({"READY"})}
+    OPTIONAL = {"catalog_version": "positive_int"}
 
 
 class CommandResult(McpPayload):
@@ -282,6 +285,8 @@ class CommandResult(McpPayload):
         "status": "string",
         "result_code": "string",
         "message": "string",
+    }
+    OPTIONAL = {
         "attempt_id": ("nullable", "string"),
         "effective_at": "string",
         "completed_at": ("nullable", "string"),
@@ -350,6 +355,19 @@ _RESPONSE_TYPES = frozenset(
         McpMessageType.COMMAND_RESULT,
     }
 )
+
+_RESPONSES_BY_REQUEST: dict[McpMessageType, frozenset[McpMessageType]] = {
+    McpMessageType.MGMT_HELLO: frozenset({McpMessageType.MGMT_HELLO_ACK, McpMessageType.ERROR}),
+    McpMessageType.GET_STATE: frozenset({McpMessageType.STATE_SNAPSHOT, McpMessageType.ERROR}),
+    McpMessageType.RESOLVE_DATASET_BUILD: frozenset(
+        {McpMessageType.DATASET_BUILD_RESOLVED, McpMessageType.ERROR}
+    ),
+    McpMessageType.START_ATTEMPT: frozenset({McpMessageType.COMMAND_RESULT, McpMessageType.ERROR}),
+    McpMessageType.ABORT_ATTEMPT: frozenset({McpMessageType.COMMAND_RESULT, McpMessageType.ERROR}),
+    McpMessageType.REQUEST_CHECKPOINT: frozenset(
+        {McpMessageType.COMMAND_RESULT, McpMessageType.ERROR}
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -449,44 +467,19 @@ class CorrelationTracker:
         self._pending[envelope.message_id] = envelope.message_type
 
     def accept(self, envelope: McpEnvelope) -> str | None:
-        if envelope.message_type == McpMessageType.RUNTIME_EVENT:
+        kind = McpMessageType(envelope.message_type)
+        if kind == McpMessageType.RUNTIME_EVENT or (
+            kind == McpMessageType.ERROR and envelope.correlation_id is None
+        ):
             return None
         if envelope.correlation_id is None:
             raise ProtocolError("Expected an MCP response")
         try:
-            return self._pending.pop(envelope.correlation_id)
+            request_name = self._pending[envelope.correlation_id]
         except KeyError as exc:
             raise ProtocolError("MCP response has unknown correlation_id") from exc
-
-
-def runtime_event_envelope(
-    event: object,
-    *,
-    message_id: str,
-    sent_at: str,
-    runtime_instance_id: str,
-) -> McpEnvelope:
-    """Map a Linh-style RuntimeEvent without importing Runtime."""
-    fields = (
-        "attempt_id",
-        "job_id",
-        "runtime_event_seq",
-        "event_type",
-        "event_schema_version",
-        "occurred_at",
-        "source_component",
-        "severity",
-        "details",
-    )
-    try:
-        payload = {name: getattr(event, name) for name in fields}
-    except AttributeError as exc:
-        raise ProtocolError("RuntimeEvent mapper input is missing a canonical field") from exc
-    return McpEnvelope(
-        message_type=McpMessageType.RUNTIME_EVENT,
-        message_id=message_id,
-        correlation_id=None,
-        sent_at=sent_at,
-        runtime_instance_id=runtime_instance_id,
-        payload=payload,
-    )
+        request_kind = McpMessageType(request_name)
+        if kind not in _RESPONSES_BY_REQUEST[request_kind]:
+            raise ProtocolError(f"{kind.value} is not a valid response to {request_kind.value}")
+        del self._pending[envelope.correlation_id]
+        return request_name

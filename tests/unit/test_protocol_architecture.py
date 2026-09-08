@@ -40,6 +40,21 @@ class ProtocolArchitectureTest(unittest.TestCase):
             for module in imported_modules(path):
                 self.assertFalse(module.startswith(forbidden), f"{path}: {module}")
 
+    def test_management_protocol_has_no_runtime_backend_or_database_imports(self) -> None:
+        forbidden = (
+            "pbl4.runtime",
+            "pbl4.worker",
+            "pbl4.management_backend",
+            "pbl4.dataset_manager",
+            "torch",
+            "psycopg",
+            "asyncpg",
+            "sqlalchemy",
+        )
+        for path in python_files("src/pbl4/management_protocol"):
+            for module in imported_modules(path):
+                self.assertFalse(module.startswith(forbidden), f"{path}: {module}")
+
     def test_transport_has_no_protocol_or_training_imports(self) -> None:
         forbidden = ("pbl4.protocol", "pbl4.runtime", "pbl4.worker")
         for path in python_files("src/pbl4/transport"):

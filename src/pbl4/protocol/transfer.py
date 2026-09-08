@@ -13,7 +13,11 @@ from pbl4.common.errors import ProtocolError
 from pbl4.protocol.codec import DTPFrame
 from pbl4.protocol.constants import (
     DEFAULT_MAX_TENSOR_CHUNK_BYTES,
+    NO_OPERATION,
+    NO_TENSOR,
     TENSOR_ENCODING_FP32_LE_V1,
+    UNASSIGNED_WORKER_ID,
+    UNBOUND_SESSION,
 )
 from pbl4.protocol.messages import GradientEnd, GradientMeta, ParameterMeta
 from pbl4.protocol.parameter_manifest import ParameterManifest
@@ -26,6 +30,23 @@ class TransferIdentity:
     worker_id: int
     operation_id: int
     tensor_id: int
+
+    def __post_init__(self) -> None:
+        fields = (
+            ("session_id", self.session_id, 2**64 - 1),
+            ("worker_id", self.worker_id, 2**32 - 1),
+            ("operation_id", self.operation_id, 2**64 - 1),
+            ("tensor_id", self.tensor_id, 2**32 - 1),
+        )
+        for name, value, maximum in fields:
+            if type(value) is not int or not 0 <= value <= maximum:
+                raise ProtocolError(f"{name} is outside its DTP wire width")
+        if self.session_id == UNBOUND_SESSION:
+            raise ProtocolError("Tensor transfer requires a bound session_id")
+        if self.worker_id == UNASSIGNED_WORKER_ID:
+            raise ProtocolError("Tensor transfer requires an assigned worker_id")
+        if self.tensor_id == NO_TENSOR:
+            raise ProtocolError("Tensor transfer requires a concrete tensor_id")
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,10 +81,18 @@ class TensorTransferAssembler:
         return self._identity is not None
 
     def begin_gradient(self, identity: TransferIdentity, meta: GradientMeta) -> None:
-        self._begin("gradient", identity, meta.to_dict())
+        try:
+            self._begin("gradient", identity, meta.to_dict())
+        except ProtocolError:
+            self.discard()
+            raise
 
     def begin_parameter(self, identity: TransferIdentity, meta: ParameterMeta) -> None:
-        self._begin("parameter", identity, meta.to_dict())
+        try:
+            self._begin("parameter", identity, meta.to_dict())
+        except ProtocolError:
+            self.discard()
+            raise
 
     def _begin(self, kind: str, identity: TransferIdentity, metadata: dict[str, object]) -> None:
         if self.active:
@@ -90,6 +119,15 @@ class TensorTransferAssembler:
     def add_chunk(
         self, identity: TransferIdentity, chunk_index: int, payload: bytes
     ) -> CompletedTensorTransfer | None:
+        try:
+            return self._add_chunk(identity, chunk_index, payload)
+        except ProtocolError:
+            self.discard()
+            raise
+
+    def _add_chunk(
+        self, identity: TransferIdentity, chunk_index: int, payload: bytes
+    ) -> CompletedTensorTransfer | None:
         self._require_identity(identity)
         if type(chunk_index) is not int or chunk_index != len(self._chunks):
             raise ProtocolError("Tensor chunks must be unique, zero-based and continuous")
@@ -108,6 +146,15 @@ class TensorTransferAssembler:
         return None
 
     def end_gradient(self, identity: TransferIdentity, end: GradientEnd) -> CompletedTensorTransfer:
+        try:
+            return self._end_gradient(identity, end)
+        except ProtocolError:
+            self.discard()
+            raise
+
+    def _end_gradient(
+        self, identity: TransferIdentity, end: GradientEnd
+    ) -> CompletedTensorTransfer:
         self._require_identity(identity)
         if self._kind != "gradient":
             raise ProtocolError("GRADIENT_END cannot terminate a parameter transfer")
@@ -195,6 +242,12 @@ def build_tensor_transfer_frames(
 
     if kind not in {"gradient", "parameter"}:
         raise ProtocolError("Unknown tensor transfer kind")
+    if kind == "gradient" and not isinstance(metadata, GradientMeta):
+        raise ProtocolError("Gradient transfer requires GradientMeta")
+    if kind == "parameter" and not isinstance(metadata, ParameterMeta):
+        raise ProtocolError("Parameter transfer requires ParameterMeta")
+    if kind == "gradient" and identity.operation_id == NO_OPERATION:
+        raise ProtocolError("Gradient transfer requires a concrete operation_id")
     chunks = TensorCodec.chunk(data, chunk_size)
     if metadata.chunk_count != len(chunks) or metadata.total_bytes != len(data):
         raise ProtocolError("Metadata does not describe the immutable tensor snapshot")

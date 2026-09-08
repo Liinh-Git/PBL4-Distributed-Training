@@ -55,7 +55,9 @@ class TensorCodec:
             raise ProtocolError("Tensor byte count does not match Parameter Manifest")
         if max_model_bytes is not None and len(raw) > max_model_bytes:
             raise ProtocolError("Tensor exceeds configured max_model_bytes")
-        TensorCodec.decode(raw)
+        for (value,) in struct.iter_unpack("<f", raw):
+            if not math.isfinite(value):
+                raise ProtocolError("Canonical tensor buffer contains NaN or Infinity")
         return raw
 
     @staticmethod

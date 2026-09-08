@@ -63,9 +63,3 @@ COMMAND_RESULT_STATUSES: frozenset[str] = frozenset(
     {"ACCEPTED", "DEFERRED", "SUCCEEDED", "REJECTED", "FAILED"}
 )
 EVENT_SEVERITIES: frozenset[str] = frozenset({"INFO", "WARNING", "ERROR", "CRITICAL"})
-
-
-COMMAND_RESULT_STATUSES: frozenset[str] = frozenset(
-    {"ACCEPTED", "DEFERRED", "SUCCEEDED", "REJECTED", "FAILED"}
-)
-EVENT_SEVERITIES: frozenset[str] = frozenset({"INFO", "WARNING", "ERROR", "CRITICAL"})

@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import struct
 import threading
 import time
 import unittest
 from dataclasses import dataclass
+from unittest.mock import patch
 
 from pbl4.common.errors import ProtocolError
-from pbl4.protocol.constants import MessageType
+from pbl4.common.hashing import sha256_bytes
+from pbl4.protocol.constants import NO_OPERATION, MessageType
 from pbl4.protocol.messages import (
     DatasetAssignment,
     EpochEnd,
@@ -283,15 +284,9 @@ class MessageSchemaTest(unittest.TestCase):
 class ManifestTest(unittest.TestCase):
     def test_hash_uses_canonical_json_without_self_hash(self) -> None:
         item = manifest()
-        manual = json.dumps(
-            item.content_dict(),
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode()
-        self.assertEqual(item.parameter_manifest_hash, hashlib.sha256(manual).hexdigest())
-        self.assertNotIn(b"parameter_manifest_hash", manual)
+        canonical = item.canonical_bytes()
+        self.assertEqual(item.parameter_manifest_hash, sha256_bytes(canonical))
+        self.assertNotIn(b"parameter_manifest_hash", canonical)
         self.assertEqual(ParameterManifest.from_dict(item.to_dict()), item)
 
     def test_layout_rejections(self) -> None:
@@ -319,7 +314,8 @@ class TensorCodecTest(unittest.TestCase):
         self.assertEqual(raw, struct.pack("<fff", 1.0, -2.5, 3.25))
         self.assertEqual(TensorCodec.chunk(raw, 8), (raw[:8], raw[8:]))
         self.assertEqual(TensorCodec.decode(raw), (1.0, -2.5, 3.25))
-        self.assertEqual(TensorCodec.validate_buffer(raw, manifest()), raw)
+        with patch.object(TensorCodec, "decode", side_effect=AssertionError):
+            self.assertEqual(TensorCodec.validate_buffer(raw, manifest()), raw)
 
     def test_nonfinite_size_and_reassembly_errors(self) -> None:
         for values in ([float("nan")], [float("inf")]):
@@ -329,6 +325,9 @@ class TensorCodecTest(unittest.TestCase):
             TensorCodec.decode(b"123")
         with self.assertRaises(ProtocolError):
             TensorCodec.validate_buffer(b"1234", manifest())
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value), self.assertRaises(ProtocolError):
+                TensorCodec.validate_buffer(struct.pack("<fff", 1.0, value, 3.0), manifest())
 
 
 class TransferTest(unittest.TestCase):
@@ -384,6 +383,9 @@ class TransferTest(unittest.TestCase):
         ):
             with self.subTest(identity=identity, index=index), self.assertRaises(ProtocolError):
                 assembler.add_chunk(identity, index, self.raw[8:])
+            self.assertFalse(assembler.active)
+            assembler.begin_gradient(self.identity, self.meta)
+            assembler.add_chunk(self.identity, 0, self.raw[:8])
 
     def test_missing_overflow_manifest_mismatch_and_cleanup(self) -> None:
         assembler = self.assembler()
@@ -391,12 +393,55 @@ class TransferTest(unittest.TestCase):
         assembler.add_chunk(self.identity, 0, self.raw[:8])
         with self.assertRaises(ProtocolError):
             assembler.end_gradient(self.identity, self.end)
-        assembler.discard()
         self.assertFalse(assembler.active)
         bad = dict(self.meta.to_dict())
         bad["parameter_manifest_hash"] = "0" * 64
         with self.assertRaises(ProtocolError):
             assembler.begin_gradient(self.identity, GradientMeta.from_dict(bad))
+        self.assertFalse(assembler.active)
+        assembler.begin_gradient(self.identity, self.meta)
+        with self.assertRaises(ProtocolError):
+            assembler.add_chunk(self.identity, 0, self.raw)
+        self.assertFalse(assembler.active)
+        assembler.discard()
+        assembler.discard()
+        self.assertFalse(assembler.active)
+
+    def test_identity_and_kind_metadata_are_type_safe(self) -> None:
+        for values in (
+            (0, 0, 4, 0),
+            (7, 0xFFFFFFFF, 4, 0),
+            (7, 0, 4, 0xFFFFFFFF),
+        ):
+            with self.subTest(values=values), self.assertRaises(ProtocolError):
+                TransferIdentity(*values)
+
+    def test_frame_builder_rejects_kind_metadata_mismatch(self) -> None:
+        parameter = ParameterMeta.from_dict(payloads()[7][1])
+        with self.assertRaises(ProtocolError):
+            build_tensor_transfer_frames(
+                kind="gradient",
+                identity=self.identity,
+                metadata=parameter,
+                data=self.raw,
+                chunk_size=8,
+            )
+        with self.assertRaises(ProtocolError):
+            build_tensor_transfer_frames(
+                kind="parameter",
+                identity=self.identity,
+                metadata=self.meta,
+                data=self.raw,
+                chunk_size=8,
+            )
+        with self.assertRaises(ProtocolError):
+            build_tensor_transfer_frames(
+                kind="gradient",
+                identity=TransferIdentity(7, 0, NO_OPERATION, 0),
+                metadata=self.meta,
+                data=self.raw,
+                chunk_size=8,
+            )
 
     def test_frame_builder_parameter_has_no_end(self) -> None:
         meta = ParameterMeta.from_dict(payloads()[7][1])
@@ -438,6 +483,172 @@ class SessionAndAtomicityTest(unittest.TestCase):
         wrong_direction = build_frame(0x0002, b"{}", session_id=7, worker_id=0)
         with self.assertRaises(ProtocolError):
             validator.validate(wrong_direction.header)
+
+    def test_epoch_end_is_server_to_worker_only(self) -> None:
+        epoch = build_frame(0x0031, b"{}", session_id=7, worker_id=0)
+        runtime_inbound = ConnectionProtocolValidator(
+            phase=ConnectionPhase.WAITING_NEXT,
+            bound_identity=(7, 0),
+            inbound_peer=PeerRole.RUNTIME,
+        )
+        runtime_inbound.validate(epoch.header)
+        worker_inbound = ConnectionProtocolValidator(
+            phase=ConnectionPhase.WAITING_NEXT,
+            bound_identity=(7, 0),
+            inbound_peer=PeerRole.WORKER,
+        )
+        with self.assertRaises(ProtocolError):
+            worker_inbound.validate(epoch.header)
+
+    def test_model_init_is_worker_zero_initialization_only(self) -> None:
+        valid = build_frame(0x0011, b"{}", session_id=7, worker_id=0)
+        validator = ConnectionProtocolValidator(
+            phase=ConnectionPhase.INITIALIZING,
+            bound_identity=(7, 0),
+            inbound_peer=PeerRole.WORKER,
+        )
+        validator.validate(valid.header)
+        for peer, worker, operation, phase in (
+            (PeerRole.RUNTIME, 0, NO_OPERATION, ConnectionPhase.INITIALIZING),
+            (PeerRole.WORKER, 1, NO_OPERATION, ConnectionPhase.INITIALIZING),
+            (PeerRole.WORKER, 0, 4, ConnectionPhase.INITIALIZING),
+            (PeerRole.WORKER, 0, NO_OPERATION, ConnectionPhase.READY),
+        ):
+            candidate = ConnectionProtocolValidator(
+                phase=phase,
+                bound_identity=(7, worker),
+                inbound_peer=peer,
+            )
+            with (
+                self.subTest(peer=peer, worker=worker, phase=phase),
+                self.assertRaises(ProtocolError),
+            ):
+                frame = build_frame(
+                    0x0011,
+                    b"{}",
+                    session_id=7,
+                    worker_id=worker,
+                    operation_id=operation,
+                )
+                candidate.validate(frame.header)
+
+    def test_parameter_direction_and_chunks_inherit_meta_context(self) -> None:
+        initial_data = dict(payloads()[7][1])
+        initial_data.pop("attempt_id")
+        initial_data.pop("source_step_id")
+        initial_data.pop("model_version_out")
+        initial_data.update(transfer_purpose="model_init", model_version=0)
+        initial_meta = ParameterMeta.from_dict(initial_data)
+        initial = ConnectionProtocolValidator(
+            phase=ConnectionPhase.INITIALIZING,
+            bound_identity=(7, 0),
+            inbound_peer=PeerRole.WORKER,
+        )
+        meta_frame = build_frame(
+            0x0012,
+            b"{}",
+            session_id=7,
+            worker_id=0,
+            tensor_id=0,
+        )
+        initial.validate(meta_frame.header, initial_meta)
+        initial.validate(
+            build_frame(
+                0x0013,
+                b"x",
+                session_id=7,
+                worker_id=0,
+                tensor_id=0,
+                chunk_index=0,
+            ).header
+        )
+        with self.assertRaises(ProtocolError):
+            initial.validate(
+                build_frame(
+                    0x0013,
+                    b"x",
+                    session_id=7,
+                    worker_id=0,
+                    tensor_id=1,
+                    chunk_index=1,
+                ).header
+            )
+
+        for peer, worker, operation in (
+            (PeerRole.WORKER, 1, NO_OPERATION),
+            (PeerRole.RUNTIME, 0, NO_OPERATION),
+            (PeerRole.WORKER, 0, 4),
+        ):
+            candidate = ConnectionProtocolValidator(
+                phase=ConnectionPhase.INITIALIZING,
+                bound_identity=(7, worker),
+                inbound_peer=peer,
+            )
+            header = build_frame(
+                0x0012,
+                b"{}",
+                session_id=7,
+                worker_id=worker,
+                operation_id=operation,
+                tensor_id=0,
+            ).header
+            with (
+                self.subTest(peer=peer, worker=worker, operation=operation),
+                self.assertRaises(ProtocolError),
+            ):
+                candidate.validate(header, initial_meta)
+
+        update = ConnectionProtocolValidator(
+            phase=ConnectionPhase.WAITING_PARAMETER,
+            bound_identity=(7, 0),
+            inbound_peer=PeerRole.RUNTIME,
+        )
+        update.validate(
+            build_frame(
+                0x0012,
+                b"{}",
+                session_id=7,
+                worker_id=0,
+                operation_id=4,
+                tensor_id=0,
+            ).header,
+            ParameterMeta.from_dict(payloads()[7][1]),
+        )
+        with self.assertRaises(ProtocolError):
+            wrong_direction = ConnectionProtocolValidator(
+                phase=ConnectionPhase.WAITING_PARAMETER,
+                bound_identity=(7, 0),
+                inbound_peer=PeerRole.WORKER,
+            )
+            wrong_direction.validate(
+                build_frame(
+                    0x0012,
+                    b"{}",
+                    session_id=7,
+                    worker_id=0,
+                    operation_id=4,
+                    tensor_id=0,
+                ).header,
+                ParameterMeta.from_dict(payloads()[7][1]),
+            )
+        with self.assertRaises(ProtocolError):
+            wrong_direction.validate(
+                build_frame(
+                    0x0013,
+                    b"x",
+                    session_id=7,
+                    worker_id=0,
+                    operation_id=4,
+                    tensor_id=0,
+                    chunk_index=0,
+                ).header
+            )
+
+    def test_pre_registration_error_is_runtime_only_and_unbound(self) -> None:
+        error = build_frame(0x00FF, b"{}")
+        ConnectionProtocolValidator(inbound_peer=PeerRole.RUNTIME).validate(error.header)
+        with self.assertRaises(ProtocolError):
+            ConnectionProtocolValidator(inbound_peer=PeerRole.WORKER).validate(error.header)
 
     def test_transfer_lock_prevents_heartbeat_interleaving(self) -> None:
         order: list[int] = []

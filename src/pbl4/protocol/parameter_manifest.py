@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass
 
 from pbl4.common.errors import ProtocolError
+from pbl4.common.hashing import sha256_bytes
 from pbl4.protocol.constants import FLOAT32_BYTES, PARAMETER_MANIFEST_SCHEMA_VERSION
 
 
@@ -157,7 +157,8 @@ class ParameterManifest:
         ).encode("utf-8")
 
     def compute_hash(self) -> str:
-        return hashlib.sha256(self.canonical_bytes()).hexdigest()
+        """Hash the centralized manifest bytes with the repository SHA-256 helper."""
+        return sha256_bytes(self.canonical_bytes())
 
     def to_dict(self) -> dict[str, object]:
         return {"parameter_manifest_hash": self.parameter_manifest_hash, **self.content_dict()}
@@ -181,7 +182,7 @@ class ParameterManifest:
             allow_nan=False,
         ).encode("utf-8")
         return cls(
-            parameter_manifest_hash=hashlib.sha256(raw).hexdigest(),
+            parameter_manifest_hash=sha256_bytes(raw),
             schema_version=PARAMETER_MANIFEST_SCHEMA_VERSION,
             total_numel=content["total_numel"],
             total_bytes=content["total_bytes"],
