@@ -97,5 +97,31 @@ MESSAGE_TYPE_EPOCH_END: int = 0x0031
 MESSAGE_TYPE_STOP: int = 0x0032
 MESSAGE_TYPE_ERROR: int = 0x00FF
 
-# Defensive upper bound for a single DTP payload on the wire (provisional).
-DEFAULT_MAX_PAYLOAD_BYTES: int = 64 * 1024 * 1024
+# ─── Canonical Payload Size Bounds (03. Mô hình dữ liệu) ──────────────────────
+# Default defensive upper bounds per message class:
+# - Control / metadata JSON frames are capped at 1 MiB.
+# - Raw tensor chunk frames are capped at 1 MiB by default (negotiable/configurable).
+# - MCP/1 JSON has its own 4 MiB limit in pbl4.management_protocol.constants.
+DEFAULT_MAX_CONTROL_PAYLOAD_BYTES: int = 1 * 1024 * 1024
+DEFAULT_MAX_TENSOR_CHUNK_BYTES: int = 1 * 1024 * 1024
+
+# Deprecated legacy alias; preserved for backward compatibility.
+DEFAULT_MAX_PAYLOAD_BYTES: int = DEFAULT_MAX_CONTROL_PAYLOAD_BYTES
+
+TENSOR_CHUNK_MESSAGE_TYPES: frozenset[int] = frozenset({
+    MESSAGE_TYPE_PARAMETER_CHUNK,
+    MESSAGE_TYPE_GRADIENT_CHUNK,
+})
+
+
+def max_payload_bytes_for(
+    message_type: int,
+    *,
+    max_control_payload_bytes: int = DEFAULT_MAX_CONTROL_PAYLOAD_BYTES,
+    max_tensor_chunk_bytes: int = DEFAULT_MAX_TENSOR_CHUNK_BYTES,
+) -> int:
+    """Return the canonical defensive payload limit for a given DTP message type."""
+    if message_type in TENSOR_CHUNK_MESSAGE_TYPES:
+        return max_tensor_chunk_bytes
+    return max_control_payload_bytes
+

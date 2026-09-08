@@ -8,15 +8,20 @@ import zlib
 from pbl4.common.errors import ProtocolError
 from pbl4.protocol.codec import DTPFrame, HeaderCodec
 from pbl4.protocol.constants import (
-    DEFAULT_MAX_PAYLOAD_BYTES,
+    DEFAULT_MAX_CONTROL_PAYLOAD_BYTES,
+    DEFAULT_MAX_TENSOR_CHUNK_BYTES,
     HEADER_SIZE_BYTES,
+    MESSAGE_TYPE_GRADIENT_CHUNK,
     MESSAGE_TYPE_GRADIENT_META,
     MESSAGE_TYPE_HELLO,
+    MESSAGE_TYPE_PARAMETER_CHUNK,
+    MESSAGE_TYPE_STEP_START,
     NO_CHUNK,
     NO_OPERATION,
     NO_TENSOR,
     UNASSIGNED_WORKER_ID,
     UNBOUND_SESSION,
+    max_payload_bytes_for,
 )
 from pbl4.protocol.header import DTPHeader
 from pbl4.protocol.messages import build_frame, message_type_name
@@ -173,11 +178,109 @@ class DTPFrameTest(unittest.TestCase):
         self.assertEqual(decoded.header, frame.header)
         self.assertEqual(decoded.payload, b"0123456789")
 
-    def test_read_from_rejects_oversized_payload_before_reading_body(self) -> None:
-        header = make_header(payload_length=DEFAULT_MAX_PAYLOAD_BYTES + 1, payload_crc32=0)
+    def test_max_payload_bytes_for_resolves_canonical_bounds(self) -> None:
+        self.assertEqual(
+            max_payload_bytes_for(MESSAGE_TYPE_HELLO),
+            DEFAULT_MAX_CONTROL_PAYLOAD_BYTES,
+        )
+        self.assertEqual(
+            max_payload_bytes_for(MESSAGE_TYPE_STEP_START),
+            DEFAULT_MAX_CONTROL_PAYLOAD_BYTES,
+        )
+        self.assertEqual(
+            max_payload_bytes_for(MESSAGE_TYPE_PARAMETER_CHUNK),
+            DEFAULT_MAX_TENSOR_CHUNK_BYTES,
+        )
+        self.assertEqual(
+            max_payload_bytes_for(MESSAGE_TYPE_GRADIENT_CHUNK),
+            DEFAULT_MAX_TENSOR_CHUNK_BYTES,
+        )
+        # Custom bounds resolution
+        custom_control = 512 * 1024
+        custom_chunk = 2 * 1024 * 1024
+        self.assertEqual(
+            max_payload_bytes_for(
+                MESSAGE_TYPE_HELLO,
+                max_control_payload_bytes=custom_control,
+                max_tensor_chunk_bytes=custom_chunk,
+            ),
+            custom_control,
+        )
+        self.assertEqual(
+            max_payload_bytes_for(
+                MESSAGE_TYPE_GRADIENT_CHUNK,
+                max_control_payload_bytes=custom_control,
+                max_tensor_chunk_bytes=custom_chunk,
+            ),
+            custom_chunk,
+        )
+
+    def test_read_from_rejects_oversized_control_payload_before_reading_body(self) -> None:
+        header = make_header(
+            message_type=MESSAGE_TYPE_HELLO,
+            payload_length=DEFAULT_MAX_CONTROL_PAYLOAD_BYTES + 1,
+            payload_crc32=0,
+        )
+        sock = ScriptedRecvSocket([header.pack()])
+        with self.assertRaises(ProtocolError) as ctx:
+            DTPFrame.read_from(sock, recv_exact)
+        self.assertIn("exceeds limit", str(ctx.exception))
+
+    def test_read_from_rejects_oversized_tensor_chunk_payload_before_reading_body(self) -> None:
+        header = make_header(
+            message_type=MESSAGE_TYPE_GRADIENT_CHUNK,
+            payload_length=DEFAULT_MAX_TENSOR_CHUNK_BYTES + 1,
+            payload_crc32=0,
+        )
+        sock = ScriptedRecvSocket([header.pack()])
+        with self.assertRaises(ProtocolError) as ctx:
+            DTPFrame.read_from(sock, recv_exact)
+        self.assertIn("exceeds limit", str(ctx.exception))
+
+    def test_read_from_supports_configured_tensor_chunk_size(self) -> None:
+        custom_chunk_limit = 2 * 1024 * 1024
+        payload = b"x" * (1024 * 1024 + 100)  # > 1 MiB, but < 2 MiB
+        crc = zlib.crc32(payload) & 0xFFFFFFFF
+
+        # Tensor chunk with >1 MiB succeeds when max_tensor_chunk_bytes is 2 MiB
+        chunk_header = make_header(
+            message_type=MESSAGE_TYPE_PARAMETER_CHUNK,
+            payload_length=len(payload),
+            payload_crc32=crc,
+        )
+        sock = ScriptedRecvSocket([chunk_header.pack(), payload])
+        frame = DTPFrame.read_from(
+            sock, recv_exact, max_tensor_chunk_bytes=custom_chunk_limit
+        )
+        self.assertEqual(len(frame.payload), len(payload))
+
+        # But a control frame with >1 MiB still fails even when max_tensor_chunk_bytes is 2 MiB
+        ctrl_header = make_header(
+            message_type=MESSAGE_TYPE_STEP_START,
+            payload_length=len(payload),
+            payload_crc32=crc,
+        )
+        ctrl_sock = ScriptedRecvSocket([ctrl_header.pack()])
+        with self.assertRaises(ProtocolError):
+            DTPFrame.read_from(
+                ctrl_sock, recv_exact, max_tensor_chunk_bytes=custom_chunk_limit
+            )
+
+    def test_read_from_rejects_oversized_payload_via_explicit_override(self) -> None:
+        header = make_header(payload_length=2048, payload_crc32=0)
         sock = ScriptedRecvSocket([header.pack()])
         with self.assertRaises(ProtocolError):
             DTPFrame.read_from(sock, recv_exact, max_payload_bytes=1024)
+
+    def test_unpack_rejects_oversized_payload(self) -> None:
+        header = make_header(
+            message_type=MESSAGE_TYPE_HELLO,
+            payload_length=DEFAULT_MAX_CONTROL_PAYLOAD_BYTES + 1,
+            payload_crc32=0,
+        )
+        with self.assertRaises(ProtocolError) as ctx:
+            DTPFrame.unpack(header.pack())
+        self.assertIn("exceeds limit", str(ctx.exception))
 
     def test_write_to_pushes_exact_bytes(self) -> None:
         captured: list[bytes] = []

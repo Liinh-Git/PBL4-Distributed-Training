@@ -38,7 +38,8 @@ from __future__ import annotations
 
 from pbl4.protocol.codec import DTPFrame
 from pbl4.protocol.constants import (
-    DEFAULT_MAX_PAYLOAD_BYTES,
+    DEFAULT_MAX_CONTROL_PAYLOAD_BYTES,
+    DEFAULT_MAX_TENSOR_CHUNK_BYTES,
     MESSAGE_TYPE_HELLO,
     NO_CHUNK,
     NO_OPERATION,
@@ -88,11 +89,19 @@ class WorkerClient:
         """Serialize and send one complete DTP/1 frame."""
         frame.write_to(self._client.sock, send_all)
 
-    def recv_frame(self, *, max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES) -> DTPFrame:
+    def recv_frame(
+        self,
+        *,
+        max_control_payload_bytes: int = DEFAULT_MAX_CONTROL_PAYLOAD_BYTES,
+        max_tensor_chunk_bytes: int = DEFAULT_MAX_TENSOR_CHUNK_BYTES,
+        max_payload_bytes: int | None = None,
+    ) -> DTPFrame:
         """Read one complete DTP/1 frame (blocking until a full frame arrives)."""
         return DTPFrame.read_from(
             self._client.sock,
             recv_exact,
+            max_control_payload_bytes=max_control_payload_bytes,
+            max_tensor_chunk_bytes=max_tensor_chunk_bytes,
             max_payload_bytes=max_payload_bytes,
         )
 

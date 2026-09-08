@@ -41,7 +41,12 @@ from collections.abc import Callable
 from typing import Any
 
 from pbl4.common.errors import ProtocolError
-from pbl4.protocol.constants import DEFAULT_MAX_PAYLOAD_BYTES, HEADER_SIZE_BYTES
+from pbl4.protocol.constants import (
+    DEFAULT_MAX_CONTROL_PAYLOAD_BYTES,
+    DEFAULT_MAX_TENSOR_CHUNK_BYTES,
+    HEADER_SIZE_BYTES,
+    max_payload_bytes_for,
+)
 from pbl4.protocol.header import DTPHeader
 
 
@@ -92,32 +97,55 @@ class DTPFrame:
         sock: Any,
         recv_exact_fn: Callable[[Any, int], bytes],
         *,
-        max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+        max_control_payload_bytes: int = DEFAULT_MAX_CONTROL_PAYLOAD_BYTES,
+        max_tensor_chunk_bytes: int = DEFAULT_MAX_TENSOR_CHUNK_BYTES,
+        max_payload_bytes: int | None = None,
     ) -> DTPFrame:
         """Read one complete frame via the injected exact-byte reader.
 
-        Reads the 48-byte header first, then exactly ``payload_length`` bytes.
+        Reads the 48-byte header first, validates that the declared payload
+        length does not exceed the defensive upper bound for its message class
+        (control/metadata vs. raw tensor chunk), then reads exactly
+        ``payload_length`` bytes.
 
         Raises:
             ProtocolError: on malformed header or a payload length above the
-                configured defensive limit.
+                configured defensive limit for this message class.
             TransportError: propagated from ``recv_exact_fn`` on EOF/timeout.
         """
         header = DTPHeader.unpack(recv_exact_fn(sock, HEADER_SIZE_BYTES))
-        if header.payload_length > max_payload_bytes:
+        limit = (
+            max_payload_bytes
+            if max_payload_bytes is not None
+            else max_payload_bytes_for(
+                header.message_type,
+                max_control_payload_bytes=max_control_payload_bytes,
+                max_tensor_chunk_bytes=max_tensor_chunk_bytes,
+            )
+        )
+        if header.payload_length > limit:
             raise ProtocolError(
-                f"DTP payload_length {header.payload_length} exceeds limit {max_payload_bytes}"
+                f"DTP payload_length {header.payload_length} exceeds limit {limit} "
+                f"for message_type {header.message_type:#06x}"
             )
         payload = recv_exact_fn(sock, header.payload_length)
         return cls._assemble(header, payload)
 
     @classmethod
-    def unpack(cls, data: bytes) -> DTPFrame:
+    def unpack(
+        cls,
+        data: bytes,
+        *,
+        max_control_payload_bytes: int = DEFAULT_MAX_CONTROL_PAYLOAD_BYTES,
+        max_tensor_chunk_bytes: int = DEFAULT_MAX_TENSOR_CHUNK_BYTES,
+        max_payload_bytes: int | None = None,
+    ) -> DTPFrame:
         """Decode a complete frame from header+payload bytes, verifying integrity.
 
         Raises:
-            ProtocolError: on truncated input, malformed header, header/payload
-                length mismatch, or CRC32 mismatch.
+            ProtocolError: on truncated input, malformed header, payload length
+                exceeding class bounds, header/payload length mismatch, or CRC32
+                mismatch.
         """
         if len(data) < HEADER_SIZE_BYTES:
             raise ProtocolError(
@@ -125,6 +153,20 @@ class DTPFrame:
                 f"{HEADER_SIZE_BYTES}-byte header"
             )
         header = DTPHeader.unpack(data[:HEADER_SIZE_BYTES])
+        limit = (
+            max_payload_bytes
+            if max_payload_bytes is not None
+            else max_payload_bytes_for(
+                header.message_type,
+                max_control_payload_bytes=max_control_payload_bytes,
+                max_tensor_chunk_bytes=max_tensor_chunk_bytes,
+            )
+        )
+        if header.payload_length > limit:
+            raise ProtocolError(
+                f"DTP payload_length {header.payload_length} exceeds limit {limit} "
+                f"for message_type {header.message_type:#06x}"
+            )
         return cls._assemble(header, data[HEADER_SIZE_BYTES:])
 
     @classmethod

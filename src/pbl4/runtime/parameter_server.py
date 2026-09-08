@@ -46,7 +46,10 @@ from dataclasses import dataclass, field
 from pbl4.common.errors import ProtocolError, TransportError
 from pbl4.common.logging import get_logger
 from pbl4.protocol.codec import DTPFrame
-from pbl4.protocol.constants import DEFAULT_MAX_PAYLOAD_BYTES
+from pbl4.protocol.constants import (
+    DEFAULT_MAX_CONTROL_PAYLOAD_BYTES,
+    DEFAULT_MAX_TENSOR_CHUNK_BYTES,
+)
 from pbl4.transport.framed_socket import recv_exact, send_all
 from pbl4.transport.tcp_server import TcpServer
 
@@ -89,10 +92,14 @@ class ParameterServer:
         port: int = DEFAULT_PORT,
         *,
         on_frame: Callable[[WorkerConnection, DTPFrame], None] | None = None,
-        max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+        max_control_payload_bytes: int = DEFAULT_MAX_CONTROL_PAYLOAD_BYTES,
+        max_tensor_chunk_bytes: int = DEFAULT_MAX_TENSOR_CHUNK_BYTES,
+        max_payload_bytes: int | None = None,
     ) -> None:
         self._server = TcpServer(host, port, handler=self._handle_connection)
         self.on_frame = on_frame
+        self.max_control_payload_bytes = max_control_payload_bytes
+        self.max_tensor_chunk_bytes = max_tensor_chunk_bytes
         self.max_payload_bytes = max_payload_bytes
 
     @property
@@ -118,7 +125,11 @@ class ParameterServer:
         while True:
             try:
                 frame = DTPFrame.read_from(
-                    sock, recv_exact, max_payload_bytes=self.max_payload_bytes
+                    sock,
+                    recv_exact,
+                    max_control_payload_bytes=self.max_control_payload_bytes,
+                    max_tensor_chunk_bytes=self.max_tensor_chunk_bytes,
+                    max_payload_bytes=self.max_payload_bytes,
                 )
             except (ProtocolError, TransportError, OSError) as exc:
                 logger.info("DTP connection %s closed: %s", address, exc)
