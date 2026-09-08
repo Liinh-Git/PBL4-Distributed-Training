@@ -40,13 +40,14 @@ from __future__ import annotations
 
 import socket
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
 from pbl4.common.errors import ProtocolError, TransportError
 from pbl4.common.logging import get_logger
 from pbl4.protocol.codec import DTPFrame
 from pbl4.protocol.constants import DEFAULT_MAX_PAYLOAD_BYTES
+from pbl4.protocol.session import ConnectionPhase, ConnectionProtocolValidator, PeerRole
 from pbl4.transport.framed_socket import recv_exact, send_all
 from pbl4.transport.tcp_server import TcpServer
 
@@ -64,6 +65,13 @@ class WorkerConnection:
     sock: socket.socket
     address: tuple[str, int]
     send_lock: threading.Lock = field(default_factory=threading.Lock)
+    protocol: ConnectionProtocolValidator = field(
+        default_factory=lambda: ConnectionProtocolValidator(inbound_peer=PeerRole.WORKER)
+    )
+
+    @property
+    def bound_identity(self) -> tuple[int, int] | None:
+        return self.protocol.bound_identity
 
 
 class ParameterServer:
@@ -89,10 +97,12 @@ class ParameterServer:
         port: int = DEFAULT_PORT,
         *,
         on_frame: Callable[[WorkerConnection, DTPFrame], None] | None = None,
+        on_disconnect: Callable[[WorkerConnection, BaseException], None] | None = None,
         max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
     ) -> None:
         self._server = TcpServer(host, port, handler=self._handle_connection)
         self.on_frame = on_frame
+        self.on_disconnect = on_disconnect
         self.max_payload_bytes = max_payload_bytes
 
     @property
@@ -113,21 +123,64 @@ class ParameterServer:
         with connection.send_lock:
             frame.write_to(connection.sock, send_all)
 
+    def send_transfer(self, connection: WorkerConnection, frames: Iterable[DTPFrame]) -> None:
+        """Send META + CHUNK* [+ END] under one connection send lock."""
+        sequence = tuple(frames)
+        if len(sequence) < 2:
+            raise ValueError("A logical tensor transfer requires metadata and chunks")
+        with connection.send_lock:
+            for frame in sequence:
+                frame.write_to(connection.sock, send_all)
+
+    def bind_identity(self, connection: WorkerConnection, session_id: int, worker_id: int) -> None:
+        """Record an identity allocated by the Runtime registration owner."""
+        connection.protocol.bind(session_id, worker_id)
+
+    def set_connection_phase(self, connection: WorkerConnection, phase: ConnectionPhase) -> None:
+        """Apply a protocol phase selected by the Runtime lifecycle owner."""
+        connection.protocol.set_phase(phase)
+
     def _handle_connection(self, sock: socket.socket, address: tuple[str, int]) -> None:
         connection = WorkerConnection(sock=sock, address=address)
         while True:
             try:
                 frame = DTPFrame.read_from(
-                    sock, recv_exact, max_payload_bytes=self.max_payload_bytes
+                    sock,
+                    recv_exact,
+                    max_payload_bytes=self.max_payload_bytes,
+                    bound_identity=connection.bound_identity,
                 )
             except (ProtocolError, TransportError, OSError) as exc:
                 logger.info("DTP connection %s closed: %s", address, exc)
-                # TcpServer closes the socket; failure detection is Coordinator-owned.
+                if self.on_disconnect is not None:
+                    try:
+                        self.on_disconnect(connection, exc)
+                    except Exception:
+                        logger.exception("on_disconnect handler error for %s", address)
+                connection.protocol.close()
+                # Runtime owns the resulting Session/Attempt transition.
+                return
+            try:
+                connection.protocol.validate(frame.header)
+            except ProtocolError as exc:
+                logger.info("DTP protocol-order violation from %s: %s", address, exc)
+                if self.on_disconnect is not None:
+                    try:
+                        self.on_disconnect(connection, exc)
+                    except Exception:
+                        logger.exception("on_disconnect handler error for %s", address)
+                connection.protocol.close()
                 return
             if self.on_frame is None:
                 continue
             try:
                 self.on_frame(connection, frame)
-            except Exception:
+            except Exception as exc:
                 logger.exception("on_frame handler error for %s; closing connection", address)
+                if self.on_disconnect is not None:
+                    try:
+                        self.on_disconnect(connection, exc)
+                    except Exception:
+                        logger.exception("on_disconnect handler error for %s", address)
+                connection.protocol.close()
                 return

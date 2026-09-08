@@ -42,7 +42,29 @@ from pbl4.protocol.constants import (
     DTP_PROTOCOL_VERSION,
     HEADER_BYTE_ORDER,
     HEADER_SIZE_BYTES,
+    KNOWN_MESSAGE_TYPES,
     MAGIC,
+    MESSAGE_TYPE_DATASET_ASSIGNMENT,
+    MESSAGE_TYPE_GRADIENT_CHUNK,
+    MESSAGE_TYPE_GRADIENT_END,
+    MESSAGE_TYPE_GRADIENT_META,
+    MESSAGE_TYPE_HEARTBEAT,
+    MESSAGE_TYPE_HELLO,
+    MESSAGE_TYPE_HELLO_ACK,
+    MESSAGE_TYPE_MODEL_INIT,
+    MESSAGE_TYPE_MODEL_MANIFEST,
+    MESSAGE_TYPE_PARAMETER_APPLIED,
+    MESSAGE_TYPE_PARAMETER_CHUNK,
+    MESSAGE_TYPE_PARAMETER_META,
+    MESSAGE_TYPE_READY,
+    MESSAGE_TYPE_SHARD_ERROR,
+    MESSAGE_TYPE_SHARD_READY,
+    MESSAGE_TYPE_STEP_START,
+    NO_CHUNK,
+    NO_OPERATION,
+    NO_TENSOR,
+    UNASSIGNED_WORKER_ID,
+    UNBOUND_SESSION,
 )
 
 # Field layout (approved DTP/1 wire specification), in exact wire order:
@@ -76,6 +98,78 @@ class DTPHeader:
     chunk_index: int
     payload_length: int
     payload_crc32: int
+
+    def validate_protocol(self, bound_identity: tuple[int, int] | None = None) -> None:
+        """Validate V1 message class and generic connection identity patterns."""
+        if self.message_type not in KNOWN_MESSAGE_TYPES:
+            raise ProtocolError(f"Unknown DTP message_type 0x{self.message_type:04X}")
+        if self.message_type == MESSAGE_TYPE_HELLO:
+            expected = (
+                UNBOUND_SESSION,
+                UNASSIGNED_WORKER_ID,
+                NO_OPERATION,
+                NO_TENSOR,
+                NO_CHUNK,
+            )
+            actual = (
+                self.session_id,
+                self.worker_id,
+                self.operation_id,
+                self.tensor_id,
+                self.chunk_index,
+            )
+            if actual != expected:
+                raise ProtocolError("HELLO must carry the canonical unbound identity sentinels")
+            if bound_identity is not None:
+                raise ProtocolError("HELLO is invalid after a connection is bound")
+            return
+
+        if self.session_id == UNBOUND_SESSION or self.worker_id == UNASSIGNED_WORKER_ID:
+            raise ProtocolError("Bound DTP messages require assigned session_id and worker_id")
+        if bound_identity is not None and (self.session_id, self.worker_id) != bound_identity:
+            raise ProtocolError("DTP frame does not match the bound connection identity")
+
+        operation_messages = {
+            MESSAGE_TYPE_STEP_START,
+            MESSAGE_TYPE_GRADIENT_META,
+            MESSAGE_TYPE_GRADIENT_CHUNK,
+            MESSAGE_TYPE_GRADIENT_END,
+            MESSAGE_TYPE_PARAMETER_APPLIED,
+        }
+        if self.message_type in operation_messages and self.operation_id == NO_OPERATION:
+            raise ProtocolError("Operation-bound DTP message uses NO_OPERATION")
+        no_operation_messages = {
+            MESSAGE_TYPE_HELLO_ACK,
+            MESSAGE_TYPE_DATASET_ASSIGNMENT,
+            MESSAGE_TYPE_SHARD_READY,
+            MESSAGE_TYPE_SHARD_ERROR,
+            MESSAGE_TYPE_MODEL_MANIFEST,
+            MESSAGE_TYPE_MODEL_INIT,
+            MESSAGE_TYPE_READY,
+            MESSAGE_TYPE_HEARTBEAT,
+        }
+        if self.message_type in no_operation_messages and self.operation_id != NO_OPERATION:
+            raise ProtocolError("Non-operation DTP control message must use NO_OPERATION")
+
+        tensor_messages = {
+            MESSAGE_TYPE_PARAMETER_META,
+            MESSAGE_TYPE_PARAMETER_CHUNK,
+            MESSAGE_TYPE_GRADIENT_META,
+            MESSAGE_TYPE_GRADIENT_CHUNK,
+            MESSAGE_TYPE_GRADIENT_END,
+        }
+        if self.message_type in tensor_messages:
+            if self.tensor_id == NO_TENSOR:
+                raise ProtocolError("Tensor DTP message uses NO_TENSOR")
+        elif self.tensor_id != NO_TENSOR:
+            raise ProtocolError("Non-tensor DTP message must use NO_TENSOR")
+
+        chunk_messages = {MESSAGE_TYPE_PARAMETER_CHUNK, MESSAGE_TYPE_GRADIENT_CHUNK}
+        if self.message_type in chunk_messages:
+            if self.chunk_index == NO_CHUNK:
+                raise ProtocolError("Tensor chunk uses NO_CHUNK")
+        elif self.chunk_index != NO_CHUNK:
+            raise ProtocolError("Non-chunk DTP message must use NO_CHUNK")
 
     def pack(self) -> bytes:
         """Serialize to exactly 48 bytes in network byte order.

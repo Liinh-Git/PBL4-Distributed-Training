@@ -1,81 +1,85 @@
-"""DTP/1 wire protocol constants and fixed dimensions.
+"""Canonical DTP/1 V1 wire constants.
 
-CANONICAL REFERENCES
---------------------
-- 03. Mô hình dữ liệu
-- 04. Cấu trúc mã nguồn
-- docs/IMPLEMENTATION_CONTRACT.md -> Module-to-Canonical-Document mapping
-
-OWNS
-----
-- Fixed wire protocol constants (MAGIC, HEADER_SIZE_BYTES, HEADER_BYTE_ORDER).
-- Fixed wire field sizing (OPERATION_ID_BYTES).
-- DTP/1 protocol version (DTP_PROTOCOL_VERSION).
-- Wire sentinel values for unset worker/tensor/chunk/operation fields.
-- DTP/1 message type codes.
-- Defensive default upper bound for a single DTP payload.
-
-MUST NOT OWN
-------------
-- Runtime synchronization policies or barrier timing.
-- Expected worker counts or membership decisions.
-- Database configurations or HTTP status codes.
-- Checkpoint schema version (owned by Runtime durability).
-
-CRITICAL V1 INVARIANTS
-----------------------
-- Fixed 48-byte header size (HEADER_SIZE_BYTES = 48).
-- Big-endian network byte order (HEADER_BYTE_ORDER = "big").
-- Magic identifier b"DPB4" (MAGIC = b"DPB4").
-- operation_id wire representation is an 8-byte generic correlation field.
-
-IMPLEMENTATION STATUS
----------------------
-Implemented per the approved DTP/1 wire specification. HELLO (0x0001) and
-GRADIENT_META (0x0021) type codes are wire-fixed; the remaining type codes are
-provisional and centralized here for one-line correction if the canonical
-specification assigns different values.
-
-Endianness note: all header integers are big-endian; raw FP32 tensor payload
-bytes are little-endian on the wire.
+This module is deliberately free of Runtime policy. ``operation_id`` is an
+opaque wire correlation identifier and worker count is not a protocol constant.
 """
 
 from __future__ import annotations
 
-# Magic identifier for DTP/1 frames (4 bytes)
+from enum import IntEnum
+
 MAGIC: bytes = b"DPB4"
-
-# Fixed header size in bytes (48 bytes)
 HEADER_SIZE_BYTES: int = 48
-
-# Byte order for all multi-byte integer header fields
 HEADER_BYTE_ORDER: str = "big"
-
-# OperationId is a generic 8-byte correlation identifier on the wire
 OPERATION_ID_BYTES: int = 8
-
-# DTP/1 protocol version carried in every frame header
 DTP_PROTOCOL_VERSION: int = 1
+PARAMETER_MANIFEST_SCHEMA_VERSION: int = 1
 
-# ─── Sentinel values (maximum uint32/uint64 representations) ────────────────
-# Sentinel: worker_id before the Runtime assigns a logical rank
+UNBOUND_SESSION: int = 0
 UNASSIGNED_WORKER_ID: int = 0xFFFFFFFF
-# Sentinel: the frame does not target a logical training operation
 NO_OPERATION: int = 0xFFFFFFFFFFFFFFFF
-# Sentinel: the frame does not target a tensor transfer
 NO_TENSOR: int = 0xFFFFFFFF
-# Sentinel: chunk_index does not refer to a concrete chunk
 NO_CHUNK: int = 0xFFFFFFFF
 
-# ─── Message type codes ─────────────────────────────────────────────────────
-# Fixed by the approved DTP/1 wire specification:
-MESSAGE_TYPE_HELLO: int = 0x0001
-MESSAGE_TYPE_GRADIENT_META: int = 0x0021
-# Provisional pending canonical confirmation (centralized for one-line fixes):
-MESSAGE_TYPE_DATASET_ASSIGNMENT: int = 0x0010
-MESSAGE_TYPE_STEP_START: int = 0x0011
-MESSAGE_TYPE_PARAMETER_META: int = 0x0022
-MESSAGE_TYPE_ERROR: int = 0x00FF
+TENSOR_ENCODING_FP32_LE_V1: str = "fp32_le_v1"
+FLOAT32_BYTES: int = 4
+DEFAULT_MAX_CONTROL_PAYLOAD_BYTES: int = 1 * 1024 * 1024
+DEFAULT_MAX_TENSOR_CHUNK_BYTES: int = 1 * 1024 * 1024
 
-# Defensive upper bound for a single DTP payload on the wire (provisional).
-DEFAULT_MAX_PAYLOAD_BYTES: int = 64 * 1024 * 1024
+
+class MessageType(IntEnum):
+    """Complete canonical DTP/1 V1 message catalogue."""
+
+    HELLO = 0x0001
+    HELLO_ACK = 0x0002
+    DATASET_ASSIGNMENT = 0x0003
+    SHARD_READY = 0x0004
+    SHARD_ERROR = 0x0005
+    MODEL_MANIFEST = 0x0010
+    MODEL_INIT = 0x0011
+    PARAMETER_META = 0x0012
+    PARAMETER_CHUNK = 0x0013
+    READY = 0x0014
+    STEP_START = 0x0020
+    GRADIENT_META = 0x0021
+    GRADIENT_CHUNK = 0x0022
+    GRADIENT_END = 0x0023
+    PARAMETER_APPLIED = 0x0024
+    HEARTBEAT = 0x0030
+    EPOCH_END = 0x0031
+    STOP = 0x0032
+    ERROR = 0x00FF
+
+
+MESSAGE_TYPE_HELLO = int(MessageType.HELLO)
+MESSAGE_TYPE_HELLO_ACK = int(MessageType.HELLO_ACK)
+MESSAGE_TYPE_DATASET_ASSIGNMENT = int(MessageType.DATASET_ASSIGNMENT)
+MESSAGE_TYPE_SHARD_READY = int(MessageType.SHARD_READY)
+MESSAGE_TYPE_SHARD_ERROR = int(MessageType.SHARD_ERROR)
+MESSAGE_TYPE_MODEL_MANIFEST = int(MessageType.MODEL_MANIFEST)
+MESSAGE_TYPE_MODEL_INIT = int(MessageType.MODEL_INIT)
+MESSAGE_TYPE_PARAMETER_META = int(MessageType.PARAMETER_META)
+MESSAGE_TYPE_PARAMETER_CHUNK = int(MessageType.PARAMETER_CHUNK)
+MESSAGE_TYPE_READY = int(MessageType.READY)
+MESSAGE_TYPE_STEP_START = int(MessageType.STEP_START)
+MESSAGE_TYPE_GRADIENT_META = int(MessageType.GRADIENT_META)
+MESSAGE_TYPE_GRADIENT_CHUNK = int(MessageType.GRADIENT_CHUNK)
+MESSAGE_TYPE_GRADIENT_END = int(MessageType.GRADIENT_END)
+MESSAGE_TYPE_PARAMETER_APPLIED = int(MessageType.PARAMETER_APPLIED)
+MESSAGE_TYPE_HEARTBEAT = int(MessageType.HEARTBEAT)
+MESSAGE_TYPE_EPOCH_END = int(MessageType.EPOCH_END)
+MESSAGE_TYPE_STOP = int(MessageType.STOP)
+MESSAGE_TYPE_ERROR = int(MessageType.ERROR)
+
+CONTROL_MESSAGE_TYPES: frozenset[int] = frozenset(
+    int(item)
+    for item in MessageType
+    if item not in (MessageType.PARAMETER_CHUNK, MessageType.GRADIENT_CHUNK)
+)
+TENSOR_CHUNK_MESSAGE_TYPES: frozenset[int] = frozenset(
+    (MESSAGE_TYPE_PARAMETER_CHUNK, MESSAGE_TYPE_GRADIENT_CHUNK)
+)
+KNOWN_MESSAGE_TYPES: frozenset[int] = CONTROL_MESSAGE_TYPES | TENSOR_CHUNK_MESSAGE_TYPES
+
+# Compatibility name for old callers. New code uses the class-specific bounds.
+DEFAULT_MAX_PAYLOAD_BYTES: int = DEFAULT_MAX_CONTROL_PAYLOAD_BYTES

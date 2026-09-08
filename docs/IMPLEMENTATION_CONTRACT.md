@@ -13,14 +13,16 @@ The canonical design lives in the team's approved design documents (Google Drive
 - **02. Mô hình miền** (Domain model: Attempt lifecycle, Worker session lifecycle, Job, Synchronization, Dataset build lifecycle)
 - **03. Mô hình dữ liệu** (Data model: PostgreSQL schema, DTP/1 wire framing & fields, Dataset manifest & shard formats, checkpoint formats)
 - **04. Cấu trúc mã nguồn** (Source structure: package layout, module ownership, entrypoints, dependency directions)
+- **DTP/1 — Distributed Training Protocol** (`Chính` tab; binary worker/runtime wire contract)
+- **MCP/1 — Management Control Protocol** (`Chính` tab; runtime/backend management wire contract)
 
 Before implementing any module, the responsible engineer or agent must consult the corresponding canonical design document:
 
 | Module / Package | Primary Canonical Reference Documents |
 |---|---|
-| `src/pbl4/protocol/*` | **03. Mô hình dữ liệu**, **04. Cấu trúc mã nguồn** |
+| `src/pbl4/protocol/*` | **DTP/1 — Distributed Training Protocol**, **03. Mô hình dữ liệu**, **04. Cấu trúc mã nguồn** |
 | `src/pbl4/transport/*` | **04. Cấu trúc mã nguồn** |
-| `src/pbl4/management_protocol/*` | **03. Mô hình dữ liệu**, **04. Cấu trúc mã nguồn** |
+| `src/pbl4/management_protocol/*` | **MCP/1 — Management Control Protocol**, **03. Mô hình dữ liệu**, **04. Cấu trúc mã nguồn** |
 | `src/pbl4/runtime/synchronization/*` | **02. Mô hình miền**, **04. Cấu trúc mã nguồn** |
 | `src/pbl4/runtime/*` | **02. Mô hình miền**, **03. Mô hình dữ liệu**, **04. Cấu trúc mã nguồn** |
 | `src/pbl4/worker/*` | **02. Mô hình miền**, **03. Mô hình dữ liệu**, **04. Cấu trúc mã nguồn** |

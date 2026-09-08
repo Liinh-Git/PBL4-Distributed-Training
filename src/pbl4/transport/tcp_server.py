@@ -148,7 +148,9 @@ class TcpServer:
                     daemon=True,
                 )
                 self._threads.append(thread)
-            thread.start()
+                # Start while holding the lifecycle lock so stop() can never
+                # observe an appended thread that has not started yet.
+                thread.start()
 
     def _prune_finished_threads(self) -> None:
         with self._lock:

@@ -32,6 +32,8 @@ unsigned big-endian json_length followed by json_length bytes of UTF-8 JSON.
 
 from __future__ import annotations
 
+from enum import StrEnum
+
 # MCP/1 protocol version carried in every JSON envelope
 MCP_PROTOCOL_VERSION: int = 1
 
@@ -40,3 +42,30 @@ LENGTH_PREFIX_BYTES: int = 4
 
 # Default upper bound for a single MCP/1 JSON body (4 MiB)
 DEFAULT_MAX_MESSAGE_BYTES: int = 4 * 1024 * 1024
+
+
+class McpMessageType(StrEnum):
+    MGMT_HELLO = "MGMT_HELLO"
+    MGMT_HELLO_ACK = "MGMT_HELLO_ACK"
+    GET_STATE = "GET_STATE"
+    STATE_SNAPSHOT = "STATE_SNAPSHOT"
+    START_ATTEMPT = "START_ATTEMPT"
+    ABORT_ATTEMPT = "ABORT_ATTEMPT"
+    REQUEST_CHECKPOINT = "REQUEST_CHECKPOINT"
+    RESOLVE_DATASET_BUILD = "RESOLVE_DATASET_BUILD"
+    DATASET_BUILD_RESOLVED = "DATASET_BUILD_RESOLVED"
+    COMMAND_RESULT = "COMMAND_RESULT"
+    RUNTIME_EVENT = "RUNTIME_EVENT"
+    ERROR = "ERROR"
+
+
+COMMAND_RESULT_STATUSES: frozenset[str] = frozenset(
+    {"ACCEPTED", "DEFERRED", "SUCCEEDED", "REJECTED", "FAILED"}
+)
+EVENT_SEVERITIES: frozenset[str] = frozenset({"INFO", "WARNING", "ERROR", "CRITICAL"})
+
+
+COMMAND_RESULT_STATUSES: frozenset[str] = frozenset(
+    {"ACCEPTED", "DEFERRED", "SUCCEEDED", "REJECTED", "FAILED"}
+)
+EVENT_SEVERITIES: frozenset[str] = frozenset({"INFO", "WARNING", "ERROR", "CRITICAL"})

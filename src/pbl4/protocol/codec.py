@@ -41,7 +41,12 @@ from collections.abc import Callable
 from typing import Any
 
 from pbl4.common.errors import ProtocolError
-from pbl4.protocol.constants import DEFAULT_MAX_PAYLOAD_BYTES, HEADER_SIZE_BYTES
+from pbl4.protocol.constants import (
+    DEFAULT_MAX_CONTROL_PAYLOAD_BYTES,
+    DEFAULT_MAX_TENSOR_CHUNK_BYTES,
+    HEADER_SIZE_BYTES,
+    TENSOR_CHUNK_MESSAGE_TYPES,
+)
 from pbl4.protocol.header import DTPHeader
 
 
@@ -80,6 +85,11 @@ class DTPFrame:
 
     def pack(self) -> bytes:
         """Serialize to header (exactly 48 bytes) followed by payload bytes."""
+        self.header.validate_protocol()
+        if len(self.payload) != self.header.payload_length:
+            raise ProtocolError("DTP frame payload length does not match its header")
+        if (zlib.crc32(self.payload) & 0xFFFFFFFF) != self.header.payload_crc32:
+            raise ProtocolError("DTP frame payload CRC32 does not match its header")
         return self.header.pack() + self.payload
 
     def write_to(self, sock: Any, send_fn: Callable[[Any, bytes], None]) -> None:
@@ -92,7 +102,10 @@ class DTPFrame:
         sock: Any,
         recv_exact_fn: Callable[[Any, int], bytes],
         *,
-        max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+        max_control_payload_bytes: int = DEFAULT_MAX_CONTROL_PAYLOAD_BYTES,
+        max_tensor_chunk_bytes: int = DEFAULT_MAX_TENSOR_CHUNK_BYTES,
+        bound_identity: tuple[int, int] | None = None,
+        max_payload_bytes: int | None = None,
     ) -> DTPFrame:
         """Read one complete frame via the injected exact-byte reader.
 
@@ -104,9 +117,18 @@ class DTPFrame:
             TransportError: propagated from ``recv_exact_fn`` on EOF/timeout.
         """
         header = DTPHeader.unpack(recv_exact_fn(sock, HEADER_SIZE_BYTES))
-        if header.payload_length > max_payload_bytes:
+        header.validate_protocol(bound_identity)
+        if max_payload_bytes is not None:
+            max_control_payload_bytes = max_payload_bytes
+            max_tensor_chunk_bytes = max_payload_bytes
+        limit = (
+            max_tensor_chunk_bytes
+            if header.message_type in TENSOR_CHUNK_MESSAGE_TYPES
+            else max_control_payload_bytes
+        )
+        if header.payload_length > limit:
             raise ProtocolError(
-                f"DTP payload_length {header.payload_length} exceeds limit {max_payload_bytes}"
+                f"DTP payload_length {header.payload_length} exceeds message-class limit {limit}"
             )
         payload = recv_exact_fn(sock, header.payload_length)
         return cls._assemble(header, payload)
@@ -125,6 +147,7 @@ class DTPFrame:
                 f"{HEADER_SIZE_BYTES}-byte header"
             )
         header = DTPHeader.unpack(data[:HEADER_SIZE_BYTES])
+        header.validate_protocol()
         return cls._assemble(header, data[HEADER_SIZE_BYTES:])
 
     @classmethod

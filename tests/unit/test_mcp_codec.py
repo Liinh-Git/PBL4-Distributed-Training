@@ -1,144 +1,287 @@
-"""Unit tests for MCP/1 codec and envelope contract (exact wire + malformed input)."""
+"""Canonical MCP/1 framing, schemas, correlation and event mapping tests."""
 
 from __future__ import annotations
 
 import json
 import struct
 import unittest
+from dataclasses import dataclass, field
 
-from pbl4.common.errors import ProtocolError
+from pbl4.common.errors import ProtocolError, TransportError
 from pbl4.management_protocol.codec import McpCodec
-from pbl4.management_protocol.messages import McpEnvelope
+from pbl4.management_protocol.messages import (
+    CommandResult,
+    CorrelationTracker,
+    McpEnvelope,
+    RuntimeEvent,
+    StartAttempt,
+    runtime_event_envelope,
+)
 from pbl4.transport.framed_socket import recv_exact
 from tests.unit.fake_sockets import ScriptedRecvSocket
 
 
-def make_envelope(**overrides: object) -> McpEnvelope:
-    fields: dict[str, object] = {
-        "message_type": "backend.command",
-        "message_id": "msg-0001",
-        "correlation_id": "op-0001",
-        "sent_at": "2026-09-08T00:00:00+00:00",
-        "runtime_instance_id": "runtime-1",
-        "payload": {"action": "QUERY_STATE"},
-    }
-    fields.update(overrides)
-    return McpEnvelope(**fields)
+def envelope(
+    message_type: str = "GET_STATE",
+    payload: dict[str, object] | None = None,
+    *,
+    message_id: str = "msg-1",
+    correlation_id: str | None = None,
+    runtime_instance_id: str | None = "runtime-1",
+) -> McpEnvelope:
+    return McpEnvelope(
+        message_type=message_type,
+        message_id=message_id,
+        correlation_id=correlation_id,
+        sent_at="2026-09-08T00:00:00Z",
+        runtime_instance_id=runtime_instance_id,
+        payload={} if payload is None else payload,
+    )
 
 
-def frame_bytes(body: bytes) -> bytes:
+def frame(body: bytes) -> bytes:
     return struct.pack(">I", len(body)) + body
 
 
-class McpEncodeTest(unittest.TestCase):
-    def test_encode_layout_is_length_prefix_plus_utf8_json(self) -> None:
-        envelope = make_envelope()
-        data = McpCodec.encode(envelope)
-        (length,) = struct.unpack(">I", data[:4])
-        body = data[4:]
-        self.assertEqual(length, len(body))
-        decoded = json.loads(body.decode("utf-8"))
-        self.assertEqual(decoded, envelope.to_dict())
-        self.assertEqual(len(decoded), 7)
+class FramingAndEnvelopeTest(unittest.TestCase):
+    def test_exact_prefix_and_roundtrip(self) -> None:
+        item = envelope()
+        encoded = McpCodec.encode(item)
+        self.assertEqual(encoded[:4], struct.pack(">I", len(encoded) - 4))
+        self.assertEqual(McpCodec.decode(encoded), item)
+        self.assertIsNone(json.loads(encoded[4:])["correlation_id"])
 
-    def test_encode_oversized_body_rejected(self) -> None:
-        envelope = make_envelope(payload={"blob": "x" * 64})
+    def test_fragmentation_and_coalescing(self) -> None:
+        first = McpCodec.encode(envelope(message_id="one"))
+        second = McpCodec.encode(envelope(message_id="two"))
+        stream = first + second
+        one_byte = ScriptedRecvSocket([bytes([byte]) for byte in stream])
+        self.assertEqual(McpCodec.read_message(one_byte, recv_exact).message_id, "one")
+        self.assertEqual(McpCodec.read_message(one_byte, recv_exact).message_id, "two")
+        coalesced = ScriptedRecvSocket([stream])
+        self.assertEqual(McpCodec.read_message(coalesced, recv_exact).message_id, "one")
+        self.assertEqual(McpCodec.read_message(coalesced, recv_exact).message_id, "two")
+
+    def test_eof_mid_prefix_and_body(self) -> None:
+        with self.assertRaises(TransportError):
+            McpCodec.read_message(ScriptedRecvSocket([b"\x00\x00"]), recv_exact)
+        encoded = McpCodec.encode(envelope())
+        with self.assertRaises(TransportError):
+            McpCodec.read_message(ScriptedRecvSocket([encoded[:4], encoded[4:10]]), recv_exact)
+
+    def test_malformed_zero_oversize_nonobject_and_nonfinite(self) -> None:
+        bad_frames = [
+            b"\x00\x00",
+            struct.pack(">I", 0),
+            frame(b"nope"),
+            frame(b"[]"),
+        ]
+        for raw in bad_frames:
+            with self.subTest(raw=raw), self.assertRaises(ProtocolError):
+                McpCodec.decode(raw)
         with self.assertRaises(ProtocolError):
-            McpCodec.encode(envelope, max_message_bytes=8)
-
-
-class McpDecodeTest(unittest.TestCase):
-    def test_decode_roundtrip(self) -> None:
-        envelope = make_envelope()
-        self.assertEqual(McpCodec.decode(McpCodec.encode(envelope)), envelope)
-
-    def test_zero_length_prefix_rejected(self) -> None:
+            McpCodec.decode(frame(b"{}"), max_message_bytes=1)
+        body = envelope().to_dict()
+        body["payload"] = {"value": float("nan")}
         with self.assertRaises(ProtocolError):
-            McpCodec.decode(struct.pack(">I", 0))
+            McpCodec.decode(frame(json.dumps(body).encode()))
 
-    def test_oversized_length_rejected(self) -> None:
+    def test_nullable_context_rules(self) -> None:
+        hello = envelope(
+            "MGMT_HELLO",
+            {"backend_instance_id": "backend", "supported_protocol_versions": [1]},
+            runtime_instance_id=None,
+        )
+        self.assertIsNone(hello.runtime_instance_id)
+        event = envelope(
+            "RUNTIME_EVENT",
+            {
+                "attempt_id": "a",
+                "job_id": "j",
+                "runtime_event_seq": 1,
+                "event_type": "model.updated",
+                "event_schema_version": 1,
+                "occurred_at": "2026-09-08T00:00:00Z",
+                "source_component": "coordinator",
+                "severity": "INFO",
+                "details": {},
+            },
+        )
+        self.assertIsNone(event.correlation_id)
         with self.assertRaises(ProtocolError):
-            McpCodec.decode(frame_bytes(b"abcde"), max_message_bytes=4)
-
-    def test_truncated_prefix_rejected(self) -> None:
+            envelope("GET_STATE", correlation_id="request")
         with self.assertRaises(ProtocolError):
-            McpCodec.decode(b"\x00\x00")
-
-    def test_body_length_mismatch_rejected(self) -> None:
+            envelope("STATE_SNAPSHOT", {}, correlation_id=None)
         with self.assertRaises(ProtocolError):
-            McpCodec.decode(struct.pack(">I", 5) + b"abc")
-
-    def test_invalid_json_rejected(self) -> None:
+            envelope("GET_STATE", runtime_instance_id=None)
         with self.assertRaises(ProtocolError):
-            McpCodec.decode(frame_bytes(b"nope"))
+            envelope("GET_STATE", correlation_id="")
 
-    def test_non_object_root_rejected(self) -> None:
-        for body in (b"[1,2]", b'"text"', b"7", b"null"):
-            with self.subTest(body=body), self.assertRaises(ProtocolError):
-                McpCodec.decode(frame_bytes(body))
-
-    def test_missing_required_field_rejected(self) -> None:
-        data = make_envelope().to_dict()
-        del data["correlation_id"]
+    def test_unknown_message_and_extra_envelope_field_rejected(self) -> None:
         with self.assertRaises(ProtocolError):
-            McpCodec.decode(frame_bytes(json.dumps(data).encode("utf-8")))
-
-    def test_wrong_protocol_version_rejected(self) -> None:
-        for bad_version in (0, 2, "1", True, 1.0):
-            data = make_envelope().to_dict()
-            data["protocol_version"] = bad_version
-            with self.subTest(version=bad_version), self.assertRaises(ProtocolError):
-                McpCodec.decode(frame_bytes(json.dumps(data).encode("utf-8")))
-
-    def test_payload_must_be_object(self) -> None:
-        data = make_envelope().to_dict()
-        data["payload"] = [1, 2]
+            envelope("backend.command")
+        data = envelope().to_dict()
+        data["trace_id"] = "not-v1"
         with self.assertRaises(ProtocolError):
-            McpCodec.decode(frame_bytes(json.dumps(data).encode("utf-8")))
-
-    def test_non_empty_string_fields_required(self) -> None:
-        for field_name in (
-            "message_type",
-            "message_id",
-            "sent_at",
-            "runtime_instance_id",
-        ):
-            data = make_envelope().to_dict()
-            data[field_name] = ""
-            with self.subTest(field=field_name), self.assertRaises(ProtocolError):
-                McpCodec.decode(frame_bytes(json.dumps(data).encode("utf-8")))
-
-    def test_empty_correlation_id_allowed(self) -> None:
-        envelope = make_envelope(correlation_id="")
-        self.assertEqual(McpCodec.decode(McpCodec.encode(envelope)), envelope)
-
-    def test_extra_fields_tolerated(self) -> None:
-        data = make_envelope().to_dict()
-        data["trace_id"] = "abc123"
-        envelope = McpCodec.decode(frame_bytes(json.dumps(data).encode("utf-8")))
-        self.assertEqual(envelope.message_id, "msg-0001")
-
-    def test_non_ascii_payload_roundtrip(self) -> None:
-        envelope = make_envelope(payload={"note": "xin chào ☕"})
-        self.assertEqual(McpCodec.decode(McpCodec.encode(envelope)), envelope)
+            McpEnvelope.from_dict(data)
 
 
-class McpReadMessageTest(unittest.TestCase):
-    def test_read_message_assembles_across_fragments(self) -> None:
-        data = McpCodec.encode(make_envelope())
-        sock = ScriptedRecvSocket([data[:3], data[3:20], data[20:]])
-        envelope = McpCodec.read_message(sock, recv_exact)
-        self.assertEqual(envelope.message_id, "msg-0001")
-
-    def test_read_message_zero_length_rejected(self) -> None:
-        sock = ScriptedRecvSocket([struct.pack(">I", 0)])
+class PayloadSchemaTest(unittest.TestCase):
+    def test_command_result_status_and_noop_rules(self) -> None:
+        base = {
+            "command_id": "c",
+            "target_type": "ATTEMPT",
+            "target_id": "a",
+            "status": "SUCCEEDED",
+            "result_code": "NO_OP",
+            "message": "done",
+            "attempt_id": "a",
+            "effective_at": "2026-09-08T00:00:00Z",
+            "completed_at": "2026-09-08T00:00:01Z",
+        }
+        CommandResult.from_dict(base)
+        for status in ("PENDING", "NO_OP"):
+            bad = dict(base)
+            bad["status"] = status
+            with self.assertRaises(ProtocolError):
+                CommandResult.from_dict(bad)
+        bad = dict(base)
+        bad["status"] = "ACCEPTED"
         with self.assertRaises(ProtocolError):
-            McpCodec.read_message(sock, recv_exact)
+            CommandResult.from_dict(bad)
 
-    def test_read_message_oversized_rejected_without_reading_body(self) -> None:
-        sock = ScriptedRecvSocket([struct.pack(">I", 1024 * 1024)])
+    def test_command_id_is_payload_identity_not_message_id(self) -> None:
+        result = envelope(
+            "COMMAND_RESULT",
+            {
+                "command_id": "command-7",
+                "target_type": "ATTEMPT",
+                "target_id": "a",
+                "status": "ACCEPTED",
+                "result_code": "START_DISPATCHED",
+                "message": "ok",
+                "attempt_id": "a",
+                "effective_at": "2026-09-08T00:00:00Z",
+                "completed_at": None,
+            },
+            message_id="wire-9",
+            correlation_id="wire-request",
+        )
+        self.assertNotEqual(result.message_id, result.payload.command_id)
+
+    def test_start_attempt_execution_mode_and_raw_tensor_rejected(self) -> None:
+        base = {
+            "command_id": "c",
+            "job_id": "j",
+            "attempt_id": "a",
+            "execution_mode": "FRESH",
+            "resolved_contract": {"schema_version": 1},
+            "contract_hash": "hash",
+            "resume_from_checkpoint_id": None,
+            "requested_at": "2026-09-08T00:00:00Z",
+        }
+        StartAttempt.from_dict(base)
+        bad = dict(base)
+        bad["execution_mode"] = "fresh"
         with self.assertRaises(ProtocolError):
-            McpCodec.read_message(sock, recv_exact, max_message_bytes=1024)
+            StartAttempt.from_dict(bad)
+        bad = dict(base)
+        bad["resolved_contract"] = {"gradient_bytes": "forbidden"}
+        with self.assertRaises(ProtocolError):
+            StartAttempt.from_dict(bad)
+
+    def test_runtime_event_required_fields_and_severity(self) -> None:
+        base = {
+            "attempt_id": "a",
+            "job_id": "j",
+            "runtime_event_seq": 1,
+            "event_type": "model.updated",
+            "event_schema_version": 1,
+            "occurred_at": "2026-09-08T00:00:00Z",
+            "source_component": "coordinator",
+            "severity": "INFO",
+            "details": {},
+        }
+        RuntimeEvent.from_dict(base)
+        for name, value in (("severity", "DEBUG"), ("runtime_event_seq", 0)):
+            bad = dict(base)
+            bad[name] = value
+            with self.assertRaises(ProtocolError):
+                RuntimeEvent.from_dict(bad)
+
+
+class CorrelationAndMappingTest(unittest.TestCase):
+    def test_unsolicited_event_can_interleave_request_and_result(self) -> None:
+        tracker = CorrelationTracker()
+        request = envelope("GET_STATE", message_id="request")
+        tracker.register_request(request)
+        event = envelope(
+            "RUNTIME_EVENT",
+            {
+                "attempt_id": "a",
+                "job_id": "j",
+                "runtime_event_seq": 1,
+                "event_type": "worker.registered",
+                "event_schema_version": 1,
+                "occurred_at": "2026-09-08T00:00:00Z",
+                "source_component": "runtime",
+                "severity": "INFO",
+                "details": {},
+            },
+            message_id="event",
+        )
+        self.assertIsNone(tracker.accept(event))
+        snapshot_payload = {
+            "runtime_instance_id": "runtime-1",
+            "active_job_id": None,
+            "active_attempt_id": None,
+            "attempt_state": None,
+            "training_strategy": None,
+            "checkpoint_policy": None,
+            "epoch": None,
+            "current_operation_id": None,
+            "current_batch_ordinal": None,
+            "model_version": None,
+            "workers": [],
+            "strategy_state": {},
+            "checkpoint_state": None,
+            "latest_checkpoint_id": None,
+            "recovery_cursor": {},
+            "dataset_build_id": None,
+            "dataset_manifest_hash": None,
+            "last_runtime_event_seq": 1,
+            "management_event_gap_count": 0,
+            "captured_at": "2026-09-08T00:00:01Z",
+        }
+        response = envelope(
+            "STATE_SNAPSHOT",
+            snapshot_payload,
+            message_id="response",
+            correlation_id="request",
+        )
+        self.assertEqual(tracker.accept(response), "GET_STATE")
+
+    def test_runtime_event_mapper_preserves_semantics(self) -> None:
+        @dataclass
+        class FakeEvent:
+            attempt_id: str = "a"
+            job_id: str = "j"
+            runtime_event_seq: int = 2
+            event_type: str = "model.updated"
+            event_schema_version: int = 1
+            occurred_at: str = "2026-09-08T00:00:00Z"
+            source_component: str = "coordinator"
+            severity: str = "INFO"
+            details: dict[str, object] = field(default_factory=lambda: {"model_version": 3})
+
+        mapped = runtime_event_envelope(
+            FakeEvent(),
+            message_id="wire",
+            sent_at="2026-09-08T00:00:01Z",
+            runtime_instance_id="runtime-1",
+        )
+        self.assertEqual(mapped.payload.runtime_event_seq, 2)
+        self.assertIsNone(mapped.correlation_id)
 
 
 if __name__ == "__main__":
