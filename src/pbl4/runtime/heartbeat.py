@@ -1,39 +1,28 @@
-"""Heartbeat Monitor — runtime-side worker liveness and failure detection.
+"""Liveness inspection returns failure inputs; Coordinator owns fail-stop."""
 
-CANONICAL REFERENCES
---------------------
-- 02. Mô hình miền
-- 03. Mô hình dữ liệu
-- 04. Cấu trúc mã nguồn
-- docs/IMPLEMENTATION_CONTRACT.md -> Module-to-Canonical-Document mapping
+import math
 
-OWNS
-----
-- Tracking periodic heartbeat signals received from registered worker sessions.
-- Detecting worker silence / timeout thresholds.
-- Notifying WorkerRegistry and Coordinator of worker disconnection.
-
-MUST NOT OWN
-------------
-- Worker TCP socket lifecycle (owned by transport / ParameterServer).
-- Attempt failure policy decisions (owned by Coordinator).
-- Synchronization barrier decisions (owned by SynchronizationPolicy).
-
-CRITICAL V1 INVARIANTS
-----------------------
-- Heartbeat tracking operates per session_id within an active attempt.
-- Timeouts trigger notification to Coordinator for deterministic failure handling.
-
-IMPLEMENTATION STATUS
----------------------
-Scaffold only. Core behavior is intentionally not implemented.
-"""
-
-from __future__ import annotations
+from pbl4.runtime.worker_registry import SessionState, WorkerRegistry, WorkerSession
 
 
 class HeartbeatMonitor:
-    """Monitors worker heartbeats and detects disconnections."""
+    def __init__(self, registry: WorkerRegistry, timeout_seconds: float = 15.0):
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("Invalid heartbeat timeout")
+        self._registry = registry
+        self._timeout = timeout_seconds
 
-    def __init__(self) -> None:
-        raise NotImplementedError
+    def expired(self, now: float) -> tuple[WorkerSession, ...]:
+        """Transport reports validated progress through the same registry clock.
+
+        This prevents a progressing large transfer from expiring simply because
+        heartbeat frames cannot interleave with that logical transfer.
+        """
+        if not math.isfinite(now):
+            raise ValueError("Invalid liveness clock")
+        return tuple(
+            session
+            for session in self._registry.snapshot()
+            if session.state not in (SessionState.DISCONNECTED, SessionState.FAILED)
+            and now - session.last_heartbeat_at >= self._timeout
+        )

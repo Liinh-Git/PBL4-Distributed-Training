@@ -1,41 +1,28 @@
-"""Checkpoint Policy — checkpoint cadence and trigger policy.
+"""V1 durability policy; storage mechanics and Attempt transitions stay outside."""
 
-CANONICAL REFERENCES
---------------------
-- 02. Mô hình miền
-- 03. Mô hình dữ liệu
-- 04. Cấu trúc mã nguồn
-- docs/IMPLEMENTATION_CONTRACT.md -> Module-to-Canonical-Document mapping
-
-OWNS
-----
-- Checkpoint policy decision and cadence evaluation.
-- In V1: after_each_model_update_blocking checkpoint policy.
-- Evaluating whether current state requires triggering a checkpoint gate.
-
-MUST NOT OWN
-------------
-- Synchronization admission or update-readiness decisions (owned by SynchronizationPolicy).
-- Checkpoint serialization or disk durability mechanism (owned by CheckpointManager).
-- Attempt lifecycle orchestration or gate enforcement (owned by Coordinator).
-
-CRITICAL V1 INVARIANTS
-----------------------
-- Verified V1 checkpoint policy is strictly after_each_model_update_blocking.
-- SynchronizationPolicy does NOT decide checkpoint cadence.
-- Model update/synchronization completion alone is NOT sufficient to progress past
-  the required durability gate; checkpoint must be COMPLETE before Step COMMITTED / progression.
-
-IMPLEMENTATION STATUS
----------------------
-Scaffold only. Core behavior is intentionally not implemented.
-"""
-
-from __future__ import annotations
+from dataclasses import dataclass
 
 
+@dataclass(frozen=True, slots=True)
 class CheckpointPolicy:
-    """Decides when a checkpoint should be taken."""
+    checkpoint_policy: str = "after_each_model_update_blocking"
+    max_attempts: int = 3
 
-    def __init__(self) -> None:
-        raise NotImplementedError
+    def __post_init__(self) -> None:
+        if self.checkpoint_policy != "after_each_model_update_blocking":
+            raise ValueError("Unsupported checkpoint policy")
+        if type(self.max_attempts) is not int or self.max_attempts <= 0:
+            raise ValueError("Invalid checkpoint attempt limit")
+
+    def requires_checkpoint(
+        self, *, update_completed: bool, synchronization_complete: bool
+    ) -> bool:
+        return update_completed and synchronization_complete
+
+    def may_retry(self, attempts_made: int) -> bool:
+        return 0 <= attempts_made < self.max_attempts
+
+    def allows_commit(
+        self, *, synchronization_complete: bool, checkpoint_state: str | None
+    ) -> bool:
+        return synchronization_complete and checkpoint_state == "COMPLETE"
