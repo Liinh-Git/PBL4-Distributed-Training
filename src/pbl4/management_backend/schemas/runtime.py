@@ -6,14 +6,13 @@ Aligned to api_contract_formatted.md — System, Runtime, and System/Runtime gro
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
 from pydantic import BaseModel
 
-from management_backend.schemas.attempt import WorkerSessionItem, StrategyStateStrictBSP
-
+from pbl4.management_backend.schemas.attempt import StrategyStateStrictBSP, WorkerSessionItem
 
 # ─── System / Health ─────────────────────────────────────────────────────────
+
 
 class HealthResponse(BaseModel):
     backend: str
@@ -24,6 +23,7 @@ class HealthResponse(BaseModel):
 
 
 # ─── System / Capabilities ───────────────────────────────────────────────────
+
 
 class FeatureFlags(BaseModel):
     attempt_websocket_stream: bool = True
@@ -41,6 +41,7 @@ class CapabilitiesResponse(BaseModel):
 
 
 # ─── Runtime / Snapshot ──────────────────────────────────────────────────────
+
 
 class RecoveryCursor(BaseModel):
     epoch: int

@@ -22,7 +22,7 @@ from typing import Any
 
 import psycopg
 
-from management_backend.repositories import dataset_build_repository
+from pbl4.management_backend.repositories import dataset_build_repository
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,9 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
 
     training_strategy = requested_contract.get("training_strategy", "strict_bsp")
     if training_strategy != "strict_bsp":
-        errors.append(f"Unsupported training_strategy '{training_strategy}'. V1 only supports 'strict_bsp'.")
+        errors.append(
+            f"Unsupported training_strategy '{training_strategy}'. V1 only supports 'strict_bsp'."
+        )
 
     if errors:
         raise ContractResolutionError("Contract resolution failed", errors)
@@ -112,6 +114,7 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
 
 
 def _get_task_type(conn: psycopg.Connection, dataset_id: str) -> str:
-    from management_backend.repositories import dataset_repository
+    from pbl4.management_backend.repositories import dataset_repository
+
     ds = dataset_repository.get_dataset(conn, dataset_id)
     return ds["task_type"] if ds else ""

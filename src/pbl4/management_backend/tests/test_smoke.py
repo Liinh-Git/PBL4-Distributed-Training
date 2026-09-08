@@ -6,26 +6,25 @@ to verify routing, schemas, and business logic without a live PostgreSQL instanc
 
 from __future__ import annotations
 
-import json
-import uuid
-from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
 
-
 # ─── Fixtures ────────────────────────────────────────────────────────────────
+
 
 @pytest.fixture(scope="module")
 def client():
-    from management_backend.app import create_app
+    from pbl4.management_backend.app import create_app
+
     app = create_app()
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
 
 
 # ─── System Endpoints ─────────────────────────────────────────────────────────
+
 
 def test_health_ok(client):
     r = client.get("/api/v1/health")
@@ -54,6 +53,7 @@ def test_runtime_snapshot_ok(client):
 
 
 # ─── No-DB → 503 ──────────────────────────────────────────────────────────────
+
 
 def test_list_datasets_without_db_returns_503(client):
     r = client.get("/api/v1/datasets")
@@ -87,6 +87,7 @@ def test_list_commands_without_db_returns_503(client):
 
 # ─── OpenAPI Schema ───────────────────────────────────────────────────────────
 
+
 def test_openapi_schema_generated(client):
     r = client.get("/api/openapi.json")
     assert r.status_code == 200
@@ -107,8 +108,10 @@ def test_openapi_schema_generated(client):
 
 # ─── Unit: Job Service ────────────────────────────────────────────────────────
 
+
 def test_validate_contract_missing_fields():
-    from management_backend.services.job_service import _validate_contract
+    from pbl4.management_backend.services.job_service import _validate_contract
+
     errors = _validate_contract({})
     assert len(errors) > 0
     # All required fields should be reported missing
@@ -117,33 +120,40 @@ def test_validate_contract_missing_fields():
 
 
 def test_validate_contract_unsupported_strategy():
-    from management_backend.services.job_service import _validate_contract
-    errors = _validate_contract({
-        "dataset_build_id": "dsb_1",
-        "model_id": "m1",
-        "epochs": 5,
-        "learning_rate": 0.01,
-        "training_seed": 42,
-        "training_strategy": "federated",  # unsupported
-    })
+    from pbl4.management_backend.services.job_service import _validate_contract
+
+    errors = _validate_contract(
+        {
+            "dataset_build_id": "dsb_1",
+            "model_id": "m1",
+            "epochs": 5,
+            "learning_rate": 0.01,
+            "training_seed": 42,
+            "training_strategy": "federated",  # unsupported
+        }
+    )
     assert any("strict_bsp" in e for e in errors)
 
 
 def test_validate_contract_ok():
-    from management_backend.services.job_service import _validate_contract
-    errors = _validate_contract({
-        "dataset_build_id": "dsb_1",
-        "model_id": "m1",
-        "epochs": 5,
-        "learning_rate": 0.01,
-        "training_seed": 42,
-        "training_strategy": "strict_bsp",
-    })
+    from pbl4.management_backend.services.job_service import _validate_contract
+
+    errors = _validate_contract(
+        {
+            "dataset_build_id": "dsb_1",
+            "model_id": "m1",
+            "epochs": 5,
+            "learning_rate": 0.01,
+            "training_seed": 42,
+            "training_strategy": "strict_bsp",
+        }
+    )
     assert errors == []
 
 
 def test_hash_contract_deterministic():
-    from management_backend.services.job_service import _hash_contract
+    from pbl4.management_backend.services.job_service import _hash_contract
+
     contract = {"a": 1, "b": [2, 3]}
     h1 = _hash_contract(contract)
     h2 = _hash_contract(contract)
@@ -153,9 +163,11 @@ def test_hash_contract_deterministic():
 
 # ─── Unit: Schemas ────────────────────────────────────────────────────────────
 
+
 def test_health_response_schema():
-    from management_backend.schemas.runtime import HealthResponse
-    now = datetime.now(timezone.utc)
+    from pbl4.management_backend.schemas.runtime import HealthResponse
+
+    now = datetime.now(UTC)
     resp = HealthResponse(
         backend="healthy",
         postgres="healthy",
@@ -167,7 +179,8 @@ def test_health_response_schema():
 
 
 def test_job_create_request_schema():
-    from management_backend.schemas.job import JobCreateRequest
+    from pbl4.management_backend.schemas.job import JobCreateRequest
+
     req = JobCreateRequest(
         display_name="Test Job",
         requested_contract={
@@ -183,7 +196,11 @@ def test_job_create_request_schema():
 
 
 def test_dataset_build_create_request_schema():
-    from management_backend.schemas.dataset import DatasetBuildCreateRequest, PreprocessingConfig
+    from pbl4.management_backend.schemas.dataset import (
+        DatasetBuildCreateRequest,
+        PreprocessingConfig,
+    )
+
     req = DatasetBuildCreateRequest(
         dataset_id="ds_1",
         profile="CIFAR10_STANDARD",
@@ -196,9 +213,12 @@ def test_dataset_build_create_request_schema():
 
 # ─── WebSocket Route Registered ───────────────────────────────────────────────
 
+
 def test_websocket_route_registered(client):
     from fastapi.routing import APIWebSocketRoute
+
     app = client.app
     ws_routes = [r for r in app.routes if isinstance(r, APIWebSocketRoute)]
-    assert any("/ws/v1/attempts/{attempt_id}" in r.path for r in ws_routes), \
+    assert any("/ws/v1/attempts/{attempt_id}" in r.path for r in ws_routes), (
         "WebSocket route /ws/v1/attempts/{attempt_id} not registered"
+    )

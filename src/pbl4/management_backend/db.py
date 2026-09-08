@@ -20,8 +20,8 @@ CRITICAL V1 INVARIANTS
 from __future__ import annotations
 
 import logging
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Generator
 
 import psycopg
 import psycopg_pool
@@ -109,6 +109,6 @@ def check_health() -> bool:
         with pool.connection() as conn:
             conn.execute("SELECT 1")
         return True
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("Database health check failed: %s", exc)
         return False

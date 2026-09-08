@@ -11,12 +11,11 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 
 import psycopg
 
-from management_backend.repositories import (
+from pbl4.management_backend.repositories import (
     attempt_repository,
     checkpoint_repository,
     command_repository,
@@ -41,6 +40,7 @@ class AttemptStateError(Exception):
 
 class AttemptConflictError(Exception):
     """Raised when a new attempt would violate the single-active invariant."""
+
     pass
 
 
@@ -57,6 +57,7 @@ def _new_command_id() -> str:
 
 
 # ─── Start / Retry / Resume ──────────────────────────────────────────────────
+
 
 def start_job(conn: psycopg.Connection, job_id: str, note: str | None = None) -> tuple[dict, dict]:
     """Start a FRESH attempt for a READY job.
@@ -80,7 +81,7 @@ def start_job(conn: psycopg.Connection, job_id: str, note: str | None = None) ->
 
     attempt_id = _new_attempt_id()
     command_id = _new_command_id()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     cmd_row = command_repository.create_command(
         conn,
@@ -88,7 +89,12 @@ def start_job(conn: psycopg.Connection, job_id: str, note: str | None = None) ->
         command_type="START_ATTEMPT",
         target_type="ATTEMPT",
         target_id=attempt_id,
-        request={"job_id": job_id, "attempt_id": attempt_id, "execution_mode": "FRESH", "note": note},
+        request={
+            "job_id": job_id,
+            "attempt_id": attempt_id,
+            "execution_mode": "FRESH",
+            "note": note,
+        },
         requested_at=now,
     )
 
@@ -121,7 +127,7 @@ def retry_job(conn: psycopg.Connection, job_id: str) -> tuple[dict, dict]:
 
     attempt_id = _new_attempt_id()
     command_id = _new_command_id()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     cmd_row = command_repository.create_command(
         conn,
@@ -160,9 +166,7 @@ def resume_job(conn: psycopg.Connection, job_id: str, checkpoint_id: str) -> tup
     if ckpt["state"] != "COMPLETE":
         raise AttemptStateError(f"Checkpoint '{checkpoint_id}' is not COMPLETE.")
     if ckpt["contract_hash"] != job["contract_hash"]:
-        raise AttemptStateError(
-            "Checkpoint contract_hash does not match job contract_hash."
-        )
+        raise AttemptStateError("Checkpoint contract_hash does not match job contract_hash.")
 
     active = attempt_repository.get_active_attempt(conn)
     if active:
@@ -172,7 +176,7 @@ def resume_job(conn: psycopg.Connection, job_id: str, checkpoint_id: str) -> tup
 
     attempt_id = _new_attempt_id()
     command_id = _new_command_id()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     cmd_row = command_repository.create_command(
         conn,
@@ -181,7 +185,8 @@ def resume_job(conn: psycopg.Connection, job_id: str, checkpoint_id: str) -> tup
         target_type="ATTEMPT",
         target_id=attempt_id,
         request={
-            "job_id": job_id, "attempt_id": attempt_id,
+            "job_id": job_id,
+            "attempt_id": attempt_id,
             "execution_mode": "RESUME",
             "checkpoint_id": checkpoint_id,
         },
@@ -203,6 +208,7 @@ def resume_job(conn: psycopg.Connection, job_id: str, checkpoint_id: str) -> tup
 
 
 # ─── Query ───────────────────────────────────────────────────────────────────
+
 
 def get_attempt(conn: psycopg.Connection, attempt_id: str) -> dict:
     row = attempt_repository.get_attempt(conn, attempt_id)
@@ -266,9 +272,7 @@ def get_attempt_snapshot(conn: psycopg.Connection, attempt_id: str) -> dict:
     return snapshot
 
 
-def list_attempt_workers(
-    conn: psycopg.Connection, attempt_id: str
-) -> list[dict]:
+def list_attempt_workers(conn: psycopg.Connection, attempt_id: str) -> list[dict]:
     _ = get_attempt(conn, attempt_id)  # Validate existence
     return worker_session_repository.get_sessions_for_attempt(conn, attempt_id)
 
@@ -278,9 +282,7 @@ def get_worker(conn: psycopg.Connection, attempt_id: str, worker_id: int) -> dic
     active = worker_session_repository.get_active_session_for_worker(conn, attempt_id, worker_id)
     history = worker_session_repository.get_sessions_for_worker(conn, attempt_id, worker_id)
     if not active and not history:
-        raise AttemptNotFoundError(
-            f"Worker {worker_id} not found for attempt '{attempt_id}'."
-        )
+        raise AttemptNotFoundError(f"Worker {worker_id} not found for attempt '{attempt_id}'.")
     return {
         "worker_id": worker_id,
         "active_session": active,
@@ -330,9 +332,8 @@ def get_step(conn: psycopg.Connection, attempt_id: str, step_id: int) -> dict:
 
 # ─── Commands ────────────────────────────────────────────────────────────────
 
-def abort_attempt(
-    conn: psycopg.Connection, attempt_id: str, reason: str | None = None
-) -> dict:
+
+def abort_attempt(conn: psycopg.Connection, attempt_id: str, reason: str | None = None) -> dict:
     attempt = attempt_repository.get_attempt(conn, attempt_id)
     if attempt is None:
         raise AttemptNotFoundError(f"Attempt '{attempt_id}' not found.")
@@ -343,7 +344,7 @@ def abort_attempt(
         )
 
     command_id = _new_command_id()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     cmd_row = command_repository.create_command(
         conn,
@@ -372,7 +373,7 @@ def request_checkpoint(
         )
 
     command_id = _new_command_id()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     cmd_row = command_repository.create_command(
         conn,

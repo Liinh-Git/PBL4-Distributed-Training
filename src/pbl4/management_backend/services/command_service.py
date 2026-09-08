@@ -10,7 +10,7 @@ import logging
 
 import psycopg
 
-from management_backend.repositories import command_repository
+from pbl4.management_backend.repositories import command_repository
 
 logger = logging.getLogger(__name__)
 

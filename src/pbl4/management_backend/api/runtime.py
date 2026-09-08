@@ -7,8 +7,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from management_backend.gateways.runtime_gateway import get_gateway
-from management_backend.schemas.runtime import RuntimeSnapshot
+from pbl4.management_backend.gateways.runtime_gateway import get_gateway
+from pbl4.management_backend.schemas.runtime import RuntimeSnapshot
 
 router = APIRouter(tags=["Runtime"])
 

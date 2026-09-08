@@ -12,14 +12,14 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import psycopg
 
-from management_backend.repositories import (
-    dataset_repository,
-    dataset_build_repository,
+from pbl4.management_backend.repositories import (
     command_repository,
+    dataset_build_repository,
+    dataset_repository,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,7 @@ class DatasetBuildStateError(Exception):
 
 class DatasetBuildReferenceError(Exception):
     """Build cannot be deleted because active references exist."""
+
     pass
 
 
@@ -58,6 +59,7 @@ def _new_command_id() -> str:
 
 # ─── Dataset ──────────────────────────────────────────────────────────────────
 
+
 def create_dataset(
     conn: psycopg.Connection,
     *,
@@ -67,7 +69,7 @@ def create_dataset(
     source_reference: str,
 ) -> dict:
     dataset_id = _new_dataset_id()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     row = dataset_repository.create_dataset(
         conn,
         dataset_id=dataset_id,
@@ -104,6 +106,7 @@ def list_datasets(
 
 # ─── Dataset Build ────────────────────────────────────────────────────────────
 
+
 def create_build(
     conn: psycopg.Connection,
     *,
@@ -124,7 +127,7 @@ def create_build(
 
     build_id = _new_build_id()
     command_id = _new_command_id()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Reasonable defaults for build metadata
     input_shape = preprocessing.get("input_shape") or [3, 32, 32]
@@ -211,15 +214,17 @@ def rebuild_build(
 
     new_build_id = _new_build_id()
     command_id = _new_command_id()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     src_preprocessing = source.get("preprocessing_json") or {}
     if isinstance(src_preprocessing, str):
         import json
+
         src_preprocessing = json.loads(src_preprocessing)
     src_input_shape = source.get("input_shape_json") or [3, 32, 32]
     if isinstance(src_input_shape, str):
         import json
+
         src_input_shape = json.loads(src_input_shape)
 
     merged_preprocessing = {**src_preprocessing, **(preprocessing or {})}
@@ -255,13 +260,16 @@ def rebuild_build(
         requested_at=now,
     )
 
-    logger.info("Dataset build rebuild requested: %s → %s (cmd=%s)", dataset_build_id, new_build_id, command_id)
+    logger.info(
+        "Dataset build rebuild requested: %s → %s (cmd=%s)",
+        dataset_build_id,
+        new_build_id,
+        command_id,
+    )
     return new_build, cmd_row
 
 
-def deprecate_build(
-    conn: psycopg.Connection, dataset_build_id: str
-) -> dict:
+def deprecate_build(conn: psycopg.Connection, dataset_build_id: str) -> dict:
     build = dataset_build_repository.get_build(conn, dataset_build_id)
     if build is None:
         raise DatasetBuildNotFoundError(f"Dataset build '{dataset_build_id}' not found.")
@@ -270,7 +278,7 @@ def deprecate_build(
             f"Build '{dataset_build_id}' is '{build['state']}'; only READY builds can be deprecated.",
             current_state=build["state"],
         )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     row = dataset_build_repository.update_build_state(
         conn, dataset_build_id, "DEPRECATED", deprecated_at=now
     )
@@ -278,9 +286,7 @@ def deprecate_build(
     return row
 
 
-def delete_build(
-    conn: psycopg.Connection, dataset_build_id: str
-) -> tuple[dict, dict]:
+def delete_build(conn: psycopg.Connection, dataset_build_id: str) -> tuple[dict, dict]:
     """Mark build as DELETING and issue a DELETE_DATASET_BUILD command."""
     build = dataset_build_repository.get_build(conn, dataset_build_id)
     if build is None:
@@ -298,12 +304,10 @@ def delete_build(
             f"Build '{dataset_build_id}' is referenced by {len(active_refs)} checkpoint(s)."
         )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     command_id = _new_command_id()
 
-    build_row = dataset_build_repository.update_build_state(
-        conn, dataset_build_id, "DELETING"
-    )
+    build_row = dataset_build_repository.update_build_state(conn, dataset_build_id, "DELETING")
     cmd_row = command_repository.create_command(
         conn,
         command_id=command_id,

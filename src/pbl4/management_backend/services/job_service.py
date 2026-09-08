@@ -16,17 +16,15 @@ import hashlib
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 
 import psycopg
 
-from management_backend.repositories import (
-    job_repository,
-    dataset_build_repository,
+from pbl4.management_backend.repositories import (
     attempt_repository,
+    job_repository,
 )
-from management_backend.services import contract_resolver
+from pbl4.management_backend.services import contract_resolver
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +43,7 @@ class JobStateError(Exception):
 
 class JobValidationError(Exception):
     """Raised when contract or field validation fails."""
+
     def __init__(self, msg: str, errors: list[str] | None = None) -> None:
         super().__init__(msg)
         self.errors = errors or [msg]
@@ -67,15 +66,23 @@ def _hash_contract(resolved: dict) -> str:
 def _validate_contract(requested_contract: dict) -> list[str]:
     """Basic contract validation. Returns list of error messages (empty = valid)."""
     errors = []
-    required_fields = ["dataset_build_id", "model_id", "epochs", "learning_rate",
-                       "training_seed", "training_strategy"]
+    required_fields = [
+        "dataset_build_id",
+        "model_id",
+        "epochs",
+        "learning_rate",
+        "training_seed",
+        "training_strategy",
+    ]
     for field in required_fields:
         if field not in requested_contract or requested_contract[field] is None:
             errors.append(f"Missing required contract field: '{field}'")
 
     strategy = requested_contract.get("training_strategy", "")
     if strategy and strategy != "strict_bsp":
-        errors.append(f"Unsupported training strategy: '{strategy}'. V1 only supports 'strict_bsp'.")
+        errors.append(
+            f"Unsupported training strategy: '{strategy}'. V1 only supports 'strict_bsp'."
+        )
 
     epochs = requested_contract.get("epochs")
     if epochs is not None and (not isinstance(epochs, int) or epochs < 1):
@@ -98,6 +105,7 @@ def _resolve_contract(conn: psycopg.Connection, requested_contract: dict) -> dic
 
 # ─── Service API ─────────────────────────────────────────────────────────────
 
+
 def create_job(
     conn: psycopg.Connection,
     *,
@@ -110,7 +118,7 @@ def create_job(
         raise JobValidationError("Contract validation failed", errors)
 
     job_id = _new_job_id()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     row = job_repository.create_job(
         conn,
         job_id=job_id,
@@ -234,10 +242,11 @@ def freeze_job(conn: psycopg.Connection, job_id: str) -> dict:
 
     resolved = _resolve_contract(conn, rc)
     contract_hash = _hash_contract(resolved)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     row = job_repository.freeze_job(
-        conn, job_id,
+        conn,
+        job_id,
         resolved_contract=resolved,
         contract_hash=contract_hash,
         frozen_at=now,
@@ -262,7 +271,7 @@ def clone_job(conn: psycopg.Connection, job_id: str, *, display_name: str | None
         rc = json.loads(rc)
 
     new_job_id = _new_job_id()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     new_display_name = display_name or f"Clone of {source['display_name']}"
 
     row = job_repository.create_job(
@@ -303,7 +312,7 @@ def archive_job(conn: psycopg.Connection, job_id: str) -> dict:
             current_state=current["state"],
         )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     row = job_repository.archive_job(conn, job_id, archived_at=now)
     if row is None:
         raise JobStateError(

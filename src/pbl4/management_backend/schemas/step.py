@@ -6,6 +6,7 @@ Aligned to api_contract_formatted.md — Training/StrictBSP group.
 from __future__ import annotations
 
 from datetime import datetime
+
 from pydantic import BaseModel
 
 

@@ -6,14 +6,14 @@ GET /api/v1/commands/{command_id}    — get command detail
 
 from __future__ import annotations
 
-from typing import Annotated, Optional
+from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
 
-from management_backend import db
-from management_backend.schemas.command import CommandDetail, CommandListItem, CommandResult
-from management_backend.schemas.common import ListResponse, PageInfo
-from management_backend.services import command_service
+from pbl4.management_backend import db
+from pbl4.management_backend.schemas.command import CommandDetail, CommandListItem, CommandResult
+from pbl4.management_backend.schemas.common import ListResponse, PageInfo
+from pbl4.management_backend.services import command_service
 
 router = APIRouter(tags=["Commands"])
 
@@ -24,12 +24,12 @@ router = APIRouter(tags=["Commands"])
     summary="List control commands",
 )
 def list_commands(
-    command_type: Annotated[Optional[str], Query()] = None,
-    state: Annotated[Optional[str], Query()] = None,
-    target_type: Annotated[Optional[str], Query()] = None,
-    target_id: Annotated[Optional[str], Query()] = None,
+    command_type: Annotated[str | None, Query()] = None,
+    state: Annotated[str | None, Query()] = None,
+    target_type: Annotated[str | None, Query()] = None,
+    target_id: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    cursor: Annotated[Optional[str], Query()] = None,
+    cursor: Annotated[str | None, Query()] = None,
 ):
     with db.get_connection() as conn:
         rows = command_service.list_commands(
@@ -75,6 +75,7 @@ def get_command(command_id: str):
             raise HTTPException(status_code=404, detail=f"Command '{command_id}' not found.")
 
     import json
+
     result_jsonb = row.get("result_jsonb")
     if isinstance(result_jsonb, str):
         result_jsonb = json.loads(result_jsonb)

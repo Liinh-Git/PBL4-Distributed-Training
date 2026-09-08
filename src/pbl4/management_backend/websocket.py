@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 # ─── Broadcast Hub ────────────────────────────────────────────────────────────
 
+
 class AttemptBroadcastHub:
     """In-process pub/sub for WebSocket clients subscribed to a given attempt_id.
 
@@ -55,9 +56,7 @@ class AttemptBroadcastHub:
             try:
                 q.put_nowait(message)
             except asyncio.QueueFull:
-                logger.warning(
-                    "WebSocket queue full for attempt %s; dropping message.", attempt_id
-                )
+                logger.warning("WebSocket queue full for attempt %s; dropping message.", attempt_id)
 
     def subscriber_count(self, attempt_id: str) -> int:
         return len(self._subscribers.get(attempt_id, set()))
@@ -69,10 +68,11 @@ hub = AttemptBroadcastHub()
 
 # ─── WebSocket Endpoint ───────────────────────────────────────────────────────
 
+
 async def _attempt_ws(websocket: WebSocket, attempt_id: str) -> None:
     """Handle a single WebSocket connection for an attempt."""
-    from management_backend import db
-    from management_backend.repositories import attempt_repository
+    from pbl4.management_backend import db
+    from pbl4.management_backend.repositories import attempt_repository
 
     # Validate attempt existence
     try:
@@ -91,15 +91,17 @@ async def _attempt_ws(websocket: WebSocket, attempt_id: str) -> None:
     logger.info("WebSocket connected: attempt=%s", attempt_id)
 
     # Send initial "connected" frame
-    await websocket.send_json({
-        "type": "CONNECTED",
-        "data": {
-            "attempt_id": attempt_id,
-            "attempt_state": attempt["state"],
-            "stale": True,
-            "message": "Connected. Runtime not yet active; live events will arrive when runtime connects.",
-        },
-    })
+    await websocket.send_json(
+        {
+            "type": "CONNECTED",
+            "data": {
+                "attempt_id": attempt_id,
+                "attempt_state": attempt["state"],
+                "stale": True,
+                "message": "Connected. Runtime not yet active; live events will arrive when runtime connects.",
+            },
+        }
+    )
 
     q = hub.subscribe(attempt_id)
     try:

@@ -40,8 +40,14 @@ def create_step(
             RETURNING *
             """,
             (
-                attempt_id, step_id, operation_id, training_strategy,
-                epoch, batch_ordinal, input_model_version, started_at,
+                attempt_id,
+                step_id,
+                operation_id,
+                training_strategy,
+                epoch,
+                batch_ordinal,
+                input_model_version,
+                started_at,
             ),
         )
         row = cur.fetchone()
@@ -116,9 +122,7 @@ def update_step(
     return _row_to_dict(row) if row else None
 
 
-def get_step(
-    conn: psycopg.Connection, attempt_id: str, step_id: int
-) -> dict | None:
+def get_step(conn: psycopg.Connection, attempt_id: str, step_id: int) -> dict | None:
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "SELECT * FROM steps WHERE attempt_id = %s AND step_id = %s",
@@ -158,9 +162,7 @@ def list_steps(
     return [_row_to_dict(r) for r in rows]
 
 
-def get_worker_steps(
-    conn: psycopg.Connection, attempt_id: str, step_id: int
-) -> list[dict]:
+def get_worker_steps(conn: psycopg.Connection, attempt_id: str, step_id: int) -> list[dict]:
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
@@ -212,10 +214,20 @@ def upsert_worker_step(
             RETURNING *
             """,
             (
-                attempt_id, step_id, worker_id, session_id, shard_id,
-                batch_id, sample_count, loss, accuracy,
-                compute_ms, upload_ms, parameter_apply_ms,
-                bytes_sent, bytes_received,
+                attempt_id,
+                step_id,
+                worker_id,
+                session_id,
+                shard_id,
+                batch_id,
+                sample_count,
+                loss,
+                accuracy,
+                compute_ms,
+                upload_ms,
+                parameter_apply_ms,
+                bytes_sent,
+                bytes_received,
             ),
         )
         row = cur.fetchone()

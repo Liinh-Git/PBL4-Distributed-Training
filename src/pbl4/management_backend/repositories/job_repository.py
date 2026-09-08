@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 import psycopg
@@ -20,8 +20,12 @@ JOB_STATES = {"DRAFT", "READY", "ARCHIVED"}
 
 # Active attempt states (for counting)
 ACTIVE_ATTEMPT_STATES = {
-    "CREATED", "WAITING_WORKERS", "PROVISIONING",
-    "INITIALIZING", "RUNNING", "COMPLETING",
+    "CREATED",
+    "WAITING_WORKERS",
+    "PROVISIONING",
+    "INITIALIZING",
+    "RUNNING",
+    "COMPLETING",
 }
 
 
@@ -97,9 +101,7 @@ def list_jobs(
     if cursor:
         try:
             ts_str, cid = cursor.split("|", 1)
-            conditions.append(
-                "(created_at, job_id) < (%s::timestamptz, %s)"
-            )
+            conditions.append("(created_at, job_id) < (%s::timestamptz, %s)")
             params.extend([ts_str, cid])
         except ValueError:
             pass  # ignore malformed cursor
@@ -208,7 +210,5 @@ def archive_job(
 def count_attempts(conn: psycopg.Connection, job_id: str) -> int:
     """Count total attempts for a job."""
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT COUNT(*) FROM attempts WHERE job_id = %s", (job_id,)
-        )
+        cur.execute("SELECT COUNT(*) FROM attempts WHERE job_id = %s", (job_id,))
         return cur.fetchone()[0]

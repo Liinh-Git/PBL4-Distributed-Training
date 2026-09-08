@@ -6,13 +6,17 @@ GET /api/v1/system/capabilities
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter
 
-from management_backend import db
-from management_backend.gateways.runtime_gateway import get_gateway
-from management_backend.schemas.runtime import CapabilitiesResponse, FeatureFlags, HealthResponse
+from pbl4.management_backend import db
+from pbl4.management_backend.gateways.runtime_gateway import get_gateway
+from pbl4.management_backend.schemas.runtime import (
+    CapabilitiesResponse,
+    FeatureFlags,
+    HealthResponse,
+)
 
 router = APIRouter(tags=["System"])
 
@@ -32,7 +36,7 @@ def health() -> HealthResponse:
         postgres="healthy" if db_ok else "degraded",
         runtime_mcp="connected" if gateway.connected else "disconnected",
         dataset_manager="unknown",  # not yet connected
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
 

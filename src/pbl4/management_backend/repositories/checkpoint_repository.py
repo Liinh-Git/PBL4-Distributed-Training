@@ -56,18 +56,26 @@ def create_checkpoint(
             RETURNING *
             """,
             (
-                checkpoint_id, created_by_attempt_id, source_operation_id,
-                source_step_id, model_version, json.dumps(recovery_cursor_jsonb),
-                epoch, next_batch_ordinal, contract_hash,
-                dataset_build_id, dataset_manifest_hash, parameter_manifest_hash,
-                checkpoint_policy, checkpoint_policy_version, created_at,
+                checkpoint_id,
+                created_by_attempt_id,
+                source_operation_id,
+                source_step_id,
+                model_version,
+                json.dumps(recovery_cursor_jsonb),
+                epoch,
+                next_batch_ordinal,
+                contract_hash,
+                dataset_build_id,
+                dataset_manifest_hash,
+                parameter_manifest_hash,
+                checkpoint_policy,
+                checkpoint_policy_version,
+                created_at,
             ),
         )
         row = cur.fetchone()
         if row is None:
-            cur.execute(
-                "SELECT * FROM checkpoints WHERE checkpoint_id = %s", (checkpoint_id,)
-            )
+            cur.execute("SELECT * FROM checkpoints WHERE checkpoint_id = %s", (checkpoint_id,))
             row = cur.fetchone()
     return _row_to_dict(row)
 
@@ -98,17 +106,20 @@ def complete_checkpoint(
             RETURNING *
             """,
             (
-                model_path, metadata_path, model_sha256, metadata_sha256,
-                artifact_size_bytes, completed_at, checkpoint_id,
+                model_path,
+                metadata_path,
+                model_sha256,
+                metadata_sha256,
+                artifact_size_bytes,
+                completed_at,
+                checkpoint_id,
             ),
         )
         row = cur.fetchone()
     return _row_to_dict(row) if row else None
 
 
-def fail_checkpoint(
-    conn: psycopg.Connection, checkpoint_id: str
-) -> dict | None:
+def fail_checkpoint(conn: psycopg.Connection, checkpoint_id: str) -> dict | None:
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
@@ -124,9 +135,7 @@ def fail_checkpoint(
 
 def get_checkpoint(conn: psycopg.Connection, checkpoint_id: str) -> dict | None:
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            "SELECT * FROM checkpoints WHERE checkpoint_id = %s", (checkpoint_id,)
-        )
+        cur.execute("SELECT * FROM checkpoints WHERE checkpoint_id = %s", (checkpoint_id,))
         row = cur.fetchone()
     return _row_to_dict(row) if row else None
 
@@ -182,9 +191,7 @@ def list_checkpoints(
     return [_row_to_dict(r) for r in rows]
 
 
-def get_latest_complete_for_attempt(
-    conn: psycopg.Connection, attempt_id: str
-) -> dict | None:
+def get_latest_complete_for_attempt(conn: psycopg.Connection, attempt_id: str) -> dict | None:
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """

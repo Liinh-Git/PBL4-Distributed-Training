@@ -13,9 +13,19 @@ from psycopg.rows import dict_row
 logger = logging.getLogger(__name__)
 
 DATASET_BUILD_STATES = {
-    "CREATED", "QUEUED", "IMPORTING", "VALIDATING", "PREPROCESSING",
-    "MATERIALIZING", "VERIFYING", "REGISTERING", "READY", "FAILED",
-    "DEPRECATED", "DELETING", "DELETED",
+    "CREATED",
+    "QUEUED",
+    "IMPORTING",
+    "VALIDATING",
+    "PREPROCESSING",
+    "MATERIALIZING",
+    "VERIFYING",
+    "REGISTERING",
+    "READY",
+    "FAILED",
+    "DEPRECATED",
+    "DELETING",
+    "DELETED",
 }
 
 # States from which a build is "selectable" for a new job
@@ -64,9 +74,17 @@ def create_build(
             RETURNING *
             """,
             (
-                dataset_build_id, dataset_id, profile,
-                json.dumps(input_shape_json), dtype, num_classes, json.dumps(preprocessing_json),
-                batch_size, shard_count, partition_seed, sample_count,
+                dataset_build_id,
+                dataset_id,
+                profile,
+                json.dumps(input_shape_json),
+                dtype,
+                num_classes,
+                json.dumps(preprocessing_json),
+                batch_size,
+                shard_count,
+                partition_seed,
+                sample_count,
                 created_at,
             ),
         )

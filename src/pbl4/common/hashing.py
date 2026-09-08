@@ -28,6 +28,8 @@ data model specifications.
 from __future__ import annotations
 
 import hashlib
+import json
+from typing import Any
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -42,3 +44,19 @@ def sha256_file(path: str) -> str:
         while chunk := f.read(8192):
             h.update(chunk)
     return h.hexdigest()
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    """Deterministic UTF-8 JSON serialization per canonical data model specification."""
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def canonical_json_hash(value: Any) -> str:
+    """Return hex-encoded SHA-256 digest of canonically serialized JSON data."""
+    return sha256_bytes(canonical_json_bytes(value))

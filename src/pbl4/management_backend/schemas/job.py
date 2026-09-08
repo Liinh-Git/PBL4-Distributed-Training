@@ -10,8 +10,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-
 # ─── Requested Contract (user input) ─────────────────────────────────────────
+
 
 class RequestedContractV1(BaseModel):
     dataset_build_id: str
@@ -23,6 +23,7 @@ class RequestedContractV1(BaseModel):
 
 
 # ─── Resolved Contract (frozen after validate/freeze) ─────────────────────────
+
 
 class ResolvedDataset(BaseModel):
     dataset_build_id: str
@@ -79,6 +80,7 @@ class ResolvedContractV1(BaseModel):
 
 # ─── Request Bodies ───────────────────────────────────────────────────────────
 
+
 class JobCreateRequest(BaseModel):
     display_name: str = Field(min_length=1)
     description: str = ""
@@ -100,6 +102,7 @@ class JobResumeRequest(BaseModel):
 
 
 # ─── Response Objects ─────────────────────────────────────────────────────────
+
 
 class LatestAttemptSummary(BaseModel):
     attempt_id: str

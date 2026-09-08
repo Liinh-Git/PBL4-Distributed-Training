@@ -51,16 +51,21 @@ def insert_event(
                 RETURNING *
                 """,
                 (
-                    attempt_id, runtime_event_seq, event_type,
-                    source_component, scope_type, scope_id, severity,
-                    json.dumps(payload), occurred_at, persisted_at,
+                    attempt_id,
+                    runtime_event_seq,
+                    event_type,
+                    source_component,
+                    scope_type,
+                    scope_id,
+                    severity,
+                    json.dumps(payload),
+                    occurred_at,
+                    persisted_at,
                 ),
             )
             row = cur.fetchone()
     except psycopg.errors.UniqueViolation:
-        logger.debug(
-            "Duplicate event skipped: attempt_id=%s seq=%s", attempt_id, runtime_event_seq
-        )
+        logger.debug("Duplicate event skipped: attempt_id=%s seq=%s", attempt_id, runtime_event_seq)
         return None
     return _row_to_dict(row) if row else None
 

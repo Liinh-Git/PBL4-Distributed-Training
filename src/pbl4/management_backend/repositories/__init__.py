@@ -1,6 +1,6 @@
 """Repositories package — public re-exports."""
 
-from management_backend.repositories import (
+from pbl4.management_backend.repositories import (
     attempt_repository,
     checkpoint_repository,
     command_repository,

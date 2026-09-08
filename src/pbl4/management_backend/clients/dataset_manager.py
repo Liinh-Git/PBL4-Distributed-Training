@@ -40,7 +40,9 @@ class DatasetManagerClient:
         Raises DatasetManagerUnavailableError if not reachable.
         """
         if not self.available:
-            logger.warning("Dataset Manager unavailable; build trigger skipped for %s.", dataset_build_id)
+            logger.warning(
+                "Dataset Manager unavailable; build trigger skipped for %s.", dataset_build_id
+            )
             return {"status": "QUEUED_LOCAL", "note": "Dataset Manager not configured."}
         # TODO: implement httpx POST when Dataset Manager is deployed
         raise NotImplementedError("Dataset Manager HTTP integration not yet implemented.")

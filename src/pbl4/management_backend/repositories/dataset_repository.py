@@ -64,9 +64,7 @@ def list_datasets(
         params.append(task_type)
 
     if q:
-        conditions.append(
-            "(LOWER(dataset_id) LIKE LOWER(%s) OR LOWER(name) LIKE LOWER(%s))"
-        )
+        conditions.append("(LOWER(dataset_id) LIKE LOWER(%s) OR LOWER(name) LIKE LOWER(%s))")
         like = f"%{q}%"
         params.extend([like, like])
 
@@ -96,9 +94,19 @@ def list_datasets(
 def get_build_counts_for_dataset(conn: psycopg.Connection, dataset_id: str) -> dict:
     """Return a count per state for all dataset builds of the given dataset."""
     all_states = [
-        "CREATED", "QUEUED", "IMPORTING", "VALIDATING", "PREPROCESSING",
-        "MATERIALIZING", "VERIFYING", "REGISTERING", "READY", "FAILED",
-        "DEPRECATED", "DELETING", "DELETED",
+        "CREATED",
+        "QUEUED",
+        "IMPORTING",
+        "VALIDATING",
+        "PREPROCESSING",
+        "MATERIALIZING",
+        "VERIFYING",
+        "REGISTERING",
+        "READY",
+        "FAILED",
+        "DEPRECATED",
+        "DELETING",
+        "DELETED",
     ]
     with conn.cursor() as cur:
         cur.execute(

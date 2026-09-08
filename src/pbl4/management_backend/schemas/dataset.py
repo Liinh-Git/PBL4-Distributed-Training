@@ -6,15 +6,15 @@ Aligned to api_contract_formatted.md — Dataset and Dataset Build groups.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
 from pydantic import BaseModel, Field
 
-
 # ─── Dataset ──────────────────────────────────────────────────────────────────
+
 
 class DatasetCreateRequest(BaseModel):
     """POST /api/v1/datasets — DatasetSourceV1."""
+
     name: str = Field(min_length=1)
     task_type: str
     source_type: str
@@ -52,6 +52,7 @@ class DatasetDetail(DatasetItem):
 
 # ─── Dataset Build ────────────────────────────────────────────────────────────
 
+
 class NormalizationConfig(BaseModel):
     mean: list[float]
     std: list[float]
@@ -64,6 +65,7 @@ class PreprocessingConfig(BaseModel):
 
 class DatasetBuildCreateRequest(BaseModel):
     """POST /api/v1/dataset-builds — DatasetBuildCreateV1."""
+
     dataset_id: str
     profile: str
     batch_size: int = Field(gt=0)
@@ -73,6 +75,7 @@ class DatasetBuildCreateRequest(BaseModel):
 
 class DatasetBuildRebuildRequest(BaseModel):
     """POST /api/v1/dataset-builds/{id}/rebuild — optional overrides."""
+
     batch_size: int | None = Field(default=None, gt=0)
     partition_seed: int | None = Field(default=None, ge=0)
     preprocessing: PreprocessingConfig | None = None

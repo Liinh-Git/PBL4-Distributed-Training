@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +31,8 @@ def main() -> None:
     args = parser.parse_args()
 
     # Load settings to resolve defaults
-    from management_backend.config import get_settings
+    from pbl4.management_backend.config import get_settings
+
     settings = get_settings()
 
     host = args.host or settings.backend_host
@@ -42,7 +42,7 @@ def main() -> None:
     logger.info("Starting pbl4-backend on %s:%d (log_level=%s)", host, port, log_level)
 
     uvicorn.run(
-        "management_backend.app:create_app",
+        "pbl4.management_backend.app:create_app",
         factory=True,
         host=host,
         port=port,

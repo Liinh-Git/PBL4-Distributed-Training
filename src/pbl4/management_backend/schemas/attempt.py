@@ -6,12 +6,11 @@ Aligned to api_contract_formatted.md — Attempt and Runtime/Worker groups.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
-from pydantic import BaseModel, Field
-
+from pydantic import BaseModel
 
 # ─── Attempt ─────────────────────────────────────────────────────────────────
+
 
 class AttemptListItem(BaseModel):
     attempt_id: str
@@ -119,6 +118,7 @@ class CheckpointRequestResponse(BaseModel):
 
 # ─── Worker Session ───────────────────────────────────────────────────────────
 
+
 class WorkerSessionItem(BaseModel):
     worker_id: int
     session_id: str
@@ -141,6 +141,7 @@ class WorkerDetail(BaseModel):
 
 # ─── Attempt Snapshot ─────────────────────────────────────────────────────────
 
+
 class AttemptSnapshot(BaseModel):
     attempt_id: str
     state: str
@@ -159,6 +160,7 @@ class AttemptSnapshot(BaseModel):
 
 
 # ─── Join Spec ───────────────────────────────────────────────────────────────
+
 
 class JoinSpecProtocol(BaseModel):
     dtp_version: int

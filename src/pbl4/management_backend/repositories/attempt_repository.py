@@ -13,12 +13,19 @@ from psycopg.rows import dict_row
 logger = logging.getLogger(__name__)
 
 ACTIVE_ATTEMPT_STATES = {
-    "CREATED", "WAITING_WORKERS", "PROVISIONING",
-    "INITIALIZING", "RUNNING", "COMPLETING",
+    "CREATED",
+    "WAITING_WORKERS",
+    "PROVISIONING",
+    "INITIALIZING",
+    "RUNNING",
+    "COMPLETING",
 }
 ABORTABLE_ATTEMPT_STATES = {
-    "CREATED", "WAITING_WORKERS", "PROVISIONING",
-    "INITIALIZING", "RUNNING",
+    "CREATED",
+    "WAITING_WORKERS",
+    "PROVISIONING",
+    "INITIALIZING",
+    "RUNNING",
 }
 TERMINAL_ATTEMPT_STATES = {"COMPLETED", "FAILED", "ABORTED"}
 
@@ -47,8 +54,12 @@ def create_attempt(
             RETURNING *
             """,
             (
-                attempt_id, job_id, contract_hash, execution_mode,
-                resume_from_checkpoint_id, created_at,
+                attempt_id,
+                job_id,
+                contract_hash,
+                execution_mode,
+                resume_from_checkpoint_id,
+                created_at,
             ),
         )
         row = cur.fetchone()

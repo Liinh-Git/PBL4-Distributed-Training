@@ -16,13 +16,13 @@ GET    /api/v1/attempts/{attempt_id}/steps/{step_id} — step detail
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Optional
+from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from management_backend import db
-from management_backend.gateways.runtime_gateway import get_gateway
-from management_backend.schemas.attempt import (
+from pbl4.management_backend import db
+from pbl4.management_backend.gateways.runtime_gateway import get_gateway
+from pbl4.management_backend.schemas.attempt import (
     AbortAttemptRequest,
     AbortAttemptResponse,
     AttemptDetail,
@@ -30,15 +30,19 @@ from management_backend.schemas.attempt import (
     AttemptSnapshot,
     CheckpointRequestBody,
     CheckpointRequestResponse,
-    JoinSpec,
     MembershipInfo,
     WorkerDetail,
     WorkerSessionItem,
 )
-from management_backend.schemas.common import ListResponse, PageInfo
-from management_backend.schemas.event import RuntimeEventItem, RuntimeEventsMeta
-from management_backend.schemas.step import StepDetail, StepListItem, StepTiming, WorkerStepItem
-from management_backend.services import attempt_service
+from pbl4.management_backend.schemas.common import ListResponse, PageInfo
+from pbl4.management_backend.schemas.event import RuntimeEventItem, RuntimeEventsMeta
+from pbl4.management_backend.schemas.step import (
+    StepDetail,
+    StepListItem,
+    StepTiming,
+    WorkerStepItem,
+)
+from pbl4.management_backend.services import attempt_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Attempts"])
@@ -64,16 +68,20 @@ def _session_to_item(row: dict) -> WorkerSessionItem:
     summary="List all attempts",
 )
 def list_attempts(
-    job_id: Annotated[Optional[str], Query()] = None,
-    state: Annotated[Optional[str], Query()] = None,
-    execution_mode: Annotated[Optional[str], Query()] = None,
+    job_id: Annotated[str | None, Query()] = None,
+    state: Annotated[str | None, Query()] = None,
+    execution_mode: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    cursor: Annotated[Optional[str], Query()] = None,
+    cursor: Annotated[str | None, Query()] = None,
 ):
     with db.get_connection() as conn:
         rows = attempt_service.list_attempts(
-            conn, job_id=job_id, state=state, execution_mode=execution_mode,
-            limit=limit + 1, cursor=cursor,
+            conn,
+            job_id=job_id,
+            state=state,
+            execution_mode=execution_mode,
+            limit=limit + 1,
+            cursor=cursor,
         )
     has_more = len(rows) > limit
     items = [
@@ -168,9 +176,7 @@ def abort_attempt(attempt_id: str, body: AbortAttemptRequest = AbortAttemptReque
         except attempt_service.AttemptStateError as e:
             raise HTTPException(status_code=409, detail=str(e))
 
-    get_gateway().send_abort_attempt(
-        str(cmd_row["command_id"]), attempt_id, reason=body.reason
-    )
+    get_gateway().send_abort_attempt(str(cmd_row["command_id"]), attempt_id, reason=body.reason)
 
     return AbortAttemptResponse(
         command_id=str(cmd_row["command_id"]),
@@ -267,17 +273,20 @@ def get_worker(attempt_id: str, worker_id: int):
 )
 def list_attempt_events(
     attempt_id: str,
-    event_type: Annotated[Optional[str], Query()] = None,
-    severity: Annotated[Optional[str], Query()] = None,
+    event_type: Annotated[str | None, Query()] = None,
+    severity: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
-    cursor: Annotated[Optional[str], Query()] = None,
+    cursor: Annotated[str | None, Query()] = None,
 ):
     with db.get_connection() as conn:
         try:
             rows = attempt_service.list_attempt_events(
-                conn, attempt_id,
-                event_type=event_type, severity=severity,
-                limit=limit + 1, cursor=cursor,
+                conn,
+                attempt_id,
+                event_type=event_type,
+                severity=severity,
+                limit=limit + 1,
+                cursor=cursor,
             )
         except attempt_service.AttemptNotFoundError:
             raise HTTPException(status_code=404, detail=f"Attempt '{attempt_id}' not found.")
@@ -295,9 +304,13 @@ def list_attempt_events(
         )
         for r in rows[:limit]
     ]
-    return {"data": items, "page": {"next_cursor": next_cursor}, "meta": RuntimeEventsMeta(
-        complete=not has_more, gap_detected=False, snapshot_required=False
-    )}
+    return {
+        "data": items,
+        "page": {"next_cursor": next_cursor},
+        "meta": RuntimeEventsMeta(
+            complete=not has_more, gap_detected=False, snapshot_required=False
+        ),
+    }
 
 
 @router.get(
@@ -308,7 +321,7 @@ def list_attempt_events(
 def list_steps(
     attempt_id: str,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    cursor: Annotated[Optional[str], Query()] = None,
+    cursor: Annotated[str | None, Query()] = None,
 ):
     with db.get_connection() as conn:
         try:
@@ -364,7 +377,9 @@ def get_step(attempt_id: str, step_id: int):
             update_completed_at=step.get("update_completed_at"),
             synchronization_completed_at=step.get("synchronization_completed_at"),
             committed_at=step.get("committed_at"),
-        ) if step.get("started_at") else None,
+        )
+        if step.get("started_at")
+        else None,
         worker_steps=[
             WorkerStepItem(
                 worker_id=ws["worker_id"],

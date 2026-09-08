@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import uuid
 from datetime import datetime
 from typing import Any
 
@@ -61,8 +60,12 @@ def create_command(
             RETURNING *
             """,
             (
-                command_id, command_type, target_type, target_id,
-                json.dumps(request), json.dumps(requester_context) if requester_context else None,
+                command_id,
+                command_type,
+                target_type,
+                target_id,
+                json.dumps(request),
+                json.dumps(requester_context) if requester_context else None,
                 requested_at,
             ),
         )
@@ -103,9 +106,7 @@ def update_command_state(
 
 def get_command(conn: psycopg.Connection, command_id: str) -> dict | None:
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            "SELECT * FROM control_commands WHERE command_id = %s", (command_id,)
-        )
+        cur.execute("SELECT * FROM control_commands WHERE command_id = %s", (command_id,))
         row = cur.fetchone()
     return _row_to_dict(row) if row else None
 

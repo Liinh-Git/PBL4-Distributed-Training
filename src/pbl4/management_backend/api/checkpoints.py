@@ -7,19 +7,19 @@ GET /api/v1/checkpoints/{checkpoint_id} — get checkpoint detail
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Optional
+from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
 
-from management_backend import db
-from management_backend.repositories import checkpoint_repository
-from management_backend.schemas.checkpoint import (
+from pbl4.management_backend import db
+from pbl4.management_backend.repositories import checkpoint_repository
+from pbl4.management_backend.schemas.checkpoint import (
     CheckpointDetail,
-    CheckpointListItem,
     CheckpointIntegrity,
+    CheckpointListItem,
     CheckpointRecoveryCursor,
 )
-from management_backend.schemas.common import ListResponse, PageInfo
+from pbl4.management_backend.schemas.common import ListResponse, PageInfo
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Checkpoints"])
@@ -40,6 +40,7 @@ def _row_to_list_item(row: dict) -> CheckpointListItem:
 
 def _row_to_detail(row: dict) -> CheckpointDetail:
     import json
+
     rc = row.get("recovery_cursor_jsonb") or {}
     if isinstance(rc, str):
         rc = json.loads(rc)
@@ -84,11 +85,11 @@ def _row_to_detail(row: dict) -> CheckpointDetail:
     summary="List checkpoints",
 )
 def list_checkpoints(
-    attempt_id: Annotated[Optional[str], Query()] = None,
-    job_id: Annotated[Optional[str], Query()] = None,
-    state: Annotated[Optional[str], Query()] = None,
+    attempt_id: Annotated[str | None, Query()] = None,
+    job_id: Annotated[str | None, Query()] = None,
+    state: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    cursor: Annotated[Optional[str], Query()] = None,
+    cursor: Annotated[str | None, Query()] = None,
 ):
     with db.get_connection() as conn:
         rows = checkpoint_repository.list_checkpoints(
@@ -115,14 +116,13 @@ def list_checkpoints(
 )
 def get_checkpoint(checkpoint_id: str):
     with db.get_connection() as conn:
-        rows = checkpoint_repository.list_checkpoints(
-            conn, limit=1, cursor=None
-        )
+        rows = checkpoint_repository.list_checkpoints(conn, limit=1, cursor=None)
         row = checkpoint_repository.get_checkpoint(conn, checkpoint_id)
         if row is None:
             raise HTTPException(status_code=404, detail=f"Checkpoint '{checkpoint_id}' not found.")
         # Fetch job_id via attempt
-        from management_backend.repositories import attempt_repository
+        from pbl4.management_backend.repositories import attempt_repository
+
         attempt = attempt_repository.get_attempt(conn, row["created_by_attempt_id"])
         if attempt:
             row["job_id"] = attempt["job_id"]

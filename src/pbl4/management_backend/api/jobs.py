@@ -17,30 +17,28 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
-from typing import Annotated, Optional
+from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from management_backend import db
-from management_backend.gateways.runtime_gateway import get_gateway
-from management_backend.schemas.common import ErrorDetail, ListResponse, PageInfo
-from management_backend.schemas.job import (
-    JobCloneResponse,
+from pbl4.management_backend import db
+from pbl4.management_backend.gateways.runtime_gateway import get_gateway
+from pbl4.management_backend.schemas.common import ListResponse, PageInfo
+from pbl4.management_backend.schemas.job import (
+    AttemptSummary,
+    JobArchiveResponse,
     JobCreateRequest,
     JobDetail,
+    JobLinks,
     JobListItem,
     JobPatchRequest,
     JobResumeRequest,
     JobStartRequest,
     JobValidateResponse,
-    StartAttemptResponse,
-    JobArchiveResponse,
     LatestAttemptSummary,
-    AttemptSummary,
-    JobLinks,
+    StartAttemptResponse,
 )
-from management_backend.services import job_service, attempt_service
+from pbl4.management_backend.services import attempt_service, job_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Jobs"])
@@ -54,7 +52,8 @@ def _build_job_detail(row: dict, conn) -> JobDetail:
     if isinstance(res, str):
         res = json.loads(res)
 
-    from management_backend.repositories import attempt_repository
+    from pbl4.management_backend.repositories import attempt_repository
+
     attempts = attempt_repository.list_attempts(conn, job_id=row["job_id"], limit=1)
     latest = attempts[0] if attempts else None
     attempt_count = job_service.job_repository.count_attempts(conn, row["job_id"])
@@ -95,9 +94,9 @@ def _build_job_list_item(row: dict) -> JobListItem:
         training_strategy=rc.get("training_strategy"),
         contract_hash=row.get("contract_hash"),
         attempt_count=row.get("attempt_count", 0),
-        latest_attempt=LatestAttemptSummary(
-            attempt_id=latest_id, state=latest_state
-        ) if latest_id else None,
+        latest_attempt=LatestAttemptSummary(attempt_id=latest_id, state=latest_state)
+        if latest_id
+        else None,
         created_at=row["created_at"],
         frozen_at=row.get("frozen_at"),
     )
@@ -129,11 +128,11 @@ def create_job(body: JobCreateRequest):
     summary="List jobs",
 )
 def list_jobs(
-    state: Annotated[Optional[str], Query(description="Filter by state")] = None,
-    dataset_build_id: Annotated[Optional[str], Query()] = None,
-    q: Annotated[Optional[str], Query(description="Free text search on name/description")] = None,
+    state: Annotated[str | None, Query(description="Filter by state")] = None,
+    dataset_build_id: Annotated[str | None, Query()] = None,
+    q: Annotated[str | None, Query(description="Free text search on name/description")] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    cursor: Annotated[Optional[str], Query()] = None,
+    cursor: Annotated[str | None, Query()] = None,
 ):
     with db.get_connection() as conn:
         rows = job_service.list_jobs(
@@ -176,7 +175,8 @@ def patch_job(job_id: str, body: JobPatchRequest):
     with db.transaction() as conn:
         try:
             row = job_service.update_job(
-                conn, job_id,
+                conn,
+                job_id,
                 display_name=body.display_name,
                 description=body.description,
                 requested_contract=body.requested_contract,
@@ -238,9 +238,7 @@ def start_job(job_id: str, body: JobStartRequest = JobStartRequest()):
             raise HTTPException(status_code=409, detail=str(e))
 
     # Fire-and-forget dispatch to runtime (best effort, command is already persisted)
-    get_gateway().send_start_attempt(
-        str(cmd_row["command_id"]), attempt_row["attempt_id"], {}
-    )
+    get_gateway().send_start_attempt(str(cmd_row["command_id"]), attempt_row["attempt_id"], {})
 
     return StartAttemptResponse(
         command_id=str(cmd_row["command_id"]),
@@ -269,9 +267,7 @@ def retry_job(job_id: str):
         except attempt_service.AttemptConflictError as e:
             raise HTTPException(status_code=409, detail=str(e))
 
-    get_gateway().send_start_attempt(
-        str(cmd_row["command_id"]), attempt_row["attempt_id"], {}
-    )
+    get_gateway().send_start_attempt(str(cmd_row["command_id"]), attempt_row["attempt_id"], {})
 
     return StartAttemptResponse(
         command_id=str(cmd_row["command_id"]),
@@ -294,9 +290,7 @@ def retry_job(job_id: str):
 def resume_job(job_id: str, body: JobResumeRequest):
     with db.transaction() as conn:
         try:
-            attempt_row, cmd_row = attempt_service.resume_job(
-                conn, job_id, body.checkpoint_id
-            )
+            attempt_row, cmd_row = attempt_service.resume_job(conn, job_id, body.checkpoint_id)
         except attempt_service.AttemptNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e))
         except attempt_service.JobNotReadyError as e:

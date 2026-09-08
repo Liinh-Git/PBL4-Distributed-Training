@@ -46,9 +46,16 @@ def upsert_session(
             RETURNING *
             """,
             (
-                session_id, attempt_id, worker_id, node_label,
-                protocol_version, state, connected_at,
-                last_heartbeat_at, disconnected_at, failure_code,
+                session_id,
+                attempt_id,
+                worker_id,
+                node_label,
+                protocol_version,
+                state,
+                connected_at,
+                last_heartbeat_at,
+                disconnected_at,
+                failure_code,
             ),
         )
         row = cur.fetchone()

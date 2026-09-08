@@ -35,17 +35,11 @@ class BackendSettings(BaseSettings):
 
     # ─── Runtime (MCP/1) ──────────────────────────────────────────────────────
     runtime_host: str = Field(default="127.0.0.1", alias="RUNTIME_HOST")
-    runtime_management_port: int | None = Field(
-        default=None, alias="RUNTIME_MANAGEMENT_PORT"
-    )
+    runtime_management_port: int | None = Field(default=None, alias="RUNTIME_MANAGEMENT_PORT")
 
     # ─── Dataset Manager ──────────────────────────────────────────────────────
-    dataset_manager_host: str = Field(
-        default="127.0.0.1", alias="DATASET_MANAGER_HOST"
-    )
-    dataset_manager_port: int | None = Field(
-        default=None, alias="DATASET_MANAGER_PORT"
-    )
+    dataset_manager_host: str = Field(default="127.0.0.1", alias="DATASET_MANAGER_HOST")
+    dataset_manager_port: int | None = Field(default=None, alias="DATASET_MANAGER_PORT")
 
     # ─── Logging ──────────────────────────────────────────────────────────────
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")

@@ -14,13 +14,13 @@ DELETE /api/v1/dataset-builds/{id}               — delete build
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Optional
+from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from management_backend import db
-from management_backend.schemas.common import ListResponse, PageInfo
-from management_backend.schemas.dataset import (
+from pbl4.management_backend import db
+from pbl4.management_backend.schemas.common import ListResponse, PageInfo
+from pbl4.management_backend.schemas.dataset import (
     BuildCommandResponse,
     DatasetBuildCreateRequest,
     DatasetBuildDeprecateRequest,
@@ -33,7 +33,7 @@ from management_backend.schemas.dataset import (
     DatasetItem,
     ManifestSummary,
 )
-from management_backend.services import dataset_service
+from pbl4.management_backend.services import dataset_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Datasets"])
@@ -72,6 +72,7 @@ def _build_row_to_detail(row: dict) -> DatasetBuildDetail:
 
 # ─── Dataset Source ───────────────────────────────────────────────────────────
 
+
 @router.post(
     "/api/v1/datasets",
     response_model=DatasetDetail,
@@ -105,10 +106,10 @@ def create_dataset(body: DatasetCreateRequest):
     summary="List datasets",
 )
 def list_datasets(
-    task_type: Annotated[Optional[str], Query()] = None,
-    q: Annotated[Optional[str], Query()] = None,
+    task_type: Annotated[str | None, Query()] = None,
+    q: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    cursor: Annotated[Optional[str], Query()] = None,
+    cursor: Annotated[str | None, Query()] = None,
 ):
     with db.get_connection() as conn:
         rows = dataset_service.list_datasets(
@@ -117,8 +118,11 @@ def list_datasets(
     has_more = len(rows) > limit
     items = [
         DatasetItem(
-            dataset_id=r["dataset_id"], name=r["name"], task_type=r["task_type"],
-            source_type=r["source_type"], source_reference=r["source_reference"],
+            dataset_id=r["dataset_id"],
+            name=r["name"],
+            task_type=r["task_type"],
+            source_type=r["source_type"],
+            source_reference=r["source_reference"],
             created_at=r["created_at"],
         )
         for r in rows[:limit]
@@ -153,6 +157,7 @@ def get_dataset(dataset_id: str):
 
 
 # ─── Dataset Builds ──────────────────────────────────────────────────────────
+
 
 @router.post(
     "/api/v1/dataset-builds",
@@ -190,11 +195,11 @@ def create_build(body: DatasetBuildCreateRequest):
     summary="List dataset builds",
 )
 def list_builds(
-    dataset_id: Annotated[Optional[str], Query()] = None,
-    state: Annotated[Optional[str], Query()] = None,
-    profile: Annotated[Optional[str], Query()] = None,
+    dataset_id: Annotated[str | None, Query()] = None,
+    state: Annotated[str | None, Query()] = None,
+    profile: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    cursor: Annotated[Optional[str], Query()] = None,
+    cursor: Annotated[str | None, Query()] = None,
 ):
     with db.get_connection() as conn:
         rows = dataset_service.list_builds(
@@ -247,11 +252,14 @@ def get_build(dataset_build_id: str):
     status_code=status.HTTP_202_ACCEPTED,
     summary="Rebuild a dataset build",
 )
-def rebuild_build(dataset_build_id: str, body: DatasetBuildRebuildRequest = DatasetBuildRebuildRequest()):
+def rebuild_build(
+    dataset_build_id: str, body: DatasetBuildRebuildRequest = DatasetBuildRebuildRequest()
+):
     with db.transaction() as conn:
         try:
             new_build, cmd_row = dataset_service.rebuild_build(
-                conn, dataset_build_id,
+                conn,
+                dataset_build_id,
                 batch_size=body.batch_size,
                 partition_seed=body.partition_seed,
                 preprocessing=body.preprocessing.model_dump() if body.preprocessing else None,
@@ -278,7 +286,9 @@ def rebuild_build(dataset_build_id: str, body: DatasetBuildRebuildRequest = Data
     response_model=DatasetBuildDeprecateResponse,
     summary="Deprecate a READY dataset build",
 )
-def deprecate_build(dataset_build_id: str, body: DatasetBuildDeprecateRequest = DatasetBuildDeprecateRequest()):
+def deprecate_build(
+    dataset_build_id: str, body: DatasetBuildDeprecateRequest = DatasetBuildDeprecateRequest()
+):
     with db.transaction() as conn:
         try:
             row = dataset_service.deprecate_build(conn, dataset_build_id)

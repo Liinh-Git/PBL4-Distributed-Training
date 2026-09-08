@@ -6,12 +6,11 @@ Deduplication: events with the same (attempt_id, runtime_event_seq) are skipped.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 
 import psycopg
 
-from management_backend.repositories import event_repository
+from pbl4.management_backend.repositories import event_repository
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +29,7 @@ def ingest_runtime_event(
     payload: dict | None = None,
 ) -> dict | None:
     """Persist a runtime event. Returns None if the event was a duplicate and skipped."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     row = event_repository.insert_event(
         conn,
         event_type=event_type,
@@ -47,12 +46,16 @@ def ingest_runtime_event(
     if row is None:
         logger.debug(
             "Duplicate runtime event skipped: attempt_id=%s seq=%s type=%s",
-            attempt_id, runtime_event_seq, event_type,
+            attempt_id,
+            runtime_event_seq,
+            event_type,
         )
     else:
         logger.debug(
             "Runtime event persisted: id=%s type=%s attempt=%s",
-            row.get("event_id"), event_type, attempt_id,
+            row.get("event_id"),
+            event_type,
+            attempt_id,
         )
     return row
 
@@ -67,7 +70,7 @@ def ingest_management_event(
     payload: dict | None = None,
 ) -> dict | None:
     """Persist a management-plane event (no runtime_event_seq dedup)."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return event_repository.insert_event(
         conn,
         event_type=event_type,

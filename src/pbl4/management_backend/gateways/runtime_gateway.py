@@ -18,7 +18,7 @@ CRITICAL INVARIANTS (from data-flow spec):
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -79,14 +79,17 @@ class RuntimeGateway:
         """
         if not self._connected:
             logger.warning(
-                "Runtime not connected; START_ATTEMPT command %s queued but not dispatched.", command_id
+                "Runtime not connected; START_ATTEMPT command %s queued but not dispatched.",
+                command_id,
             )
             return False
         # TODO: Implement MCP/1 COMMAND packet send when runtime is available
         logger.info("START_ATTEMPT dispatched: cmd=%s attempt=%s", command_id, attempt_id)
         return True
 
-    def send_abort_attempt(self, command_id: str, attempt_id: str, reason: str | None = None) -> bool:
+    def send_abort_attempt(
+        self, command_id: str, attempt_id: str, reason: str | None = None
+    ) -> bool:
         """Dispatch ABORT_ATTEMPT to runtime via MCP/1."""
         if not self._connected:
             logger.warning(
@@ -124,9 +127,7 @@ def init_gateway(host: str | None, port: int | None) -> RuntimeGateway:
     global _gateway
     _gateway = RuntimeGateway()
     if host and port:
-        logger.info(
-            "Runtime gateway configured (not yet connected): %s:%d", host, port
-        )
+        logger.info("Runtime gateway configured (not yet connected): %s:%d", host, port)
     else:
         logger.warning("Runtime host/port not configured; runtime gateway in stub mode.")
     return _gateway
