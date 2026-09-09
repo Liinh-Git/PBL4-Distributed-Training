@@ -49,7 +49,7 @@ Thumbs.db
 checkpoints/
 dataset_store/
 worker_cache/
-logs/
+/logs/
 
 # ─── Local PostgreSQL data ────────────────────────────────
 pgdata/

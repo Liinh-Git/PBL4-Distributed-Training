@@ -1,31 +1,47 @@
-"""Command Service — asynchronous control command dispatch and tracking.
+"""Command Service — query and lifecycle for control_commands.
 
-CANONICAL REFERENCES
---------------------
-- 02. Mô hình miền
-- 03. Mô hình dữ liệu
-- 04. Cấu trúc mã nguồn
-- docs/IMPLEMENTATION_CONTRACT.md -> Module-to-Canonical-Document mapping
-
-OWNS
-----
-- Routing canonical management commands from REST/CLI/WebUI to Runtime via RuntimeGateway.
-- Tracking command lifecycle, delivery status, and idempotency in PostgreSQL.
-
-MUST NOT OWN
-------------
-- Command execution inside Runtime (Runtime executes commands internally).
-- Direct socket transport manipulation (delegated to RuntimeGateway / McpCodec).
-- Training-step level synchronization commands (training steps are autonomous).
-
-CRITICAL V1 INVARIANTS
-----------------------
-- Management commands route strictly via MCP/1 gateway.
-- Training step progression does not depend on synchronous command delivery.
-
-IMPLEMENTATION STATUS
----------------------
-Scaffold only. Core behavior is intentionally not implemented.
+Commands are created by other services (AttemptService, DatasetService).
+This service provides read access and status tracking.
 """
 
 from __future__ import annotations
+
+import logging
+
+import psycopg
+
+from pbl4.management_backend.repositories import command_repository
+
+logger = logging.getLogger(__name__)
+
+
+class CommandNotFoundError(Exception):
+    pass
+
+
+def get_command(conn: psycopg.Connection, command_id: str) -> dict:
+    row = command_repository.get_command(conn, command_id)
+    if row is None:
+        raise CommandNotFoundError(f"Command '{command_id}' not found.")
+    return row
+
+
+def list_commands(
+    conn: psycopg.Connection,
+    *,
+    command_type: str | None = None,
+    state: str | None = None,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    limit: int = 50,
+    cursor: str | None = None,
+) -> list[dict]:
+    return command_repository.list_commands(
+        conn,
+        command_type=command_type,
+        state=state,
+        target_type=target_type,
+        target_id=target_id,
+        limit=limit,
+        cursor=cursor,
+    )

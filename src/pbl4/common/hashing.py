@@ -36,18 +36,6 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def canonical_json_bytes(value: object) -> bytes:
-    """Serialize the canonical V1 JSON representation before hashing."""
-    return json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
-    ).encode("utf-8")
-
-
-def sha256_canonical_json(value: object) -> str:
-    """Hash canonical JSON rather than presentation whitespace or key order."""
-    return sha256_bytes(canonical_json_bytes(value))
-
-
 def sha256_file(path: str) -> str:
     """Return hex-encoded SHA-256 digest of a file, read in chunks."""
     h = hashlib.sha256()
@@ -55,3 +43,29 @@ def sha256_file(path: str) -> str:
         while chunk := f.read(8192):
             h.update(chunk)
     return h.hexdigest()
+
+
+def canonical_json_dumps(value: object) -> str:
+    """Deterministic JSON string per canonical data model specification."""
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def canonical_json_bytes(value: object) -> bytes:
+    """Deterministic UTF-8 JSON serialization per canonical data model specification."""
+    return canonical_json_dumps(value).encode("utf-8")
+
+
+def canonical_json_hash(value: object) -> str:
+    """Return hex-encoded SHA-256 digest of canonically serialized JSON data."""
+    return sha256_bytes(canonical_json_bytes(value))
+
+
+def sha256_canonical_json(value: object) -> str:
+    """Hash canonical JSON rather than presentation whitespace or key order."""
+    return canonical_json_hash(value)
