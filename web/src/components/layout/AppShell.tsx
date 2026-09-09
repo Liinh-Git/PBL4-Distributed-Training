@@ -52,22 +52,41 @@ export default function AppShell({ children }: AppShellProps) {
             <NavLink to="/" end className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}>
               <HomeIcon /> Home
             </NavLink>
+            <NavLink to="/datasets" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}>
+              Datasets
+            </NavLink>
+            <NavLink to="/jobs" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}>
+              <LayersIcon /> Jobs
+            </NavLink>
             <NavLink to="/current-job" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}>
               <ActivityIcon /> Current Job
             </NavLink>
-            <NavLink to="/jobs" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}>
-              <LayersIcon /> Job Management
+            <NavLink to="/checkpoints" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}>
+              Checkpoints
+            </NavLink>
+            <NavLink to="/events" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}>
+              Events
+            </NavLink>
+            <NavLink to="/system" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}>
+              System
             </NavLink>
           </nav>
 
           <div className="header-status" aria-label="System status">
             {health && (
-              <>
+              <span className="text-muted" style={{ fontSize: 11, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <HealthDot status={health.backend} />
+                <span>BE:{health.backend}</span>
+                <span>|</span>
+                <HealthDot status={health.runtime_mcp} />
+                <span>RT:{health.runtime_mcp}</span>
+                <span>|</span>
                 <HealthDot status={health.postgres} />
-                <span className="text-muted" style={{ fontSize: 11 }}>
-                  DB:{health.postgres} | RT:{health.runtime_mcp}
-                </span>
-              </>
+                <span>DB:{health.postgres}</span>
+                <span>|</span>
+                <HealthDot status={health.dataset_manager} />
+                <span>DM:{health.dataset_manager}</span>
+              </span>
             )}
           </div>
         </div>

@@ -8,8 +8,11 @@ const WS_BASE = (import.meta.env.VITE_WS_BASE_URL as string | undefined) ?? 'ws:
 export type WsStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
 
 export interface RealtimeMessage {
-  type: string;
-  data: unknown;
+  kind?: string;
+  attempt_id?: string | null;
+  runtime_event_seq?: number | null;
+  occurred_at?: string | null;
+  payload?: unknown;
 }
 
 export type MessageHandler = (msg: RealtimeMessage) => void;
@@ -41,8 +44,15 @@ export function createAttemptRealtimeClient(
     if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
   }
 
-  function scheduleReconnect(delayMs = 2_000) {
-    const delay = Math.min(delayMs, maxReconnectDelayMs);
+  let reconnectAttempts = 0;
+  const BASE_RECONNECT_MS = 800;
+
+  function scheduleReconnect() {
+    clearTimers();
+    reconnectAttempts++;
+    const expDelay = BASE_RECONNECT_MS * Math.pow(1.8, Math.min(reconnectAttempts - 1, 5));
+    const jitter = Math.random() * 400;
+    const delay = Math.min(expDelay + jitter, maxReconnectDelayMs);
     reconnectTimer = setTimeout(() => { if (shouldReconnect) connect(); }, delay);
   }
 
@@ -63,30 +73,34 @@ export function createAttemptRealtimeClient(
     try { ws = new WebSocket(url); } catch { setStatus('error'); scheduleReconnect(); return; }
 
     ws.onopen = () => {
+      reconnectAttempts = 0;
       setStatus('connected');
-      pingInterval = setInterval(() => send({ type: 'PING' }), 20_000);
+      pingInterval = setInterval(() => send({ kind: 'PING' }), 20_000);
     };
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data as string) as RealtimeMessage;
-        if (msg.type === 'PONG') return;
+        const kind = (msg.kind || '').toUpperCase();
+        if (kind === 'PONG') return;
 
-        // Auto-track sequence cursor from frames
-        if (msg.type === 'CONNECTED') {
-          const d = msg.data as { highest_contiguous_seq?: number };
-          if (typeof d?.highest_contiguous_seq === 'number') {
-            highestContiguousSeq = d.highest_contiguous_seq;
+        // Auto-track sequence cursor from canonical frames
+        if (kind === 'SNAPSHOT') {
+          const d = (msg.payload || {}) as { runtime_event_seq?: number; snapshot_seq?: number };
+          const seq = msg.runtime_event_seq ?? d?.runtime_event_seq ?? d?.snapshot_seq;
+          if (typeof seq === 'number') {
+            highestContiguousSeq = seq;
           }
-        } else if (msg.type === 'SNAPSHOT' || msg.type === 'GAP') {
-          const d = msg.data as { snapshot_seq?: number };
-          if (typeof d?.snapshot_seq === 'number') {
-            highestContiguousSeq = d.snapshot_seq;
+        } else if (kind === 'GAP') {
+          const d = (msg.payload || {}) as { authoritative_seq?: number; snapshot_seq?: number };
+          const seq = d?.authoritative_seq ?? d?.snapshot_seq;
+          if (typeof seq === 'number') {
+            highestContiguousSeq = seq;
           }
-        } else if (msg.type === 'RUNTIME_EVENT') {
-          const d = msg.data as { runtime_event_seq?: number };
-          if (typeof d?.runtime_event_seq === 'number') {
-            if (highestContiguousSeq === null || d.runtime_event_seq === highestContiguousSeq + 1) {
-              highestContiguousSeq = d.runtime_event_seq;
+        } else if (kind === 'EVENT') {
+          const seq = msg.runtime_event_seq;
+          if (typeof seq === 'number') {
+            if (highestContiguousSeq !== null && seq === highestContiguousSeq + 1) {
+              highestContiguousSeq = seq;
             }
           }
         }

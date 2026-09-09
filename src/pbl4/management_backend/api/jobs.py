@@ -4,9 +4,8 @@ POST   /api/v1/jobs              — create a DRAFT job
 GET    /api/v1/jobs              — list jobs
 GET    /api/v1/jobs/{job_id}     — get job detail
 PATCH  /api/v1/jobs/{job_id}     — update a DRAFT job
-POST   /api/v1/jobs/{job_id}/validate  — validate without freezing
-POST   /api/v1/jobs/{job_id}/freeze    — validate + freeze to READY
-POST   /api/v1/jobs/{job_id}/start     — start a FRESH attempt
+POST   /api/v1/jobs/{job_id}/validate  — validate contract
+POST   /api/v1/jobs/{job_id}/start     — start a FRESH attempt (resolves contract to READY)
 POST   /api/v1/jobs/{job_id}/retry     — retry from start
 POST   /api/v1/jobs/{job_id}/resume    — resume from checkpoint
 POST   /api/v1/jobs/{job_id}/clone     — clone into new DRAFT
@@ -19,11 +18,10 @@ import json
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Header, HTTPException, Query, status
 
 from pbl4.management_backend import db
-from pbl4.management_backend.gateways.runtime_gateway import get_gateway
-from pbl4.management_backend.schemas.common import ListResponse, PageInfo
+from pbl4.management_backend.schemas.common import ItemResponse, ListResponse, PageInfo
 from pbl4.management_backend.schemas.job import (
     AttemptSummary,
     JobArchiveResponse,
@@ -38,7 +36,7 @@ from pbl4.management_backend.schemas.job import (
     LatestAttemptSummary,
     StartAttemptResponse,
 )
-from pbl4.management_backend.services import attempt_service, job_service
+from pbl4.management_backend.services import attempt_service, idempotency, job_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Jobs"])
@@ -104,19 +102,60 @@ def _build_job_list_item(row: dict) -> JobListItem:
 
 @router.post(
     "/api/v1/jobs",
-    response_model=JobDetail,
+    response_model=ItemResponse[JobDetail],
     status_code=status.HTTP_201_CREATED,
     summary="Create a new draft job",
 )
-def create_job(body: JobCreateRequest):
+def create_job(
+    body: JobCreateRequest,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+):
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "VALIDATION_ERROR",
+                "message": "Header 'Idempotency-Key' is required for this operation.",
+            },
+        )
+    request_hash = idempotency.compute_request_hash(
+        operation="CREATE_JOB",
+        path="/api/v1/jobs",
+        body_obj=body.model_dump(),
+    )
     with db.transaction() as conn:
+        cached_record, action = idempotency.acquire_or_get_record(
+            conn,
+            endpoint_semantic_scope="JOB_CREATE",
+            idempotency_key=idempotency_key,
+            canonical_request_hash=request_hash,
+        )
+        if action == "SUCCEEDED" and cached_record:
+            cached_body = cached_record.get("response_body_jsonb") or {}
+            if isinstance(cached_body, str):
+                cached_body = json.loads(cached_body)
+            j_id = cached_body.get("job_id")
+            if j_id:
+                row = job_service.get_job(conn, j_id)
+                return ItemResponse(data=_build_job_detail(row, conn))
+            return ItemResponse(data=JobDetail(**cached_body))
+
         row = job_service.create_job(
             conn,
             display_name=body.display_name,
             description=body.description,
             requested_contract=body.requested_contract.model_dump(),
         )
-        return _build_job_detail(row, conn)
+        detail = _build_job_detail(row, conn)
+        idempotency.complete_record(
+            conn,
+            endpoint_semantic_scope="JOB_CREATE",
+            idempotency_key=idempotency_key,
+            response_status_code=201,
+            response_body=detail.model_dump(mode="json"),
+            resource_id=row["job_id"],
+        )
+        return ItemResponse(data=detail)
 
 
 @router.get(
@@ -151,18 +190,18 @@ def list_jobs(
 
 @router.get(
     "/api/v1/jobs/{job_id}",
-    response_model=JobDetail,
+    response_model=ItemResponse[JobDetail],
     summary="Get job detail",
 )
 def get_job(job_id: str):
     with db.get_connection() as conn:
         row = job_service.get_job(conn, job_id)
-        return _build_job_detail(row, conn)
+        return ItemResponse(data=_build_job_detail(row, conn))
 
 
 @router.patch(
     "/api/v1/jobs/{job_id}",
-    response_model=JobDetail,
+    response_model=ItemResponse[JobDetail],
     summary="Update a DRAFT job",
 )
 def patch_job(job_id: str, body: JobPatchRequest):
@@ -174,132 +213,232 @@ def patch_job(job_id: str, body: JobPatchRequest):
             description=body.description,
             requested_contract=body.requested_contract,
         )
-        return _build_job_detail(row, conn)
+        return ItemResponse(data=_build_job_detail(row, conn))
 
 
 @router.post(
     "/api/v1/jobs/{job_id}/validate",
-    response_model=JobValidateResponse,
+    response_model=ItemResponse[JobValidateResponse],
     summary="Validate job contract without freezing",
 )
 def validate_job(job_id: str):
     with db.get_connection() as conn:
         result = job_service.validate_job(conn, job_id)
-        return JobValidateResponse(**result)
-
-
-@router.post(
-    "/api/v1/jobs/{job_id}/freeze",
-    response_model=JobDetail,
-    summary="Freeze a DRAFT job to READY state",
-)
-def freeze_job(job_id: str):
-    with db.transaction() as conn:
-        row = job_service.freeze_job(conn, job_id)
-        return _build_job_detail(row, conn)
+        return ItemResponse(data=JobValidateResponse(**result))
 
 
 @router.post(
     "/api/v1/jobs/{job_id}/start",
-    response_model=StartAttemptResponse,
+    response_model=ItemResponse[StartAttemptResponse],
     status_code=status.HTTP_202_ACCEPTED,
     summary="Start a FRESH training attempt",
 )
-def start_job(job_id: str, body: JobStartRequest | None = None):
+def start_job(
+    job_id: str,
+    body: JobStartRequest | None = None,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+):
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "VALIDATION_ERROR",
+                "message": "Header 'Idempotency-Key' is required for this operation.",
+            },
+        )
     req = body or JobStartRequest()
-    with db.transaction() as conn:
-        attempt_row, cmd_row = attempt_service.start_job(conn, job_id, note=req.note)
+    attempt_row, cmd_row = attempt_service.execute_start_job(
+        db, job_id, note=req.note, idempotency_key=idempotency_key
+    )
 
-    # Fire-and-forget dispatch to runtime (best effort, command is already persisted)
-    get_gateway().send_start_attempt(str(cmd_row["command_id"]), attempt_row["attempt_id"], {})
-
-    return StartAttemptResponse(
-        command_id=str(cmd_row["command_id"]),
-        command_type=cmd_row["command_type"],
-        command_state=cmd_row["state"],
-        target_type=cmd_row["target_type"],
-        target_id=str(cmd_row["target_id"]),
-        job_id=job_id,
-        attempt_id=attempt_row["attempt_id"],
-        execution_mode=attempt_row["execution_mode"],
+    return ItemResponse(
+        data=StartAttemptResponse(
+            command_id=str(cmd_row["command_id"]),
+            command_type=cmd_row["command_type"],
+            command_state=cmd_row.get("command_state") or cmd_row["state"],
+            target_type=cmd_row["target_type"],
+            target_id=str(cmd_row["target_id"]),
+            job_id=job_id,
+            attempt_id=attempt_row["attempt_id"],
+            execution_mode=attempt_row["execution_mode"],
+        )
     )
 
 
 @router.post(
     "/api/v1/jobs/{job_id}/retry",
-    response_model=StartAttemptResponse,
+    response_model=ItemResponse[StartAttemptResponse],
     status_code=status.HTTP_202_ACCEPTED,
     summary="Retry a job from the start",
 )
-def retry_job(job_id: str):
-    with db.transaction() as conn:
-        attempt_row, cmd_row = attempt_service.retry_job(conn, job_id)
+def retry_job(
+    job_id: str,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+):
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "VALIDATION_ERROR",
+                "message": "Header 'Idempotency-Key' is required for this operation.",
+            },
+        )
+    attempt_row, cmd_row = attempt_service.execute_retry_job(
+        db, job_id, idempotency_key=idempotency_key
+    )
 
-    get_gateway().send_start_attempt(str(cmd_row["command_id"]), attempt_row["attempt_id"], {})
-
-    return StartAttemptResponse(
-        command_id=str(cmd_row["command_id"]),
-        command_type=cmd_row["command_type"],
-        command_state=cmd_row["state"],
-        target_type=cmd_row["target_type"],
-        target_id=str(cmd_row["target_id"]),
-        job_id=job_id,
-        attempt_id=attempt_row["attempt_id"],
-        execution_mode=attempt_row["execution_mode"],
+    return ItemResponse(
+        data=StartAttemptResponse(
+            command_id=str(cmd_row["command_id"]),
+            command_type=cmd_row["command_type"],
+            command_state=cmd_row.get("command_state") or cmd_row["state"],
+            target_type=cmd_row["target_type"],
+            target_id=str(cmd_row["target_id"]),
+            job_id=job_id,
+            attempt_id=attempt_row["attempt_id"],
+            execution_mode=attempt_row["execution_mode"],
+        )
     )
 
 
 @router.post(
     "/api/v1/jobs/{job_id}/resume",
-    response_model=StartAttemptResponse,
+    response_model=ItemResponse[StartAttemptResponse],
     status_code=status.HTTP_202_ACCEPTED,
     summary="Resume a job from a checkpoint",
 )
-def resume_job(job_id: str, body: JobResumeRequest):
-    with db.transaction() as conn:
-        attempt_row, cmd_row = attempt_service.resume_job(conn, job_id, body.checkpoint_id)
-
-    get_gateway().send_start_attempt(
-        str(cmd_row["command_id"]),
-        attempt_row["attempt_id"],
-        {"checkpoint_id": body.checkpoint_id, "execution_mode": "RESUME"},
+def resume_job(
+    job_id: str,
+    body: JobResumeRequest,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+):
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "VALIDATION_ERROR",
+                "message": "Header 'Idempotency-Key' is required for this operation.",
+            },
+        )
+    attempt_row, cmd_row = attempt_service.execute_resume_job(
+        db, job_id, body.checkpoint_id, idempotency_key=idempotency_key
     )
 
-    return StartAttemptResponse(
-        command_id=str(cmd_row["command_id"]),
-        command_type=cmd_row["command_type"],
-        command_state=cmd_row["state"],
-        target_type=cmd_row["target_type"],
-        target_id=str(cmd_row["target_id"]),
-        job_id=job_id,
-        attempt_id=attempt_row["attempt_id"],
-        execution_mode=attempt_row["execution_mode"],
-        resume_from_checkpoint_id=attempt_row.get("resume_from_checkpoint_id"),
+    return ItemResponse(
+        data=StartAttemptResponse(
+            command_id=str(cmd_row["command_id"]),
+            command_type=cmd_row["command_type"],
+            command_state=cmd_row.get("command_state") or cmd_row["state"],
+            target_type=cmd_row["target_type"],
+            target_id=str(cmd_row["target_id"]),
+            job_id=job_id,
+            attempt_id=attempt_row["attempt_id"],
+            execution_mode=attempt_row["execution_mode"],
+            resume_from_checkpoint_id=attempt_row.get("resume_from_checkpoint_id"),
+        )
     )
 
 
 @router.post(
     "/api/v1/jobs/{job_id}/clone",
-    response_model=JobDetail,
+    response_model=ItemResponse[JobDetail],
     status_code=status.HTTP_201_CREATED,
     summary="Clone a job into a new DRAFT",
 )
-def clone_job(job_id: str):
+def clone_job(
+    job_id: str,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+):
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "VALIDATION_ERROR",
+                "message": "Header 'Idempotency-Key' is required for this operation.",
+            },
+        )
+    request_hash = idempotency.compute_request_hash(
+        operation="CLONE_JOB",
+        path=f"/api/v1/jobs/{job_id}/clone",
+        body_obj={"job_id": job_id},
+    )
     with db.transaction() as conn:
+        cached_record, action = idempotency.acquire_or_get_record(
+            conn,
+            endpoint_semantic_scope="JOB_CLONE",
+            idempotency_key=idempotency_key,
+            canonical_request_hash=request_hash,
+        )
+        if action == "SUCCEEDED" and cached_record:
+            cached_body = cached_record.get("response_body_jsonb") or {}
+            if isinstance(cached_body, str):
+                cached_body = json.loads(cached_body)
+            cloned_id = cached_body.get("job_id")
+            if cloned_id:
+                row = job_service.get_job(conn, cloned_id)
+                return ItemResponse(data=_build_job_detail(row, conn))
+            return ItemResponse(data=JobDetail(**cached_body))
+
         row = job_service.clone_job(conn, job_id)
-        return _build_job_detail(row, conn)
+        detail = _build_job_detail(row, conn)
+        idempotency.complete_record(
+            conn,
+            endpoint_semantic_scope="JOB_CLONE",
+            idempotency_key=idempotency_key,
+            response_status_code=201,
+            response_body=detail.model_dump(mode="json"),
+            resource_id=row["job_id"],
+        )
+        return ItemResponse(data=detail)
 
 
 @router.post(
     "/api/v1/jobs/{job_id}/archive",
-    response_model=JobArchiveResponse,
+    response_model=ItemResponse[JobArchiveResponse],
     summary="Archive a job",
 )
-def archive_job(job_id: str):
+def archive_job(
+    job_id: str,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+):
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "VALIDATION_ERROR",
+                "message": "Header 'Idempotency-Key' is required for this operation.",
+            },
+        )
+    request_hash = idempotency.compute_request_hash(
+        operation="ARCHIVE_JOB",
+        path=f"/api/v1/jobs/{job_id}/archive",
+        body_obj={"job_id": job_id},
+    )
     with db.transaction() as conn:
+        cached_record, action = idempotency.acquire_or_get_record(
+            conn,
+            endpoint_semantic_scope="JOB_ARCHIVE",
+            idempotency_key=idempotency_key,
+            canonical_request_hash=request_hash,
+        )
+        if action == "SUCCEEDED" and cached_record:
+            cached_body = cached_record.get("response_body_jsonb") or {}
+            if isinstance(cached_body, str):
+                cached_body = json.loads(cached_body)
+            return ItemResponse(data=JobArchiveResponse(**cached_body))
+
         row = job_service.archive_job(conn, job_id)
-        return JobArchiveResponse(
+        resp = JobArchiveResponse(
             job_id=row["job_id"],
             state=row["state"],
             archived_at=row["archived_at"],
         )
+        idempotency.complete_record(
+            conn,
+            endpoint_semantic_scope="JOB_ARCHIVE",
+            idempotency_key=idempotency_key,
+            response_status_code=200,
+            response_body=resp.model_dump(mode="json"),
+            resource_id=row["job_id"],
+        )
+        return ItemResponse(data=resp)

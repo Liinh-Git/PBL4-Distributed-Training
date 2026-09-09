@@ -36,9 +36,17 @@ class JobNotFoundError(Exception):
 class JobStateError(Exception):
     """Raised when a requested state transition is invalid."""
 
+    code = "INVALID_STATE"
+
     def __init__(self, msg: str, current_state: str = "") -> None:
         super().__init__(msg)
         self.current_state = current_state
+
+
+class JobFrozenError(JobStateError):
+    """Raised when attempting to modify the frozen contract of a READY job."""
+
+    code = "JOB_FROZEN"
 
 
 class JobValidationError(Exception):
@@ -162,9 +170,17 @@ def update_job(
     current = job_repository.get_job(conn, job_id)
     if current is None:
         raise JobNotFoundError(f"Job '{job_id}' not found.")
-    if current["state"] != "DRAFT":
+    if current["state"] == "READY":
+        if requested_contract is not None:
+            raise JobFrozenError(
+                f"Job '{job_id}' is in state 'READY' and its contract is frozen. "
+                "Contract fields cannot be updated. Use clone instead.",
+                current_state=current["state"],
+            )
+    elif current["state"] != "DRAFT":
         raise JobStateError(
-            f"Job '{job_id}' is in state '{current['state']}'; only DRAFT jobs may be updated.",
+            f"Job '{job_id}' is in state '{current['state']}'; "
+            "only DRAFT or READY jobs may be updated.",
             current_state=current["state"],
         )
     if requested_contract is not None:

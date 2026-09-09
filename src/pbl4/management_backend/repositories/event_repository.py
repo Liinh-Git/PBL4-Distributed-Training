@@ -117,6 +117,7 @@ def list_events(
     limit: int = 100,
     cursor: str | None = None,
     after_seq: int | None = None,
+    runtime_only: bool = False,
 ) -> list[dict]:
     conditions = []
     params: list[Any] = []
@@ -139,6 +140,8 @@ def list_events(
     if after_seq is not None:
         conditions.append("runtime_event_seq > %s")
         params.append(after_seq)
+    if runtime_only:
+        conditions.append("runtime_event_seq IS NOT NULL")
 
     if cursor:
         try:
@@ -152,7 +155,9 @@ def list_events(
     params.append(limit)
 
     order_clause = (
-        "ORDER BY runtime_event_seq ASC" if after_seq is not None else "ORDER BY event_id DESC"
+        "ORDER BY runtime_event_seq ASC"
+        if after_seq is not None or runtime_only
+        else "ORDER BY event_id DESC"
     )
 
     sql = f"""

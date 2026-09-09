@@ -19,7 +19,7 @@ from pbl4.management_backend.schemas.checkpoint import (
     CheckpointListItem,
     CheckpointRecoveryCursor,
 )
-from pbl4.management_backend.schemas.common import ListResponse, PageInfo
+from pbl4.management_backend.schemas.common import ItemResponse, ListResponse, PageInfo
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Checkpoints"])
@@ -111,7 +111,7 @@ def list_checkpoints(
 
 @router.get(
     "/api/v1/checkpoints/{checkpoint_id}",
-    response_model=CheckpointDetail,
+    response_model=ItemResponse[CheckpointDetail],
     summary="Get checkpoint detail",
 )
 def get_checkpoint(checkpoint_id: str):
@@ -125,4 +125,4 @@ def get_checkpoint(checkpoint_id: str):
         attempt = attempt_repository.get_attempt(conn, row["created_by_attempt_id"])
         if attempt:
             row["job_id"] = attempt["job_id"]
-    return _row_to_detail(row)
+    return ItemResponse(data=_row_to_detail(row))

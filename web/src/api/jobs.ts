@@ -16,28 +16,27 @@ export const jobsApi = {
     return api.get<ListResponse<JobListItem>>(`/jobs?${qs}`);
   },
 
-  get: (jobId: string) => api.get<{ data: JobDetail }>(`/jobs/${jobId}`),
+  get: (jobId: string) => api.getItem<JobDetail>(`/jobs/${jobId}`),
 
-  create: (body: { display_name: string; description?: string; requested_contract: RequestedContract }) =>
-    api.post<JobDetail>('/jobs', body),
+  create: (body: { display_name: string; description?: string; requested_contract: RequestedContract }, idempotencyKey: string) =>
+    api.postItem<JobDetail>('/jobs', body, { idempotencyKey }),
 
   update: (jobId: string, body: { display_name?: string; description?: string; requested_contract?: Partial<RequestedContract> }) =>
-    api.patch<JobDetail>(`/jobs/${jobId}`, body),
+    api.patchItem<JobDetail>(`/jobs/${jobId}`, body),
 
-  freeze: (jobId: string) => api.post<JobDetail>(`/jobs/${jobId}/freeze`),
 
-  start: (jobId: string, note?: string) =>
-    api.post<StartAttemptResponse>(`/jobs/${jobId}/start`, note ? { note } : undefined),
+  start: (jobId: string, idempotencyKey: string, note?: string) =>
+    api.postItem<StartAttemptResponse>(`/jobs/${jobId}/start`, note ? { note } : undefined, { idempotencyKey }),
 
-  retry: (jobId: string) => api.post<StartAttemptResponse>(`/jobs/${jobId}/retry`),
+  retry: (jobId: string, idempotencyKey: string) => api.postItem<StartAttemptResponse>(`/jobs/${jobId}/retry`, undefined, { idempotencyKey }),
 
-  resume: (jobId: string, checkpoint_id: string) =>
-    api.post<StartAttemptResponse>(`/jobs/${jobId}/resume`, { checkpoint_id }),
+  resume: (jobId: string, checkpoint_id: string, idempotencyKey: string) =>
+    api.postItem<StartAttemptResponse>(`/jobs/${jobId}/resume`, { checkpoint_id }, { idempotencyKey }),
 
-  clone: (jobId: string) => api.post<JobDetail>(`/jobs/${jobId}/clone`),
+  clone: (jobId: string, idempotencyKey: string) => api.postItem<JobDetail>(`/jobs/${jobId}/clone`, undefined, { idempotencyKey }),
 
-  archive: (jobId: string) => api.post<{ job_id: string; state: string; archived_at: string }>(`/jobs/${jobId}/archive`),
+  archive: (jobId: string, idempotencyKey: string) => api.postItem<{ job_id: string; state: string; archived_at: string }>(`/jobs/${jobId}/archive`, undefined, { idempotencyKey }),
 
   validate: (jobId: string) =>
-    api.post<{ valid: boolean; errors?: string[] }>(`/jobs/${jobId}/validate`),
+    api.postItem<{ valid: boolean; errors?: string[] }>(`/jobs/${jobId}/validate`),
 };

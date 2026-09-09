@@ -1,8 +1,9 @@
-import { useState, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useState, useCallback, useEffect } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
 import { useJobList, useJobDetail } from '../hooks/useJobs'
 import { attemptsApi } from '../api/attempts'
 import { jobsApi } from '../api/jobs'
+import { createIdempotencyKey } from '../api/client'
 import StatusBadge from '../components/jobs/StatusBadge'
 import JobLog from '../components/logs/JobLog'
 import type { JobDetail, AttemptListItem, EventListItem } from '../domain/types'
@@ -52,21 +53,20 @@ function JobActions({ job, onRefresh }: { job: JobDetail; onRefresh: () => void 
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
       {error && <div className="text-error" style={{ fontSize: 12 }}>{error}</div>}
       <div className="flex gap-8" style={{ flexWrap: 'wrap' }}>
-        {job.state === 'DRAFT' && (
-          <button className="btn btn-secondary btn-sm" disabled={busy}
-            onClick={() => run(() => jobsApi.freeze(job.job_id))}>
-            Freeze to Ready
+        {(job.state === 'DRAFT' || (job.state === 'READY' && !isRunning)) && (
+          <button className="btn btn-primary btn-sm" disabled={busy}
+            onClick={() => run(async () => {
+              const res = await jobsApi.start(job.job_id, createIdempotencyKey('job_start'));
+              navigate(res.attempt_id ? `/attempts/${res.attempt_id}` : '/current-job');
+            })}>
+            ▶ Start
           </button>
         )}
         {job.state === 'READY' && !isRunning && (
           <>
-            <button className="btn btn-primary btn-sm" disabled={busy}
-              onClick={() => run(async () => { await jobsApi.start(job.job_id); navigate('/current-job') })}>
-              ▶ Start
-            </button>
             {(latestState === 'FAILED' || latestState === 'ABORTED') && (
               <button className="btn btn-secondary btn-sm" disabled={busy}
-                onClick={() => run(() => jobsApi.retry(job.job_id))}>
+                onClick={() => run(() => jobsApi.retry(job.job_id, createIdempotencyKey('job_retry')))}>
                 ↺ Retry
               </button>
             )}
@@ -79,7 +79,7 @@ function JobActions({ job, onRefresh }: { job: JobDetail; onRefresh: () => void 
           </button>
         )}
         <button className="btn btn-secondary btn-sm" disabled={busy}
-          onClick={() => run(() => jobsApi.clone(job.job_id))}>
+          onClick={() => run(() => jobsApi.clone(job.job_id, createIdempotencyKey('job_clone')))}>
           ⎘ Clone
         </button>
         {job.state !== 'ARCHIVED' && (
@@ -96,9 +96,9 @@ function JobActions({ job, onRefresh }: { job: JobDetail; onRefresh: () => void 
           danger={confirm.danger}
           onCancel={() => setConfirm(null)}
           onConfirm={() => {
-            if (confirm.action === 'archive') run(() => jobsApi.archive(job.job_id))
+            if (confirm.action === 'archive') run(() => jobsApi.archive(job.job_id, createIdempotencyKey('job_archive')))
             if (confirm.action === 'abort' && latestAttempt) {
-              run(() => attemptsApi.abort(latestAttempt, 'Operator abort'))
+              run(() => attemptsApi.abort(latestAttempt, createIdempotencyKey('attempt_abort'), 'Operator abort'))
             }
           }}
         />
@@ -129,7 +129,9 @@ function JobDetailPanel({ jobId }: { jobId: string }) {
 
   // Load extras when job detail arrives
   const latestAid = job?.attempt_summary.latest_attempt_id
-  useState(() => { if (latestAid) loadExtra(latestAid) })
+  useEffect(() => {
+    if (latestAid) loadExtra(latestAid)
+  }, [latestAid, loadExtra])
 
   if (loading) return <div className="card"><div className="skeleton" style={{ height: 120 }} /></div>
   if (error) return (
@@ -180,7 +182,7 @@ function JobDetailPanel({ jobId }: { jobId: string }) {
               <tbody>
                 {attempts.map(a => (
                   <tr key={a.attempt_id}
-                    onClick={() => navigate('/current-job', { state: { attemptId: a.attempt_id } })}
+                    onClick={() => navigate(`/attempts/${a.attempt_id}`)}
                     style={{ cursor: 'pointer' }}
                     aria-label={`View attempt ${a.attempt_id}`}
                   >
@@ -281,16 +283,35 @@ function JobTable({ onSelect, selected }: { onSelect: (id: string) => void; sele
 
 // ─── Job Management Page ─────────────────────────────────────────────────────
 export default function JobManagementPage() {
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const { jobId } = useParams<{ jobId?: string }>()
+  const navigate = useNavigate()
+  const [internalSelectedId, setInternalSelectedId] = useState<string | null>(null)
+
+  const selectedId = jobId || internalSelectedId
+
+  const handleSelect = (id: string) => {
+    if (id === selectedId) {
+      setInternalSelectedId(null)
+      navigate('/jobs')
+    } else {
+      setInternalSelectedId(id)
+      navigate(`/jobs/${id}`)
+    }
+  }
+
+  const handleClose = () => {
+    setInternalSelectedId(null)
+    navigate('/jobs')
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       <h1 className="page-title">Job Management</h1>
       <div style={{ display: 'grid', gridTemplateColumns: selectedId ? '1fr 1.4fr' : '1fr', gap: 20 }}>
-        <JobTable onSelect={id => setSelectedId(id === selectedId ? null : id)} selected={selectedId} />
+        <JobTable onSelect={handleSelect} selected={selectedId} />
         {selectedId && (
           <div>
-            <button className="btn btn-ghost btn-sm" onClick={() => setSelectedId(null)} style={{ marginBottom: 12 }}>
+            <button className="btn btn-ghost btn-sm" onClick={handleClose} style={{ marginBottom: 12 }}>
               ✕ Close
             </button>
             <JobDetailPanel jobId={selectedId} />

@@ -49,12 +49,13 @@ def create_build(
     batch_size: int,
     shard_count: int,
     partition_seed: int,
-    sample_count: int,
+    sample_count: int | None = None,
     input_shape_json: list,
     dtype: str,
     num_classes: int,
     preprocessing_json: dict,
     created_at: datetime,
+    state: str = "CREATED",
 ) -> dict:
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -66,7 +67,7 @@ def create_build(
                 manifest_uri, dataset_manifest_hash, manifest_snapshot_jsonb,
                 artifact_base_url, created_at
             ) VALUES (
-                %s, %s, 'CREATED', %s,
+                %s, %s, %s, %s,
                 %s, %s, %s, %s,
                 %s, %s, %s, %s,
                 NULL, NULL, NULL, NULL, %s
@@ -76,6 +77,7 @@ def create_build(
             (
                 dataset_build_id,
                 dataset_id,
+                state,
                 profile,
                 json.dumps(input_shape_json),
                 dtype,

@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from pbl4.management_backend import db
 from pbl4.management_backend.schemas.command import CommandDetail, CommandListItem, CommandResult
-from pbl4.management_backend.schemas.common import ListResponse, PageInfo
+from pbl4.management_backend.schemas.common import ItemResponse, ListResponse, PageInfo
 from pbl4.management_backend.services import command_service
 
 router = APIRouter(tags=["Commands"])
@@ -64,7 +64,7 @@ def list_commands(
 
 @router.get(
     "/api/v1/commands/{command_id}",
-    response_model=CommandDetail,
+    response_model=ItemResponse[CommandDetail],
     summary="Get command detail",
 )
 def get_command(command_id: str):
@@ -92,15 +92,17 @@ def get_command(command_id: str):
     if isinstance(request_jsonb, str):
         request_jsonb = json.loads(request_jsonb)
 
-    return CommandDetail(
-        command_id=str(row["command_id"]),
-        command_type=row["command_type"],
-        state=row["state"],
-        target_type=row["target_type"],
-        target_id=str(row["target_id"]) if row.get("target_id") else None,
-        request=request_jsonb,
-        result=result,
-        requested_at=row["requested_at"],
-        dispatched_at=row.get("dispatched_at"),
-        completed_at=row.get("completed_at"),
+    return ItemResponse(
+        data=CommandDetail(
+            command_id=str(row["command_id"]),
+            command_type=row["command_type"],
+            state=row["state"],
+            target_type=row["target_type"],
+            target_id=str(row["target_id"]) if row.get("target_id") else None,
+            request=request_jsonb,
+            result=result,
+            requested_at=row["requested_at"],
+            dispatched_at=row.get("dispatched_at"),
+            completed_at=row.get("completed_at"),
+        )
     )

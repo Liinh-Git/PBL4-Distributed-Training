@@ -28,7 +28,7 @@ def list_events(
     scope_id: Annotated[str | None, Query()] = None,
     event_type: Annotated[str | None, Query()] = None,
     severity: Annotated[str | None, Query()] = None,
-    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
     cursor: Annotated[str | None, Query()] = None,
 ):
     with db.get_connection() as conn:

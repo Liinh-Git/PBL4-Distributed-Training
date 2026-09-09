@@ -21,11 +21,22 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from pbl4.management_backend.clients.dataset_manager import (
+    DatasetManagerBusinessError,
+    DatasetManagerUnavailableError,
+)
+from pbl4.management_backend.gateways.runtime_gateway import DatabaseUnavailableError
 from pbl4.management_backend.services.attempt_service import (
     AttemptConflictError,
+    AttemptNotAbortableError,
     AttemptNotFoundError,
     AttemptStateError,
+    CheckpointContractMismatchError,
+    CheckpointNotCompleteError,
+    CommandFailedError,
+    CommandRejectedError,
     JobNotReadyError,
+    RuntimeUnavailableError,
 )
 from pbl4.management_backend.services.command_service import CommandNotFoundError
 from pbl4.management_backend.services.contract_resolver import ContractResolutionError
@@ -40,6 +51,7 @@ from pbl4.management_backend.services.idempotency import (
     RequestInProgressError,
 )
 from pbl4.management_backend.services.job_service import (
+    JobFrozenError,
     JobNotFoundError,
     JobStateError,
     JobValidationError,
@@ -73,6 +85,11 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         port=settings.runtime_management_port,
     )
 
+    # Initialize Dataset Manager client
+    from pbl4.management_backend.clients.dataset_manager import init_client
+
+    init_client(settings.dataset_manager_base_url)
+
     logger.info("Management Backend started on %s:%d", settings.backend_host, settings.backend_port)
     yield
 
@@ -91,18 +108,20 @@ def _error_response(
     message: str,
     request: Request,
     details: dict[str, Any] | None = None,
+    command_id: str | None = None,
 ) -> JSONResponse:
     req_id = _get_req_id(request)
+    error_obj: dict[str, Any] = {
+        "code": code,
+        "message": message,
+        "details": details,
+        "request_id": req_id,
+    }
+    if command_id is not None:
+        error_obj["command_id"] = command_id
     return JSONResponse(
         status_code=status_code,
-        content={
-            "error": {
-                "code": code,
-                "message": message,
-                "details": details,
-                "request_id": req_id,
-            }
-        },
+        content={"error": error_obj},
         headers={"X-Request-ID": req_id},
     )
 
@@ -131,15 +150,74 @@ def create_app() -> FastAPI:
         openapi_url="/api/openapi.json",
     )
 
-    # ─── Request ID Middleware ────────────────────────────────────────────────
+    # ─── Canonical Request ID & Response Envelope Middleware ─────────────────
     @app.middleware("http")
-    async def request_id_middleware(
+    async def canonical_response_middleware(
         request: Request, call_next: Callable[[Request], Any]
     ) -> Response:
+        import json
+
         req_id = request.headers.get("X-Request-ID") or f"req_{uuid.uuid4().hex[:8]}"
         request.state.request_id = req_id
         response: Response = await call_next(request)
         response.headers["X-Request-ID"] = req_id
+
+        path = request.url.path
+        if (
+            path.startswith("/api/v1/")
+            and response.status_code in (200, 201, 202)
+            and response.headers.get("content-type", "").startswith("application/json")
+        ):
+            body_bytes = b""
+            async for chunk in response.body_iterator:
+                body_bytes += chunk
+
+            try:
+                data = json.loads(body_bytes.decode("utf-8"))
+                if isinstance(data, dict):
+                    if "error" in data:
+                        return Response(
+                            content=body_bytes,
+                            status_code=response.status_code,
+                            media_type="application/json",
+                            headers=dict(response.headers),
+                        )
+                    if "data" in data and "page" in data:
+                        return Response(
+                            content=body_bytes,
+                            status_code=response.status_code,
+                            media_type="application/json",
+                            headers=dict(response.headers),
+                        )
+                    if "data" in data and "meta" in data:
+                        if isinstance(data["meta"], dict):
+                            data["meta"]["request_id"] = req_id
+                        new_body = json.dumps(data).encode("utf-8")
+                        headers = dict(response.headers)
+                        headers["content-length"] = str(len(new_body))
+                        return Response(
+                            content=new_body,
+                            status_code=response.status_code,
+                            media_type="application/json",
+                            headers=headers,
+                        )
+
+                    return Response(
+                        content=body_bytes,
+                        status_code=response.status_code,
+                        media_type="application/json",
+                        headers=dict(response.headers),
+                    )
+            except Exception:
+                pass
+
+            return Response(
+                content=body_bytes,
+                status_code=response.status_code,
+                media_type="application/json",
+                headers=dict(response.headers),
+            )
+
         return response
 
     # ─── Global Error Handlers ────────────────────────────────────────────────
@@ -185,12 +263,115 @@ def create_app() -> FastAPI:
     async def not_found_handler(request: Request, exc: Exception) -> JSONResponse:
         return _error_response(404, "NOT_FOUND", str(exc), request)
 
+    @app.exception_handler(RuntimeUnavailableError)
+    async def runtime_unavailable_handler(
+        request: Request, exc: RuntimeUnavailableError
+    ) -> JSONResponse:
+        return _error_response(
+            503,
+            "RUNTIME_UNAVAILABLE",
+            str(exc),
+            request,
+            command_id=exc.command_id,
+        )
+
+    @app.exception_handler(DatasetManagerUnavailableError)
+    async def dataset_manager_unavailable_handler(
+        request: Request, exc: DatasetManagerUnavailableError
+    ) -> JSONResponse:
+        return _error_response(503, "DATASET_MANAGER_UNAVAILABLE", str(exc), request)
+
+    @app.exception_handler(DatasetManagerBusinessError)
+    async def dataset_manager_business_handler(
+        request: Request, exc: DatasetManagerBusinessError
+    ) -> JSONResponse:
+        code = exc.code
+        status_code = exc.status_code
+        if status_code == 404:
+            code = "NOT_FOUND"
+        elif exc.code == "BUILD_NOT_READY":
+            code = "DATASET_BUILD_NOT_READY"
+            status_code = 409
+
+        details = exc.details or {}
+        details = {"info": details} if not isinstance(details, dict) else dict(details)
+        details["downstream_code"] = exc.code
+        details["downstream_status"] = exc.status_code
+
+        return _error_response(
+            status_code,
+            code,
+            exc.message,
+            request,
+            details=details,
+        )
+
+    @app.exception_handler(DatabaseUnavailableError)
+    async def database_unavailable_handler(
+        request: Request, exc: DatabaseUnavailableError
+    ) -> JSONResponse:
+        return _error_response(
+            503,
+            "DATABASE_UNAVAILABLE",
+            str(exc),
+            request,
+            command_id=exc.command_id,
+        )
+
+    @app.exception_handler(JobFrozenError)
+    async def job_frozen_handler(request: Request, exc: JobFrozenError) -> JSONResponse:
+        return _error_response(409, "JOB_FROZEN", str(exc), request)
+
     @app.exception_handler(JobNotReadyError)
+    async def job_not_ready_handler(request: Request, exc: JobNotReadyError) -> JSONResponse:
+        return _error_response(409, "JOB_NOT_READY", str(exc), request)
+
+    @app.exception_handler(CommandRejectedError)
+    async def command_rejected_handler(request: Request, exc: CommandRejectedError) -> JSONResponse:
+        return _error_response(
+            exc.status_code,
+            exc.code,
+            exc.message,
+            request,
+            details=exc.details,
+            command_id=exc.command_id,
+        )
+
+    @app.exception_handler(CommandFailedError)
+    async def command_failed_handler(request: Request, exc: CommandFailedError) -> JSONResponse:
+        return _error_response(
+            exc.status_code,
+            exc.code,
+            exc.message,
+            request,
+            details=exc.details,
+            command_id=exc.command_id,
+        )
+
+    @app.exception_handler(AttemptNotAbortableError)
+    async def attempt_not_abortable_handler(
+        request: Request, exc: AttemptNotAbortableError
+    ) -> JSONResponse:
+        return _error_response(409, "ATTEMPT_NOT_ABORTABLE", str(exc), request)
+
+    @app.exception_handler(CheckpointNotCompleteError)
+    async def checkpoint_not_complete_handler(
+        request: Request, exc: CheckpointNotCompleteError
+    ) -> JSONResponse:
+        return _error_response(409, "CHECKPOINT_NOT_COMPLETE", str(exc), request)
+
+    @app.exception_handler(CheckpointContractMismatchError)
+    async def checkpoint_mismatch_handler(
+        request: Request, exc: CheckpointContractMismatchError
+    ) -> JSONResponse:
+        return _error_response(409, "CHECKPOINT_CONTRACT_MISMATCH", str(exc), request)
+
     @app.exception_handler(JobStateError)
     @app.exception_handler(AttemptStateError)
     @app.exception_handler(DatasetBuildStateError)
     async def state_conflict_handler(request: Request, exc: Exception) -> JSONResponse:
-        return _error_response(409, "INVALID_STATE", str(exc), request)
+        code = getattr(exc, "code", "INVALID_STATE")
+        return _error_response(409, code, str(exc), request)
 
     @app.exception_handler(AttemptConflictError)
     async def attempt_conflict_handler(request: Request, exc: AttemptConflictError) -> JSONResponse:
@@ -216,10 +397,12 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+        cmd_id = None
         if isinstance(exc.detail, dict) and "code" in exc.detail:
             code = exc.detail["code"]
             msg = exc.detail.get("message", "HTTP error")
             details = exc.detail.get("details")
+            cmd_id = exc.detail.get("command_id")
         else:
             status_map = {
                 400: "BAD_REQUEST",
@@ -233,7 +416,7 @@ def create_app() -> FastAPI:
             code = status_map.get(exc.status_code, "HTTP_ERROR")
             msg = str(exc.detail)
             details = None
-        return _error_response(exc.status_code, code, msg, request, details)
+        return _error_response(exc.status_code, code, msg, request, details, command_id=cmd_id)
 
     @app.exception_handler(RuntimeError)
     async def runtime_error_handler(request: Request, exc: RuntimeError) -> JSONResponse:
@@ -241,6 +424,16 @@ def create_app() -> FastAPI:
         if "pool" in msg.lower() or "not initialized" in msg.lower():
             return _error_response(503, "DATABASE_UNAVAILABLE", msg, request)
         return _error_response(500, "INTERNAL_ERROR", msg, request)
+
+    @app.exception_handler(Exception)
+    async def catch_all_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        logger.error("Unhandled exception processing %s: %s", request.url.path, exc, exc_info=True)
+        return _error_response(
+            500,
+            "INTERNAL_SERVER_ERROR",
+            "An unexpected server error occurred.",
+            request,
+        )
 
     # CORS — allow origins from settings
     app.add_middleware(

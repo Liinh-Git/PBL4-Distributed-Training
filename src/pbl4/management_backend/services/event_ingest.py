@@ -12,11 +12,12 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 import psycopg
 
-from pbl4.management_backend.gateways.runtime_gateway import get_gateway
 from pbl4.management_backend.repositories import event_repository
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,77 @@ logger = logging.getLogger(__name__)
 
 class ConflictingEventPayloadError(Exception):
     """Raised when an incoming event has the same sequence number but different payload."""
+
+
+@dataclass(frozen=True)
+class RuntimeEventIngestResult:
+    row: dict | None
+    inserted: bool
+
+
+def _normalize_datetime(dt: Any) -> datetime | None:
+    if dt is None:
+        return None
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
+    if isinstance(dt, str):
+        with contextlib.suppress(Exception):
+            parsed = datetime.fromisoformat(dt)
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=UTC)
+            return parsed.astimezone(UTC)
+    return None
+
+
+def _is_semantic_event_equal(
+    existing: dict[str, Any],
+    *,
+    attempt_id: str | None,
+    runtime_event_seq: int | None,
+    event_type: str,
+    severity: str,
+    occurred_at: datetime,
+    source_component: str,
+    scope_type: str,
+    scope_id: str | None,
+    norm_payload: dict[str, Any],
+) -> bool:
+    """Compare all immutable semantic Runtime Event fields.
+
+    Excludes DB-generated metadata (event_id, persisted_at, inserted_at).
+    """
+    if existing.get("attempt_id") != attempt_id:
+        return False
+    if existing.get("runtime_event_seq") != runtime_event_seq:
+        return False
+    if existing.get("event_type") != event_type:
+        return False
+    if existing.get("severity") != severity:
+        return False
+    if existing.get("source_component") != source_component:
+        return False
+
+    existing_dt = _normalize_datetime(existing.get("occurred_at"))
+    incoming_dt = _normalize_datetime(occurred_at)
+    if existing_dt != incoming_dt:
+        return False
+
+    existing_payload = existing.get("payload_jsonb")
+    if isinstance(existing_payload, str):
+        with contextlib.suppress(Exception):
+            existing_payload = json.loads(existing_payload)
+    if (existing_payload or {}) != norm_payload:
+        return False
+
+    existing_scope_type = existing.get("scope_type")
+    if existing_scope_type is not None and existing_scope_type != scope_type:
+        return False
+
+    effective_scope_id = scope_id or attempt_id
+    existing_scope_id = existing.get("scope_id")
+    return existing_scope_id is None or existing_scope_id == effective_scope_id
 
 
 def ingest_runtime_event(
@@ -38,7 +110,7 @@ def ingest_runtime_event(
     scope_type: str = "ATTEMPT",
     scope_id: str | None = None,
     payload: dict | None = None,
-) -> dict | None:
+) -> RuntimeEventIngestResult:
     """Persist a runtime event with deduplication, conflict checking, and gap detection."""
     now = datetime.now(UTC)
     norm_payload = payload or {}
@@ -47,42 +119,40 @@ def ingest_runtime_event(
     if attempt_id is not None and runtime_event_seq is not None:
         existing = event_repository.get_event_by_seq(conn, attempt_id, runtime_event_seq)
         if existing is not None:
-            existing_payload = existing.get("payload_jsonb")
-            if isinstance(existing_payload, str):
-                with contextlib.suppress(Exception):
-                    existing_payload = json.loads(existing_payload)
-            if (existing_payload or {}) == norm_payload:
+            if _is_semantic_event_equal(
+                existing,
+                attempt_id=attempt_id,
+                runtime_event_seq=runtime_event_seq,
+                event_type=event_type,
+                severity=severity,
+                occurred_at=occurred_at,
+                source_component=source_component,
+                scope_type=scope_type,
+                scope_id=scope_id,
+                norm_payload=norm_payload,
+            ):
                 logger.debug(
                     "Idempotent duplicate runtime event skipped: attempt_id=%s seq=%s",
                     attempt_id,
                     runtime_event_seq,
                 )
-                return existing
+                return RuntimeEventIngestResult(existing, inserted=False)
             logger.error(
-                "Conflicting payload for runtime event: attempt_id=%s seq=%s existing=%s new=%s",
+                "Conflicting semantic event: attempt_id=%s seq=%s existing=%s new=%s",
                 attempt_id,
                 runtime_event_seq,
-                existing_payload,
-                norm_payload,
+                existing,
+                {
+                    "event_type": event_type,
+                    "severity": severity,
+                    "source_component": source_component,
+                    "occurred_at": occurred_at,
+                    "payload": norm_payload,
+                },
             )
             raise ConflictingEventPayloadError(
-                f"Conflicting payload for attempt {attempt_id} event seq {runtime_event_seq}"
+                f"Conflicting semantic event for attempt {attempt_id} event seq {runtime_event_seq}"
             )
-
-        latest_seq = event_repository.get_latest_runtime_event_seq(conn, attempt_id)
-        if latest_seq is not None and runtime_event_seq > latest_seq + 1:
-            logger.warning(
-                "Event gap detected for attempt %s: expected seq=%s, received seq=%s",
-                attempt_id,
-                latest_seq + 1,
-                runtime_event_seq,
-            )
-            try:
-                gw = get_gateway()
-                cur_gap_count = gw.get_snapshot().get("management_event_gap_count", 0)
-                gw.update_snapshot({"management_event_gap_count": cur_gap_count + 1})
-            except Exception:
-                pass
 
     row = event_repository.insert_event(
         conn,
@@ -99,46 +169,57 @@ def ingest_runtime_event(
     )
 
     if row is None and attempt_id is not None and runtime_event_seq is not None:
-        # Concurrent insert occurred, re-fetch and check payload
+        # Concurrent insert occurred, re-fetch and check semantic match
         existing = event_repository.get_event_by_seq(conn, attempt_id, runtime_event_seq)
         if existing is not None:
-            existing_payload = existing.get("payload_jsonb")
-            if isinstance(existing_payload, str):
-                with contextlib.suppress(Exception):
-                    existing_payload = json.loads(existing_payload)
-            if (existing_payload or {}) == norm_payload:
-                return existing
+            if _is_semantic_event_equal(
+                existing,
+                attempt_id=attempt_id,
+                runtime_event_seq=runtime_event_seq,
+                event_type=event_type,
+                severity=severity,
+                occurred_at=occurred_at,
+                source_component=source_component,
+                scope_type=scope_type,
+                scope_id=scope_id,
+                norm_payload=norm_payload,
+            ):
+                return RuntimeEventIngestResult(existing, inserted=False)
             raise ConflictingEventPayloadError(
-                f"Conflicting payload for attempt {attempt_id} event seq {runtime_event_seq}"
+                f"Conflicting semantic event for attempt {attempt_id} event seq {runtime_event_seq}"
             )
 
-    if row is not None and attempt_id is not None:
-        try:
-            from pbl4.management_backend.websocket import hub
+    return RuntimeEventIngestResult(row, inserted=row is not None)
 
-            hub.broadcast_sync(
-                attempt_id,
-                {
-                    "type": "RUNTIME_EVENT",
-                    "data": {
-                        "attempt_id": attempt_id,
-                        "runtime_event_seq": runtime_event_seq,
-                        "event_type": event_type,
-                        "occurred_at": (
-                            occurred_at.isoformat()
-                            if hasattr(occurred_at, "isoformat")
-                            else str(occurred_at)
-                        ),
-                        "source_component": source_component,
-                        "severity": severity,
-                        "payload": norm_payload,
-                    },
-                },
-            )
-        except Exception as exc:
-            logger.debug("Failed to broadcast runtime event: %s", exc)
 
-    return row
+def broadcast_runtime_event(
+    *,
+    attempt_id: str,
+    runtime_event_seq: int | None,
+    event_type: str,
+    severity: str,
+    occurred_at: datetime,
+    source_component: str,
+    payload: dict | None,
+) -> None:
+    """Publish a newly persisted Runtime event after its transaction commits."""
+    from pbl4.management_backend.websocket import hub
+
+    hub.broadcast_sync(
+        attempt_id,
+        {
+            "kind": "EVENT",
+            "attempt_id": attempt_id,
+            "runtime_event_seq": runtime_event_seq,
+            "occurred_at": occurred_at.isoformat(),
+            "payload": {
+                "event_type": event_type,
+                "severity": severity,
+                "source_component": source_component,
+                **(payload or {}),
+            },
+        },
+    )
 
 
 def ingest_management_event(
@@ -170,14 +251,15 @@ def ingest_management_event(
             hub.broadcast_sync(
                 scope_id,
                 {
-                    "type": "MANAGEMENT_EVENT",
-                    "data": {
+                    "kind": "EVENT",
+                    "attempt_id": scope_id,
+                    "runtime_event_seq": None,
+                    "occurred_at": now.isoformat(),
+                    "payload": {
                         "event_type": event_type,
                         "severity": severity,
-                        "occurred_at": now.isoformat(),
                         "source_component": "Management",
-                        "scope_id": scope_id,
-                        "payload": payload or {},
+                        **(payload or {}),
                     },
                 },
             )

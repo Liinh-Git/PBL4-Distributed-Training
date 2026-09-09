@@ -37,6 +37,7 @@ class ErrorDetail(BaseModel):
     message: str
     details: dict[str, Any] | None = None
     request_id: str = Field(default_factory=lambda: f"req_{uuid.uuid4().hex[:8]}")
+    command_id: str | None = None
 
 
 class ErrorResponse(BaseModel):

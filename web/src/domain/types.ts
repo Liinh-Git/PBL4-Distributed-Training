@@ -84,10 +84,25 @@ export interface DatasetDetail extends DatasetItem {
   };
 }
 
+export type DatasetBuildState =
+  | 'CREATED'
+  | 'QUEUED'
+  | 'IMPORTING'
+  | 'VALIDATING'
+  | 'PREPROCESSING'
+  | 'MATERIALIZING'
+  | 'VERIFYING'
+  | 'REGISTERING'
+  | 'READY'
+  | 'DEPRECATED'
+  | 'DELETING'
+  | 'DELETED'
+  | 'FAILED';
+
 export interface DatasetBuildListItem {
   dataset_build_id: string;
   dataset_id: string;
-  state: 'PENDING' | 'BUILDING' | 'READY' | 'FAILED' | 'DEPRECATED' | 'DELETING';
+  state: DatasetBuildState;
   profile: string;
   batch_size: number;
   shard_count: number;
@@ -118,7 +133,6 @@ export interface RequestedContract {
   learning_rate: number;
   training_seed: number;
   training_strategy: string;
-  description?: string;
 }
 
 export interface LatestAttemptSummary {
@@ -202,12 +216,19 @@ export interface AttemptDetail {
   contract_hash: string;
   state: AttemptState;
   execution_mode: ExecutionMode;
-  membership: MembershipInfo;
+  training_strategy: string | null;
+  expected_workers: number | null;
+  membership: MembershipInfo | null;
+  epoch: number | null;
+  progress_cursor: { epoch: number; next_batch_ordinal: number } | null;
+  model_version: number | null;
+  checkpoint: { state: CheckpointState; latest_checkpoint_id: string | null } | null;
+  runtime: { stale: boolean; observed_at: string | null; runtime_event_seq: number | null } | null;
+  strategy_state: Record<string, unknown> | null;
+  failure: { code: string; message: string | null } | null;
   created_at: string;
   started_at: string | null;
   ended_at: string | null;
-  failure_code: string | null;
-  failure_message: string | null;
 }
 
 export interface WorkerSessionItem {
@@ -227,7 +248,7 @@ export interface AttemptSnapshot {
   state: AttemptState;
   training_strategy: string | null;
   epoch: number | null;
-  current_operation_id: string | null;
+  current_operation_id: number | null;
   model_version: number | null;
   workers: WorkerSessionItem[];
   stale: boolean;
@@ -255,12 +276,14 @@ export interface CheckpointListItem {
   checkpoint_id: string;
   job_id: string;
   created_by_attempt_id: string;
-  state: string;
+  state: CheckpointState;
   model_version: number;
   source_step_id: number | null;
   created_at: string;
   completed_at: string | null;
 }
+
+export type CheckpointState = 'WRITING' | 'COMPLETE' | 'FAILED';
 
 // ─── Event ─────────────────────────────────────────────────────────────────
 
@@ -275,6 +298,7 @@ export interface EventListItem {
   severity: EventSeverity;
   source_component?: string;
   payload?: Record<string, unknown>;
+  details?: Record<string, unknown>;
   occurred_at: string;
 }
 
@@ -293,14 +317,12 @@ export interface CommandListItem {
 
 // ─── WebSocket messages ────────────────────────────────────────────────────
 
-export interface WsMessage<T = unknown> {
-  type: string;
-  data: T;
-}
+export type WsFrameKind = 'EVENT' | 'SNAPSHOT' | 'GAP' | 'PING' | 'PONG';
 
-export interface WsConnectedData {
-  attempt_id: string;
-  attempt_state: AttemptState;
-  stale: boolean;
-  message: string;
+export interface CanonicalWsFrame<T = unknown> {
+  kind: WsFrameKind;
+  attempt_id?: string | null;
+  runtime_event_seq?: number | null;
+  occurred_at?: string | null;
+  payload?: T;
 }

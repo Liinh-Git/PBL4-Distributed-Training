@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { useRealtimeAttempt } from '../hooks/useRealtimeAttempt'
 import { attemptsApi } from '../api/attempts'
+import { createIdempotencyKey } from '../api/client'
 import StatusBadge from '../components/jobs/StatusBadge'
 import TopologyGraph from '../components/topology/TopologyGraph'
 import MetricCard from '../components/metrics/MetricCard'
@@ -55,7 +56,7 @@ function AttemptSelector({ onSelect }: { onSelect: (id: string) => void }) {
           className="form-input"
           value={attemptId}
           onChange={e => setAttemptId(e.target.value)}
-          placeholder="attempt_..."
+          placeholder="atm_..."
           aria-label="Attempt ID"
           style={{ flex: 1 }}
         />
@@ -82,11 +83,14 @@ function buildStepChartData(steps: StepListItem[]) {
 
 // ─── Current Job Page ────────────────────────────────────────────────────────
 export default function CurrentJobPage() {
+  const params = useParams<{ attemptId?: string }>()
   const location = useLocation()
   const navigate = useNavigate()
-  const [activeAttemptId, setActiveAttemptId] = useState<string | null>(
-    (location.state as { attemptId?: string } | null)?.attemptId ?? null
+  const routeAttemptId = params.attemptId ?? null
+  const [selectedAttemptId, setSelectedAttemptId] = useState<string | null>(
+    routeAttemptId || ((location.state as { attemptId?: string } | null)?.attemptId ?? null)
   )
+  const activeAttemptId = routeAttemptId || selectedAttemptId
   const [showAbort, setShowAbort] = useState(false)
   const [abortError, setAbortError] = useState<string | null>(null)
   const [checkpointBusy, setCheckpointBusy] = useState(false)
@@ -95,7 +99,7 @@ export default function CurrentJobPage() {
   const { attempt, snapshot, workers, steps, events, wsStatus, loading, error, refresh } =
     useRealtimeAttempt(activeAttemptId)
 
-  // Auto-detect latest running attempt if none selected
+  // Auto-detect latest running attempt if on /current-job without attemptId
   useEffect(() => {
     if (activeAttemptId) return
     let cancelled = false
@@ -103,18 +107,21 @@ export default function CurrentJobPage() {
       for (const state of ['RUNNING', 'INITIALIZING', 'WAITING_WORKERS', 'PROVISIONING']) {
         try {
           const r = await attemptsApi.list({ state, limit: 1 })
-          if (!cancelled && r.data[0]) { setActiveAttemptId(r.data[0].attempt_id); return }
+          if (!cancelled && r.data[0]) {
+            navigate(`/attempts/${r.data[0].attempt_id}`, { replace: true })
+            return
+          }
         } catch { /* ignore */ }
       }
     }
     detect()
     return () => { cancelled = true }
-  }, [activeAttemptId])
+  }, [activeAttemptId, navigate])
 
   async function handleAbort() {
     if (!activeAttemptId) return
     setAbortError(null)
-    try { await attemptsApi.abort(activeAttemptId, 'Operator abort'); refresh(); setShowAbort(false) }
+    try { await attemptsApi.abort(activeAttemptId, createIdempotencyKey('attempt_abort'), 'Operator abort'); refresh(); setShowAbort(false) }
     catch (e) { setAbortError(errMsg(e)) }
   }
 
@@ -122,7 +129,7 @@ export default function CurrentJobPage() {
     if (!activeAttemptId) return
     setCheckpointBusy(true); setCheckpointMsg(null)
     try {
-      await attemptsApi.requestCheckpoint(activeAttemptId, 'Manual request')
+      await attemptsApi.requestCheckpoint(activeAttemptId, createIdempotencyKey('checkpoint_request'), 'Manual request')
       setCheckpointMsg('Checkpoint request sent')
     } catch (e) {
       setCheckpointMsg(errMsg(e))
@@ -146,7 +153,7 @@ export default function CurrentJobPage() {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
         <h1 className="page-title">Current Job</h1>
-        <AttemptSelector onSelect={setActiveAttemptId} />
+        <AttemptSelector onSelect={(id) => navigate(`/attempts/${id}`)} />
         <div className="empty-state">
           <div className="empty-state-icon">◎</div>
           <div className="empty-state-title">No active training attempt</div>
@@ -189,7 +196,7 @@ export default function CurrentJobPage() {
               </button>
             </>
           )}
-          <button className="btn btn-ghost btn-sm" onClick={() => setActiveAttemptId(null)}>
+          <button className="btn btn-ghost btn-sm" onClick={() => { setSelectedAttemptId(null); navigate('/current-job'); }}>
             Change Attempt
           </button>
           <button className="btn btn-ghost btn-sm" onClick={refresh} aria-label="Refresh data">↻</button>
@@ -224,7 +231,9 @@ export default function CurrentJobPage() {
         <div className="grid-4">
           <MetricCard
             label="Workers"
-            value={`${attempt.membership.active_workers}/${attempt.membership.expected_workers}`}
+            value={attempt.membership
+              ? `${attempt.membership.active_workers}/${attempt.membership.expected_workers}`
+              : 'unknown'}
             sub="active / expected"
           />
           <MetricCard

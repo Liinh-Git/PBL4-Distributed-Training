@@ -6,6 +6,7 @@ Aligned to api_contract_formatted.md — Dataset and Dataset Build groups.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -18,9 +19,9 @@ class DatasetCreateRequest(StrictWriteModel):
     """POST /api/v1/datasets — DatasetSourceV1."""
 
     name: str = Field(min_length=1)
-    task_type: str
-    source_type: str
-    source_reference: str
+    task_type: Literal["image_classification"]
+    source_type: Literal["builtin"]
+    source_reference: Literal["cifar10"]
 
 
 class DatasetItem(BaseModel):
@@ -69,7 +70,7 @@ class DatasetBuildCreateRequest(StrictWriteModel):
     """POST /api/v1/dataset-builds — DatasetBuildCreateV1."""
 
     dataset_id: str
-    profile: str
+    profile: Literal["CNN_IMAGE_CLASSIFICATION_V1"] = "CNN_IMAGE_CLASSIFICATION_V1"
     batch_size: int = Field(gt=0)
     partition_seed: int = Field(ge=0)
     preprocessing: PreprocessingConfig | None = None
@@ -118,8 +119,8 @@ class DatasetBuildDetail(BaseModel):
     dataset_build_id: str
     dataset_id: str
     state: str
-    current_stage: str
-    progress: float
+    current_stage: str | None = None
+    progress: float | None = None
     profile: str
     batch_size: int
     shard_count: int

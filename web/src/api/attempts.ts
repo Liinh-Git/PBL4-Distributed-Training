@@ -19,15 +19,15 @@ export const attemptsApi = {
     return api.get<ListResponse<AttemptListItem>>(`/attempts?${qs}`);
   },
 
-  get: (attemptId: string) => api.get<AttemptDetail>(`/attempts/${attemptId}`),
+  get: (attemptId: string) => api.getItem<AttemptDetail>(`/attempts/${attemptId}`),
 
-  snapshot: (attemptId: string) => api.get<AttemptSnapshot>(`/attempts/${attemptId}/snapshot`),
+  snapshot: (attemptId: string) => api.getItem<AttemptSnapshot>(`/attempts/${attemptId}/snapshot`),
 
-  abort: (attemptId: string, reason?: string) =>
-    api.post(`/attempts/${attemptId}/abort`, reason ? { reason } : undefined),
+  abort: (attemptId: string, idempotencyKey: string, reason?: string) =>
+    api.postItem(`/attempts/${attemptId}/abort`, reason ? { reason } : undefined, { idempotencyKey }),
 
-  requestCheckpoint: (attemptId: string, reason?: string) =>
-    api.post(`/attempts/${attemptId}/checkpoint`, reason ? { reason } : undefined),
+  requestCheckpoint: (attemptId: string, idempotencyKey: string, reason?: string) =>
+    api.postItem(`/attempts/${attemptId}/checkpoint-requests`, reason ? { reason } : undefined, { idempotencyKey }),
 
   workers: (attemptId: string) =>
     api.get<ListResponse<WorkerSessionItem>>(`/attempts/${attemptId}/workers`),
@@ -39,11 +39,16 @@ export const attemptsApi = {
     return api.get<ListResponse<StepListItem>>(`/attempts/${attemptId}/steps?${qs}`);
   },
 
-  events: (attemptId: string, params?: { limit?: number; event_type?: string; severity?: string }) => {
+  events: (attemptId: string, params?: { limit?: number; event_type?: string; severity?: string; after_seq?: number }) => {
     const qs = new URLSearchParams();
     if (params?.limit) qs.set('limit', String(params.limit));
     if (params?.event_type) qs.set('event_type', params.event_type);
     if (params?.severity) qs.set('severity', params.severity);
-    return api.get<{ data: EventListItem[] }>(`/attempts/${attemptId}/events?${qs}`);
+    if (params?.after_seq !== undefined) qs.set('after_seq', String(params.after_seq));
+    return api.get<{
+      data: EventListItem[];
+      page: { next_cursor: string | null };
+      meta: { complete: boolean; gap_detected: boolean; snapshot_required: boolean };
+    }>(`/attempts/${attemptId}/events?${qs}`);
   },
 };

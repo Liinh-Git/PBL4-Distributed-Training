@@ -12,10 +12,21 @@ from pbl4.management_backend.services.contract_resolver import (
     resolve,
 )
 from pbl4.management_backend.services.model_catalog import (
+    FakeModelMetadataProvider,
+    get_model_metadata_provider,
     get_model_spec,
     is_supported_model,
     list_supported_models,
+    set_model_metadata_provider,
 )
+
+
+@pytest.fixture(autouse=True)
+def setup_fake_model_metadata():
+    orig = get_model_metadata_provider()
+    set_model_metadata_provider(FakeModelMetadataProvider())
+    yield
+    set_model_metadata_provider(orig)
 
 
 def test_model_catalog_v1_resnet18_groupnorm():
@@ -54,7 +65,7 @@ def test_contract_resolver_success():
         "dataset_build_id": "cifar10-v1-build",
         "dataset_id": "ds-cifar10",
         "state": "READY",
-        "manifest_hash": "abc123hash",
+        "dataset_manifest_hash": "abc123hash",
         "batch_size": 128,
         "shard_count": 3,
         "metadata_jsonb": {"total_samples": 50000, "splits": {"train": 50000}},
@@ -83,7 +94,9 @@ def test_contract_resolver_success():
         assert resolved["synchronization"]["training_strategy"] == "strict_bsp"
         assert resolved["synchronization"]["expected_workers"] == 3
         assert resolved["update_policy"]["type"] == "plain_sgd_without_momentum"
-        assert resolved["checkpoint_policy"]["cadence"] == "after_each_model_update_blocking"
+        assert resolved["checkpoint_policy"]["type"] == "after_each_model_update_blocking"
+        assert "cadence" not in resolved["checkpoint_policy"]
+        assert resolved["checkpoint_policy"]["schema_version"] == 1
 
 
 def test_contract_resolver_rejections():
@@ -92,7 +105,7 @@ def test_contract_resolver_rejections():
         "dataset_build_id": "cifar10-v1-build",
         "dataset_id": "ds-cifar10",
         "state": "READY",
-        "manifest_hash": "abc123hash",
+        "dataset_manifest_hash": "abc123hash",
         "batch_size": 128,
         "shard_count": 3,
         "metadata_jsonb": {"total_samples": 50000, "splits": {"train": 50000}},

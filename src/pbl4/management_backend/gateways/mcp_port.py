@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+McpMessageHandler = Callable[[str, dict[str, Any]], None]
 
 
 class McpClientPort(ABC):
@@ -49,14 +52,95 @@ class McpClientPort(ABC):
     def request_state(self) -> dict[str, Any] | None:
         """Request immediate STATE_SNAPSHOT from Runtime."""
 
+    @abstractmethod
+    def set_message_handler(self, handler: McpMessageHandler | None) -> None:
+        """Register handler for inbound semantic messages (HELLO_ACK, SNAPSHOT, RESULT, EVENT)."""
+
+
+class TruthfulDisconnectedMcpPort(McpClientPort):
+    """Truthful production port when Lâm's MCP/1 client is not integrated.
+
+    Never pretends to be connected. Truthfully returns disconnected and drops commands.
+    """
+
+    def __init__(self) -> None:
+        self._handler: McpMessageHandler | None = None
+
+    def set_message_handler(self, handler: McpMessageHandler | None) -> None:
+        self._handler = handler
+
+    def connect(self) -> bool:
+        logger.info(
+            "TruthfulDisconnectedMcpPort: MCP/1 endpoint not integrated; staying disconnected."
+        )
+        return False
+
+    def disconnect(self) -> None:
+        pass
+
+    @property
+    def is_connected(self) -> bool:
+        return False
+
+    def send_command(
+        self,
+        command_type: str,
+        command_id: str,
+        target_id: str,
+        payload: dict[str, Any] | None = None,
+    ) -> bool:
+        logger.warning(
+            "TruthfulDisconnectedMcpPort: MCP/1 not connected. Command %s (%s) dropped.",
+            command_id,
+            command_type,
+        )
+        return False
+
+    def request_state(self) -> dict[str, Any] | None:
+        return None
+
 
 class FakeMcpClientPort(McpClientPort):
     """In-memory fake port for standalone verification and unit tests."""
 
-    def __init__(self, initially_connected: bool = False) -> None:
+    def __init__(
+        self,
+        initially_connected: bool = False,
+        auto_accept_commands: bool = True,
+    ) -> None:
         self._connected = initially_connected
+        self._auto_accept_commands = auto_accept_commands
         self.dispatched_commands: list[dict[str, Any]] = []
         self.snapshot_to_return: dict[str, Any] | None = None
+        self._handler: McpMessageHandler | None = None
+
+    def set_message_handler(self, handler: McpMessageHandler | None) -> None:
+        self._handler = handler
+
+    def simulate_inbound(self, msg_type: str, payload: dict[str, Any]) -> None:
+        """Deliver an inbound semantic message to the registered gateway handler."""
+        if self._handler:
+            self._handler(msg_type, payload)
+
+    def simulate_hello_ack(self, payload: dict[str, Any] | None = None) -> None:
+        self.simulate_inbound("MGMT_HELLO_ACK", payload or {})
+
+    def simulate_state_snapshot(self, snapshot: dict[str, Any]) -> None:
+        self.simulate_inbound("STATE_SNAPSHOT", snapshot)
+
+    def simulate_command_result(
+        self,
+        command_id: str,
+        state: str = "ACCEPTED",
+        result: dict[str, Any] | None = None,
+    ) -> None:
+        self.simulate_inbound(
+            "COMMAND_RESULT",
+            {"command_id": command_id, "state": state, "result": result or {}},
+        )
+
+    def simulate_runtime_event(self, event: dict[str, Any]) -> None:
+        self.simulate_inbound("RUNTIME_EVENT", event)
 
     def connect(self) -> bool:
         self._connected = True
@@ -97,6 +181,14 @@ class FakeMcpClientPort(McpClientPort):
         }
         self.dispatched_commands.append(record)
         logger.info("FakeMcpClientPort dispatched: %s", record)
+
+        if self._auto_accept_commands and self._handler:
+            # Auto-respond with ACCEPTED so tests don't time out
+            self.simulate_command_result(
+                command_id=command_id,
+                state="ACCEPTED",
+                result={"status": "accepted", "command_id": command_id},
+            )
         return True
 
     def request_state(self) -> dict[str, Any] | None:

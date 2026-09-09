@@ -78,6 +78,7 @@ def update_command_state(
     command_id: str,
     new_state: str,
     *,
+    target_id: str | None = None,
     result: dict | None = None,
     dispatched_at: datetime | None = None,
     completed_at: datetime | None = None,
@@ -85,6 +86,9 @@ def update_command_state(
     sets = ["state = %s"]
     params: list[Any] = [new_state]
 
+    if target_id is not None:
+        sets.append("target_id = %s")
+        params.append(target_id)
     if dispatched_at is not None:
         sets.append("dispatched_at = %s")
         params.append(dispatched_at)

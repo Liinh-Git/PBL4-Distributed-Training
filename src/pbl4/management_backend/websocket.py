@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import json
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
@@ -34,6 +35,7 @@ class AttemptBroadcastHub:
 
     def __init__(self) -> None:
         self._subscribers: dict[str, set[asyncio.Queue]] = {}
+        self._dirty: set[asyncio.Queue] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._background_tasks: set[asyncio.Task] = set()
 
@@ -49,6 +51,7 @@ class AttemptBroadcastHub:
         subs = self._subscribers.get(attempt_id)
         if subs:
             subs.discard(q)
+            self._dirty.discard(q)
             if not subs:
                 del self._subscribers[attempt_id]
 
@@ -56,16 +59,20 @@ class AttemptBroadcastHub:
         """Push a message to all clients subscribed to attempt_id."""
         subs = self._subscribers.get(attempt_id, set())
         for q in list(subs):
+            if q in self._dirty:
+                continue
             try:
                 q.put_nowait(message)
             except asyncio.QueueFull:
                 logger.warning(
-                    "WebSocket queue full for attempt %s; sending overflow sentinel.",
+                    "WebSocket queue full for attempt %s; invalidating semantic stream.",
                     attempt_id,
                 )
+                self._dirty.add(q)
                 with contextlib.suppress(Exception):
-                    q.get_nowait()
-                    q.put_nowait({"type": "BACKPRESSURE_OVERFLOW"})
+                    while not q.empty():
+                        q.get_nowait()
+                    q.put_nowait({"kind": "OVERFLOW_INVALIDATE"})
 
     def broadcast_sync(self, attempt_id: str, message: dict[str, Any]) -> None:
         """Thread-safe and sync-context broadcast dispatch."""
@@ -94,7 +101,6 @@ async def _attempt_ws(websocket: WebSocket, attempt_id: str) -> None:
     """Handle a single WebSocket connection for an attempt."""
     from pbl4.management_backend import db
     from pbl4.management_backend.repositories import attempt_repository, event_repository
-    from pbl4.management_backend.services import attempt_service
 
     # Validate attempt existence
     try:
@@ -113,97 +119,138 @@ async def _attempt_ws(websocket: WebSocket, attempt_id: str) -> None:
     hub.set_loop(asyncio.get_running_loop())
     logger.info("WebSocket connected: attempt=%s", attempt_id)
 
-    # Check for after_seq query parameter for reconnection catch-up
-    after_seq_raw = websocket.query_params.get("after_seq")
-    after_seq: int | None = None
-    if after_seq_raw is not None:
-        with contextlib.suppress(ValueError):
-            after_seq = int(after_seq_raw)
+    # Subscribe to live hub FIRST before querying persisted catch-up history
+    # to eliminate any race condition where live events arriving during DB catch-up are lost.
+    q = hub.subscribe(attempt_id)
+    last_contiguous_sent_seq: int | None = None
+    pending_live_events: dict[int, dict] = {}
 
-    latest_seq: int = 0
-    with db.get_connection() as conn:
-        latest_seq = event_repository.get_latest_runtime_event_seq(conn, attempt_id) or 0
+    try:
+        # Check for after_seq query parameter for reconnection catch-up
+        after_seq_raw = websocket.query_params.get("after_seq")
+        after_seq: int | None = None
+        if after_seq_raw is not None:
+            with contextlib.suppress(ValueError):
+                after_seq = int(after_seq_raw)
 
         if after_seq is not None:
-            missed_events = event_repository.list_events_after_seq(
-                conn, attempt_id, after_seq, limit=200
-            )
-            # Check if missed events form a contiguous sequence from after_seq + 1
-            is_contiguous = False
-            if missed_events:
-                first_seq = missed_events[0].get("runtime_event_seq")
-                if first_seq == after_seq + 1:
-                    is_contiguous = True
-                    curr = first_seq
-                    for e in missed_events[1:]:
-                        seq = e.get("runtime_event_seq")
-                        if seq != curr + 1:
-                            is_contiguous = False
-                            break
-                        curr = seq
-            elif after_seq >= latest_seq:
-                is_contiguous = True  # Already caught up
+            last_contiguous_sent_seq = after_seq
 
-            if is_contiguous:
-                for e in missed_events:
+        with db.get_connection() as conn:
+            latest_seq = event_repository.get_latest_runtime_event_seq(conn, attempt_id) or 0
+
+            if after_seq is not None:
+                # Multi-page catch-up: fetch all pages (> 200 events) without silent truncation
+                missed_events: list[dict] = []
+                curr_cursor = after_seq
+                batch_size = 200
+                while True:
+                    batch = event_repository.list_events_after_seq(
+                        conn, attempt_id, curr_cursor, limit=batch_size
+                    )
+                    if not batch:
+                        break
+                    missed_events.extend(batch)
+                    curr_cursor = batch[-1].get("runtime_event_seq")
+                    if len(batch) < batch_size or curr_cursor is None:
+                        break
+
+                # Check if missed events form a contiguous sequence from after_seq + 1
+                is_contiguous = False
+                if missed_events:
+                    first_seq = missed_events[0].get("runtime_event_seq")
+                    if first_seq == after_seq + 1:
+                        is_contiguous = True
+                        curr = first_seq
+                        for e in missed_events[1:]:
+                            seq = e.get("runtime_event_seq")
+                            if seq != curr + 1:
+                                is_contiguous = False
+                                break
+                            curr = seq
+                elif after_seq >= latest_seq:
+                    is_contiguous = True  # Already caught up
+
+                if is_contiguous:
+                    for e in missed_events:
+                        seq = e["runtime_event_seq"]
+                        last_contiguous_sent_seq = seq
+                        e_occurred = (
+                            e["occurred_at"].isoformat()
+                            if hasattr(e["occurred_at"], "isoformat")
+                            else str(e["occurred_at"])
+                        )
+                        payload_data = e.get("payload_jsonb") or {}
+                        if isinstance(payload_data, str):
+                            with contextlib.suppress(Exception):
+                                payload_data = json.loads(payload_data)
+                        await websocket.send_json(
+                            {
+                                "kind": "EVENT",
+                                "attempt_id": attempt_id,
+                                "runtime_event_seq": seq,
+                                "occurred_at": e_occurred,
+                                "payload": {
+                                    "event_type": e["event_type"],
+                                    "severity": e["severity"],
+                                    "source_component": e.get("source_component", "Runtime"),
+                                    **payload_data,
+                                },
+                            }
+                        )
+                else:
+                    # Discontinuous history requested:
+                    # send actual reconciled Runtime SNAPSHOT@M + GAP
+                    gw = get_gateway()
+                    runtime_snap = gw.get_authoritative_snapshot(attempt_id)
+                    now_str = datetime.now(UTC).isoformat()
+                    snap_seq = None
+                    if runtime_snap is not None:
+                        snap_seq = runtime_snap["authoritative_snapshot_seq"]
+                        if snap_seq is not None:
+                            last_contiguous_sent_seq = snap_seq
+                        await websocket.send_json(
+                            {
+                                "kind": "SNAPSHOT",
+                                "attempt_id": attempt_id,
+                                "runtime_event_seq": snap_seq,
+                                "occurred_at": now_str,
+                                "payload": runtime_snap,
+                            }
+                        )
                     await websocket.send_json(
                         {
-                            "type": "RUNTIME_EVENT",
-                            "data": {
-                                "attempt_id": attempt_id,
-                                "runtime_event_seq": e["runtime_event_seq"],
-                                "event_type": e["event_type"],
-                                "occurred_at": (
-                                    e["occurred_at"].isoformat()
-                                    if hasattr(e["occurred_at"], "isoformat")
-                                    else str(e["occurred_at"])
-                                ),
-                                "source_component": e.get("source_component", "Runtime"),
-                                "severity": e["severity"],
-                                "payload": e.get("payload_jsonb"),
+                            "kind": "GAP",
+                            "attempt_id": attempt_id,
+                            "runtime_event_seq": None,
+                            "occurred_at": now_str,
+                            "payload": {
+                                "after_seq": after_seq,
+                                "authoritative_seq": snap_seq,
+                                "snapshot_required": True,
+                                "reason": f"Discontinuous history requested after_seq={after_seq}",
                             },
                         }
                     )
             else:
-                # Discontinuous history requested: send SNAPSHOT -> GAP frames
-                snap = attempt_service.get_attempt_snapshot(conn, attempt_id)
-                await websocket.send_json(
-                    {
-                        "type": "SNAPSHOT",
-                        "data": {
+                # New connection without after_seq: send authoritative SNAPSHOT if available
+                gw = get_gateway()
+                runtime_snap = gw.get_authoritative_snapshot(attempt_id)
+                if runtime_snap is not None:
+                    snap_seq = runtime_snap["authoritative_snapshot_seq"]
+                    if snap_seq is not None:
+                        last_contiguous_sent_seq = snap_seq
+                    now_str = datetime.now(UTC).isoformat()
+                    await websocket.send_json(
+                        {
+                            "kind": "SNAPSHOT",
                             "attempt_id": attempt_id,
-                            "snapshot_seq": latest_seq,
-                            "snapshot": snap,
-                        },
-                    }
-                )
-                await websocket.send_json(
-                    {
-                        "type": "GAP",
-                        "data": {
-                            "attempt_id": attempt_id,
-                            "snapshot_seq": latest_seq,
-                            "reason": f"Discontinuous history requested after_seq={after_seq}",
-                        },
-                    }
-                )
+                            "runtime_event_seq": snap_seq,
+                            "occurred_at": now_str,
+                            "payload": runtime_snap,
+                        }
+                    )
 
-    # Send initial "CONNECTED" frame
-    await websocket.send_json(
-        {
-            "type": "CONNECTED",
-            "data": {
-                "attempt_id": attempt_id,
-                "attempt_state": attempt["state"],
-                "highest_contiguous_seq": latest_seq,
-                "stale": not get_gateway().connected,
-                "message": "Connected to attempt stream.",
-            },
-        }
-    )
-
-    q = hub.subscribe(attempt_id)
-    try:
         while True:
             recv_task = asyncio.create_task(websocket.receive_text())
             queue_task = asyncio.create_task(q.get())
@@ -221,8 +268,8 @@ async def _attempt_ws(websocket: WebSocket, attempt_id: str) -> None:
                     text = recv_task.result()
                     try:
                         msg = json.loads(text)
-                        if msg.get("type") == "PING":
-                            await websocket.send_json({"type": "PONG"})
+                        if msg.get("kind") == "PING":
+                            await websocket.send_json({"kind": "PONG"})
                     except (json.JSONDecodeError, AttributeError):
                         pass
                 except WebSocketDisconnect:
@@ -233,17 +280,74 @@ async def _attempt_ws(websocket: WebSocket, attempt_id: str) -> None:
             if queue_task in done:
                 try:
                     event = queue_task.result()
-                    if isinstance(event, dict) and event.get("type") == "BACKPRESSURE_OVERFLOW":
+                    if isinstance(event, dict) and event.get("kind") == "OVERFLOW_INVALIDATE":
                         logger.warning(
                             "Closing WebSocket for %s due to backpressure overflow.",
                             attempt_id,
                         )
                         await websocket.close(
-                            code=1008,
-                            reason="Backpressure overflow: reconnect with highestContiguousSeq",
+                            code=status.WS_1008_POLICY_VIOLATION,
+                            reason="Backpressure overflow: reconnect with highest contiguous seq",
                         )
                         break
-                    await websocket.send_json(event)
+
+                    if isinstance(event, dict) and event.get("kind") == "EVENT":
+                        e_seq = event.get("runtime_event_seq")
+                        if e_seq is None:
+                            await websocket.send_json(event)
+                            continue
+
+                        baseline = (
+                            last_contiguous_sent_seq if last_contiguous_sent_seq is not None else 0
+                        )
+
+                        if e_seq <= baseline:
+                            # CASE A: duplicate / already replayed -> ignore
+                            continue
+                        elif e_seq == baseline + 1:
+                            # CASE B: exactly contiguous -> send and drain buffer
+                            await websocket.send_json(event)
+                            last_contiguous_sent_seq = e_seq
+                            while (
+                                last_contiguous_sent_seq is not None
+                                and (last_contiguous_sent_seq + 1) in pending_live_events
+                            ):
+                                next_seq = last_contiguous_sent_seq + 1
+                                next_ev = pending_live_events.pop(next_seq)
+                                await websocket.send_json(next_ev)
+                                last_contiguous_sent_seq = next_seq
+                        else:
+                            # CASE C: out-of-order future event -> buffer without sending
+                            pending_live_events[e_seq] = event
+                            if len(pending_live_events) > 500:
+                                logger.warning(
+                                    "Closing WebSocket for %s: pending buffer overflow",
+                                    attempt_id,
+                                )
+                                await websocket.close(
+                                    code=status.WS_1008_POLICY_VIOLATION,
+                                    reason="Pending buffer overflow: unresolvable live gap",
+                                )
+                                break
+                    elif isinstance(event, dict) and event.get("kind") == "SNAPSHOT":
+                        s_seq = event.get("runtime_event_seq")
+                        if s_seq is not None:
+                            last_contiguous_sent_seq = s_seq
+                            # Discard buffered events with seq <= s_seq
+                            pending_live_events = {
+                                seq: ev for seq, ev in pending_live_events.items() if seq > s_seq
+                            }
+                        await websocket.send_json(event)
+                        while (
+                            last_contiguous_sent_seq is not None
+                            and (last_contiguous_sent_seq + 1) in pending_live_events
+                        ):
+                            next_seq = last_contiguous_sent_seq + 1
+                            next_ev = pending_live_events.pop(next_seq)
+                            await websocket.send_json(next_ev)
+                            last_contiguous_sent_seq = next_seq
+                    else:
+                        await websocket.send_json(event)
                 except Exception as exc:
                     logger.warning("WebSocket send failed for %s: %s", attempt_id, exc)
                     break

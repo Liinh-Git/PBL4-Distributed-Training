@@ -61,6 +61,20 @@ class BackendSettings(BaseSettings):
             return [o.strip() for o in v.split(",") if o.strip()]
         return v
 
+    @field_validator("backend_port", mode="before")
+    @classmethod
+    def parse_backend_port(cls, v: object) -> object:
+        if v == "" or v is None:
+            return 8000
+        return v
+
+    @field_validator("runtime_management_port", "dataset_manager_port", mode="before")
+    @classmethod
+    def parse_empty_optional_port(cls, v: object) -> object:
+        if v == "" or v is None:
+            return None
+        return v
+
     @property
     def runtime_management_url(self) -> str | None:
         if self.runtime_management_port is None:

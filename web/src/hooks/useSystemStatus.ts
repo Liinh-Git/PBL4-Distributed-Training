@@ -25,10 +25,11 @@ export function useSystemStatus(pollIntervalMs = 15_000): SystemStatus {
         systemApi.capabilities(),
         systemApi.runtimeSnapshot(),
       ]);
-      if (h.status === 'fulfilled') setHealth(h.value);
-      if (c.status === 'fulfilled') setCapabilities(c.value);
-      if (s.status === 'fulfilled') setSnapshot(s.value);
-      setError(null);
+      setHealth(h.status === 'fulfilled' ? h.value : null);
+      setCapabilities(c.status === 'fulfilled' ? c.value : null);
+      setSnapshot(s.status === 'fulfilled' ? s.value : null);
+      const failed = [h, c, s].filter((result) => result.status === 'rejected');
+      setError(failed.length > 0 ? `${failed.length} system status request(s) failed` : null);
     } catch (e) {
       setError(String(e));
     } finally {

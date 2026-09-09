@@ -10,6 +10,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from pbl4.management_backend.schemas.common import PageInfo
+
 
 class ScopeRef(BaseModel):
     type: str
@@ -41,3 +43,9 @@ class RuntimeEventsMeta(BaseModel):
     complete: bool
     gap_detected: bool
     snapshot_required: bool
+
+
+class RuntimeEventsResponse(BaseModel):
+    data: list[RuntimeEventItem]
+    page: PageInfo
+    meta: RuntimeEventsMeta

@@ -97,6 +97,29 @@ def acquire_or_get_record(
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
+            INSERT INTO idempotency_records (
+                operator_identity, endpoint_semantic_scope, idempotency_key,
+                canonical_request_hash, status, created_at, locked_until
+            ) VALUES (%s, %s, %s, %s, 'IN_PROGRESS', %s, %s)
+            ON CONFLICT (operator_identity, endpoint_semantic_scope, idempotency_key)
+            DO NOTHING
+            RETURNING *
+            """,
+            (
+                operator_identity,
+                endpoint_semantic_scope,
+                idempotency_key,
+                canonical_request_hash,
+                now,
+                locked_until,
+            ),
+        )
+        inserted = cur.fetchone()
+        if inserted is not None:
+            return None, "NEW"
+
+        cur.execute(
+            """
             SELECT * FROM idempotency_records
             WHERE operator_identity = %s
               AND endpoint_semantic_scope = %s
@@ -108,24 +131,7 @@ def acquire_or_get_record(
         record = cur.fetchone()
 
         if record is None:
-            cur.execute(
-                """
-                INSERT INTO idempotency_records (
-                    operator_identity, endpoint_semantic_scope, idempotency_key,
-                    canonical_request_hash, status, created_at, locked_until
-                ) VALUES (%s, %s, %s, %s, 'IN_PROGRESS', %s, %s)
-                RETURNING *
-                """,
-                (
-                    operator_identity,
-                    endpoint_semantic_scope,
-                    idempotency_key,
-                    canonical_request_hash,
-                    now,
-                    locked_until,
-                ),
-            )
-            return None, "NEW"
+            raise RuntimeError("Idempotency record disappeared after conflict resolution.")
 
         # Record exists — verify request identity
         if record["canonical_request_hash"] != canonical_request_hash:

@@ -64,9 +64,7 @@ export function useJobDetail(jobId: string | null): UseJobDetailResult {
     setLoading(true);
     setError(null);
     try {
-      const res = await jobsApi.get(jobId);
-      // API returns { data: JobDetail } or JobDetail directly based on our router
-      const detail = (res as unknown as { data?: JobDetail }).data ?? (res as unknown as JobDetail);
+      const detail = await jobsApi.get(jobId);
       setJob(detail);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

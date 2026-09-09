@@ -175,4 +175,5 @@ class JoinSpec(BaseModel):
     attempt_id: str
     contract_hash: str
     protocol: JoinSpecProtocol
+    expected_workers: int
     expires_at: datetime | None = None

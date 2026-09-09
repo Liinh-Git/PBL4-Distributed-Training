@@ -15,8 +15,14 @@ async def test_attempt_broadcast_hub_delivery():
     assert hub.subscriber_count("att-1") == 2
     assert hub.subscriber_count("att-2") == 1
 
-    # Broadcast to att-1
-    msg = {"type": "RUNTIME_EVENT", "data": {"runtime_event_seq": 1}}
+    # Broadcast to att-1 using canonical kind envelope
+    msg = {
+        "kind": "EVENT",
+        "attempt_id": "att-1",
+        "runtime_event_seq": 1,
+        "occurred_at": "2026-09-09T00:00:00Z",
+        "payload": {"event_type": "STEP_COMMITTED"},
+    }
     await hub.broadcast("att-1", msg)
 
     # Both att-1 subscribers should receive it
@@ -42,19 +48,17 @@ async def test_attempt_broadcast_hub_backpressure():
 
     # Fill queue to capacity (256 items)
     for i in range(256):
-        q.put_nowait({"type": "EVENT", "seq": i})
+        q.put_nowait({"kind": "EVENT", "seq": i})
 
     assert q.full()
 
-    # Broadcasting when full should trigger backpressure overflow sentinel
-    await hub.broadcast("att-bp", {"type": "EVENT", "seq": 999})
+    # Broadcasting when full should immediately invalidate semantic stream and terminate
+    await hub.broadcast("att-bp", {"kind": "EVENT", "seq": 999})
 
-    # The queue should still contain items, and the overflow sentinel should be placed
+    # The queue must contain only the invalidation marker, never stale semantic events.
     items = []
     while not q.empty():
         items.append(q.get_nowait())
 
-    has_overflow_sentinel = any(
-        isinstance(it, dict) and it.get("type") == "BACKPRESSURE_OVERFLOW" for it in items
-    )
-    assert has_overflow_sentinel is True
+    assert len(items) == 1
+    assert items[0] == {"kind": "OVERFLOW_INVALIDATE"}

@@ -1,5 +1,10 @@
 """Datasets API router.
 
+CANONICAL SPECIFICATION:
+- 04. API Backend & Contracts (Backend REST & WebSocket)
+- 01. Dataset Manager
+
+CANONICAL ROUTES:
 POST   /api/v1/datasets                          — create dataset source
 GET    /api/v1/datasets                          — list datasets
 GET    /api/v1/datasets/{dataset_id}             — get dataset detail
@@ -8,7 +13,9 @@ GET    /api/v1/dataset-builds                    — list dataset builds
 GET    /api/v1/dataset-builds/{id}               — get build detail
 POST   /api/v1/dataset-builds/{id}/rebuild       — rebuild
 POST   /api/v1/dataset-builds/{id}/deprecate     — deprecate READY build
-DELETE /api/v1/dataset-builds/{id}               — delete build
+POST   /api/v1/dataset-builds/{id}/delete        — delete build (physical purge)
+
+NOTE: No DELETE HTTP method alias is exposed.
 """
 
 from __future__ import annotations
@@ -16,13 +23,14 @@ from __future__ import annotations
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Header, Query, status
+from fastapi import APIRouter, Header, HTTPException, Query, status
 
 from pbl4.management_backend import db
-from pbl4.management_backend.schemas.common import ListResponse, PageInfo
+from pbl4.management_backend.schemas.common import ItemResponse, ListResponse, PageInfo
 from pbl4.management_backend.schemas.dataset import (
     BuildCommandResponse,
     DatasetBuildCreateRequest,
+    DatasetBuildDeleteRequest,
     DatasetBuildDeprecateRequest,
     DatasetBuildDeprecateResponse,
     DatasetBuildDetail,
@@ -33,7 +41,7 @@ from pbl4.management_backend.schemas.dataset import (
     DatasetItem,
     ManifestSummary,
 )
-from pbl4.management_backend.services import dataset_service
+from pbl4.management_backend.services import dataset_service, idempotency
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Datasets"])
@@ -56,8 +64,8 @@ def _build_row_to_detail(row: dict) -> DatasetBuildDetail:
         dataset_build_id=row["dataset_build_id"],
         dataset_id=row["dataset_id"],
         state=row["state"],
-        current_stage=row["state"],
-        progress=1.0 if row["state"] == "READY" else 0.0,
+        current_stage=row.get("current_stage"),
+        progress=row.get("progress"),
         profile=row["profile"],
         batch_size=row["batch_size"],
         shard_count=row["shard_count"],
@@ -75,12 +83,47 @@ def _build_row_to_detail(row: dict) -> DatasetBuildDetail:
 
 @router.post(
     "/api/v1/datasets",
-    response_model=DatasetDetail,
+    response_model=ItemResponse[DatasetDetail],
     status_code=status.HTTP_201_CREATED,
     summary="Create a dataset source",
 )
-def create_dataset(body: DatasetCreateRequest):
+def create_dataset(
+    body: DatasetCreateRequest,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+):
+    import json
+
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "VALIDATION_ERROR",
+                "message": "Header 'Idempotency-Key' is required for this operation.",
+            },
+        )
+
+    request_hash = idempotency.compute_request_hash(
+        operation="CREATE_DATASET",
+        path="/api/v1/datasets",
+        body_obj=body.model_dump(),
+    )
     with db.transaction() as conn:
+        cached_record, action = idempotency.acquire_or_get_record(
+            conn,
+            endpoint_semantic_scope="DATASET_CREATE",
+            idempotency_key=idempotency_key,
+            canonical_request_hash=request_hash,
+        )
+        if action == "SUCCEEDED" and cached_record:
+            cached_body = cached_record.get("response_body_jsonb") or {}
+            if isinstance(cached_body, str):
+                cached_body = json.loads(cached_body)
+            d_id = cached_body.get("dataset_id")
+            if d_id:
+                detail = dataset_service.get_dataset(conn, d_id)
+                return ItemResponse(data=DatasetDetail(**detail))
+            return ItemResponse(data=DatasetDetail(**cached_body))
+
         row = dataset_service.create_dataset(
             conn,
             name=body.name,
@@ -89,15 +132,24 @@ def create_dataset(body: DatasetCreateRequest):
             source_reference=body.source_reference,
         )
         detail = dataset_service.get_dataset(conn, row["dataset_id"])
-    return DatasetDetail(
-        dataset_id=detail["dataset_id"],
-        name=detail["name"],
-        task_type=detail["task_type"],
-        source_type=detail["source_type"],
-        source_reference=detail["source_reference"],
-        created_at=detail["created_at"],
-        build_counts=detail["build_counts"],
-    )
+        res_detail = DatasetDetail(
+            dataset_id=detail["dataset_id"],
+            name=detail["name"],
+            task_type=detail["task_type"],
+            source_type=detail["source_type"],
+            source_reference=detail["source_reference"],
+            created_at=detail["created_at"],
+            build_counts=detail["build_counts"],
+        )
+        idempotency.complete_record(
+            conn,
+            endpoint_semantic_scope="DATASET_CREATE",
+            idempotency_key=idempotency_key,
+            response_status_code=201,
+            response_body=res_detail.model_dump(mode="json"),
+            resource_id=row["dataset_id"],
+        )
+        return ItemResponse(data=res_detail)
 
 
 @router.get(
@@ -136,20 +188,22 @@ def list_datasets(
 
 @router.get(
     "/api/v1/datasets/{dataset_id}",
-    response_model=DatasetDetail,
+    response_model=ItemResponse[DatasetDetail],
     summary="Get dataset detail",
 )
 def get_dataset(dataset_id: str):
     with db.get_connection() as conn:
         detail = dataset_service.get_dataset(conn, dataset_id)
-    return DatasetDetail(
-        dataset_id=detail["dataset_id"],
-        name=detail["name"],
-        task_type=detail["task_type"],
-        source_type=detail["source_type"],
-        source_reference=detail["source_reference"],
-        created_at=detail["created_at"],
-        build_counts=detail["build_counts"],
+    return ItemResponse(
+        data=DatasetDetail(
+            dataset_id=detail["dataset_id"],
+            name=detail["name"],
+            task_type=detail["task_type"],
+            source_type=detail["source_type"],
+            source_reference=detail["source_reference"],
+            created_at=detail["created_at"],
+            build_counts=detail["build_counts"],
+        )
     )
 
 
@@ -158,7 +212,7 @@ def get_dataset(dataset_id: str):
 
 @router.post(
     "/api/v1/dataset-builds",
-    response_model=BuildCommandResponse,
+    response_model=ItemResponse[BuildCommandResponse],
     status_code=status.HTTP_202_ACCEPTED,
     summary="Create a new dataset build",
 )
@@ -166,24 +220,33 @@ def create_build(
     body: DatasetBuildCreateRequest,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ):
-    with db.transaction() as conn:
-        build_row, cmd_row = dataset_service.create_build(
-            conn,
-            dataset_id=body.dataset_id,
-            profile=body.profile,
-            batch_size=body.batch_size,
-            partition_seed=body.partition_seed,
-            preprocessing=body.preprocessing.model_dump() if body.preprocessing else {},
-            idempotency_key=idempotency_key,
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "VALIDATION_ERROR",
+                "message": "Idempotency-Key header is required for this operation",
+            },
         )
-    return BuildCommandResponse(
-        command_id=str(cmd_row["command_id"]),
-        command_type=cmd_row["command_type"],
-        command_state=cmd_row["state"],
-        target_type=cmd_row["target_type"],
-        target_id=str(cmd_row["target_id"]),
-        dataset_build_id=build_row["dataset_build_id"],
-        dataset_build_state=build_row["state"],
+    build_row, cmd_row = dataset_service.execute_create_build(
+        db,
+        dataset_id=body.dataset_id,
+        profile=body.profile,
+        batch_size=body.batch_size,
+        partition_seed=body.partition_seed,
+        preprocessing=body.preprocessing.model_dump() if body.preprocessing else {},
+        idempotency_key=idempotency_key,
+    )
+    return ItemResponse(
+        data=BuildCommandResponse(
+            command_id=str(cmd_row["command_id"]),
+            command_type=cmd_row.get("command_type", "CREATE_DATASET_BUILD"),
+            command_state=cmd_row["state"],
+            target_type=cmd_row.get("target_type", "DATASET_BUILD"),
+            target_id=str(cmd_row.get("target_id") or build_row["dataset_build_id"]),
+            dataset_build_id=build_row["dataset_build_id"],
+            dataset_build_state=build_row["state"],
+        )
     )
 
 
@@ -232,18 +295,18 @@ def list_builds(
 
 @router.get(
     "/api/v1/dataset-builds/{dataset_build_id}",
-    response_model=DatasetBuildDetail,
+    response_model=ItemResponse[DatasetBuildDetail],
     summary="Get dataset build detail",
 )
 def get_build(dataset_build_id: str):
     with db.get_connection() as conn:
         row = dataset_service.get_build(conn, dataset_build_id)
-    return _build_row_to_detail(row)
+    return ItemResponse(data=_build_row_to_detail(row))
 
 
 @router.post(
     "/api/v1/dataset-builds/{dataset_build_id}/rebuild",
-    response_model=BuildCommandResponse,
+    response_model=ItemResponse[BuildCommandResponse],
     status_code=status.HTTP_202_ACCEPTED,
     summary="Rebuild a dataset build",
 )
@@ -252,72 +315,100 @@ def rebuild_build(
     body: DatasetBuildRebuildRequest | None = None,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ):
-    req = body or DatasetBuildRebuildRequest()
-    with db.transaction() as conn:
-        new_build, cmd_row = dataset_service.rebuild_build(
-            conn,
-            dataset_build_id,
-            batch_size=req.batch_size,
-            partition_seed=req.partition_seed,
-            preprocessing=req.preprocessing.model_dump() if req.preprocessing else None,
-            idempotency_key=idempotency_key,
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "VALIDATION_ERROR",
+                "message": "Idempotency-Key header is required for this operation",
+            },
         )
-    return BuildCommandResponse(
-        command_id=str(cmd_row["command_id"]),
-        command_type=cmd_row["command_type"],
-        command_state=cmd_row["state"],
-        target_type=cmd_row["target_type"],
-        target_id=str(cmd_row["target_id"]),
-        dataset_build_id=new_build["dataset_build_id"],
-        dataset_build_state=new_build["state"],
-        source_dataset_build_id=dataset_build_id,
-        new_dataset_build_id=new_build["dataset_build_id"],
+    req = body or DatasetBuildRebuildRequest()
+    new_build, cmd_row = dataset_service.execute_rebuild_build(
+        db,
+        dataset_build_id,
+        batch_size=req.batch_size,
+        partition_seed=req.partition_seed,
+        preprocessing=req.preprocessing.model_dump() if req.preprocessing else None,
+        idempotency_key=idempotency_key,
+    )
+    return ItemResponse(
+        data=BuildCommandResponse(
+            command_id=str(cmd_row["command_id"]),
+            command_type=cmd_row.get("command_type", "REBUILD_DATASET_BUILD"),
+            command_state=cmd_row["state"],
+            target_type=cmd_row.get("target_type", "DATASET_BUILD"),
+            target_id=str(cmd_row.get("target_id") or new_build["dataset_build_id"]),
+            dataset_build_id=new_build["dataset_build_id"],
+            dataset_build_state=new_build["state"],
+            source_dataset_build_id=dataset_build_id,
+            new_dataset_build_id=new_build["dataset_build_id"],
+        )
     )
 
 
 @router.post(
     "/api/v1/dataset-builds/{dataset_build_id}/deprecate",
-    response_model=DatasetBuildDeprecateResponse,
+    response_model=ItemResponse[DatasetBuildDeprecateResponse],
     summary="Deprecate a READY dataset build",
 )
 def deprecate_build(
     dataset_build_id: str,
     body: DatasetBuildDeprecateRequest | None = None,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ):
-    with db.transaction() as conn:
-        row = dataset_service.deprecate_build(conn, dataset_build_id)
-    return DatasetBuildDeprecateResponse(
-        dataset_build_id=row["dataset_build_id"],
-        state=row["state"],
-        deprecated_at=row["deprecated_at"],
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "VALIDATION_ERROR",
+                "message": "Idempotency-Key header is required for this operation",
+            },
+        )
+    req = body or DatasetBuildDeprecateRequest()
+    row = dataset_service.execute_deprecate_build(
+        db, dataset_build_id, reason=req.reason, idempotency_key=idempotency_key
     )
-
-
-@router.delete(
-    "/api/v1/dataset-builds/{dataset_build_id}",
-    response_model=BuildCommandResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-    summary="Delete a dataset build",
-)
-def delete_build(dataset_build_id: str):
-    with db.transaction() as conn:
-        build_row, cmd_row = dataset_service.delete_build(conn, dataset_build_id)
-    return BuildCommandResponse(
-        command_id=str(cmd_row["command_id"]),
-        command_type=cmd_row["command_type"],
-        command_state=cmd_row["state"],
-        target_type=cmd_row["target_type"],
-        target_id=str(cmd_row["target_id"]),
-        dataset_build_id=build_row["dataset_build_id"],
-        dataset_build_state=build_row["state"],
+    return ItemResponse(
+        data=DatasetBuildDeprecateResponse(
+            dataset_build_id=row["dataset_build_id"],
+            state=row["state"],
+            deprecated_at=row["deprecated_at"],
+        )
     )
 
 
 @router.post(
     "/api/v1/dataset-builds/{dataset_build_id}/delete",
-    response_model=BuildCommandResponse,
+    response_model=ItemResponse[BuildCommandResponse],
     status_code=status.HTTP_202_ACCEPTED,
-    summary="Delete a dataset build (POST alias)",
+    summary="Delete a dataset build (purge)",
 )
-def delete_build_post(dataset_build_id: str):
-    return delete_build(dataset_build_id)
+def delete_build(
+    dataset_build_id: str,
+    body: DatasetBuildDeleteRequest | None = None,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+):
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "VALIDATION_ERROR",
+                "message": "Idempotency-Key header is required for this operation",
+            },
+        )
+    req = body or DatasetBuildDeleteRequest()
+    build_row, cmd_row = dataset_service.execute_delete_build(
+        db, dataset_build_id, reason=req.reason, idempotency_key=idempotency_key
+    )
+    return ItemResponse(
+        data=BuildCommandResponse(
+            command_id=str(cmd_row["command_id"]),
+            command_type=cmd_row.get("command_type", "DELETE_DATASET_BUILD"),
+            command_state=cmd_row["state"],
+            target_type=cmd_row.get("target_type", "DATASET_BUILD"),
+            target_id=str(cmd_row.get("target_id") or dataset_build_id),
+            dataset_build_id=build_row["dataset_build_id"],
+            dataset_build_state=build_row["state"],
+        )
+    )

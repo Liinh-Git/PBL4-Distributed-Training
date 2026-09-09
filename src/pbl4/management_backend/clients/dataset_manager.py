@@ -16,8 +16,11 @@ INTERNAL PATHS (Backend → Dataset Manager):
 
 INVARIANTS:
 - Preserves both Idempotency-Key (header) and command_id (payload) on create/rebuild retries.
-- Backend never calls purge directly on READY builds.
-- Does not proxy shard downloads for workers.
+- Backend NEVER generates or sends dataset_build_id on create or rebuild.
+- When unavailable, Backend raises DatasetManagerUnavailableError truthfully and never
+  fabricates a local success state.
+- Purge payload carries exact canonical fields: command_id, reason, force=false.
+- Registration ACK carries: dataset_manifest_hash, registration_id, catalog_persisted_at.
 """
 
 from __future__ import annotations
@@ -31,9 +34,72 @@ logger = logging.getLogger(__name__)
 
 
 class DatasetManagerUnavailableError(Exception):
-    """Raised when the Dataset Manager cannot be reached or returns a 5xx error."""
+    """Raised when Dataset Manager cannot be reached, returns a 5xx error, or is unconfigured."""
 
     pass
+
+
+class DatasetManagerBusinessError(Exception):
+    """Raised when Dataset Manager responds with an HTTP 4xx business rejection."""
+
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        message: str,
+        details: Any = None,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(f"Dataset Manager business rejection {status_code} [{code}]: {message}")
+        self.status_code = status_code
+        self.code = code
+        self.message = message
+        self.details = details
+        self.retryable = retryable
+
+
+def _handle_response(resp: httpx.Response) -> httpx.Response:
+    """Validate response status, separating 4xx business rejections from 5xx/network errors."""
+    if resp.status_code < 400:
+        return resp
+    if resp.status_code >= 500:
+        raise DatasetManagerUnavailableError(
+            f"Dataset Manager returned server error {resp.status_code}"
+        )
+
+    # 4xx: Parse downstream business rejection
+    code = "DATASET_MANAGER_ERROR"
+    message = f"Dataset Manager rejected request with HTTP {resp.status_code}"
+    details = None
+    retryable = False
+
+    try:
+        body = resp.json()
+        if isinstance(body, dict):
+            err = body.get("error", body)
+            if isinstance(err, dict):
+                code = err.get("code") or code
+                message = err.get("message") or message
+                details = err.get("details")
+                retryable = bool(err.get("retryable", False))
+            elif isinstance(body.get("code"), str):
+                code = body["code"]
+                message = body.get("message") or message
+                details = body.get("details")
+                retryable = bool(body.get("retryable", False))
+    except Exception:
+        message = (
+            f"Dataset Manager rejected request with HTTP {resp.status_code} "
+            "(malformed error response)"
+        )
+
+    raise DatasetManagerBusinessError(
+        status_code=resp.status_code,
+        code=code,
+        message=message,
+        details=details,
+        retryable=retryable,
+    )
 
 
 class DatasetManagerClient:
@@ -51,55 +117,78 @@ class DatasetManagerClient:
         if self._base_url:
             logger.info("DatasetManagerClient configured with base_url: %s", self._base_url)
         else:
-            logger.warning("DatasetManagerClient running in unconfigured/stub mode.")
+            logger.info("DatasetManagerClient running in unconfigured mode.")
 
     @property
     def available(self) -> bool:
         return self._base_url is not None
 
+    def check_health(self) -> str:
+        """Check Dataset Manager reachability truthfully."""
+        if not self.available or not self._base_url:
+            return "unknown"
+        try:
+            with httpx.Client(timeout=1.0, transport=self._transport) as client:
+                resp = client.get(f"{self._base_url}/healthz")
+                if resp.status_code == httpx.codes.OK:
+                    return "healthy"
+                return "degraded"
+        except httpx.HTTPError:
+            return "unreachable"
+
     def create_build(
         self,
         *,
-        dataset_build_id: str,
         command_id: str,
         idempotency_key: str,
         source: dict[str, Any],
+        profile: str,
+        input_shape: list[int],
+        normalization: dict[str, Any],
         batch_size: int,
         partition_seed: int,
-        profile: str,
-        preprocessing: dict[str, Any] | None = None,
+        shard_count: int = 3,
     ) -> dict[str, Any]:
-        """Trigger build creation on Dataset Manager."""
+        """Trigger build creation on Dataset Manager.
+
+        Backend resolves public request into canonical internal DM body.
+        Backend does NOT generate or send dataset_build_id.
+        """
         if not self.available:
-            logger.warning(
-                "Dataset Manager unavailable; build %s queued locally.", dataset_build_id
-            )
-            return {"status": "QUEUED_LOCAL", "dataset_build_id": dataset_build_id}
+            raise DatasetManagerUnavailableError("Dataset Manager base URL is not configured.")
 
         url = f"{self._base_url}/api/v1/dataset-builds"
         headers = {"Idempotency-Key": idempotency_key}
         payload = {
-            "command_id": command_id,
-            "dataset_build_id": dataset_build_id,
             "source": source,
-            "batch_size": batch_size,
-            "partition_seed": partition_seed,
             "profile": profile,
-            "preprocessing": preprocessing or {},
+            "input_shape": input_shape,
+            "normalization": normalization,
+            "batch_size": batch_size,
+            "shard_count": shard_count,
+            "partition_seed": partition_seed,
+            "command_id": command_id,
         }
         try:
             with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
                 resp = client.post(url, json=payload, headers=headers)
-                resp.raise_for_status()
+                _handle_response(resp)
                 return resp.json()
-        except httpx.RequestError as exc:
-            logger.error("Dataset Manager create_build failed for %s: %s", dataset_build_id, exc)
+        except DatasetManagerBusinessError:
+            raise
+        except DatasetManagerUnavailableError:
+            raise
+        except (httpx.TransportError, httpx.TimeoutException) as exc:
+            logger.error("Dataset Manager create_build transport failed: %s", exc)
+            raise DatasetManagerUnavailableError(str(exc)) from exc
+        except Exception as exc:
+            logger.error("Dataset Manager create_build failed: %s", exc)
             raise DatasetManagerUnavailableError(str(exc)) from exc
 
     def get_build(self, dataset_build_id: str) -> dict[str, Any] | None:
         """Fetch current build status from Dataset Manager."""
         if not self.available:
-            return None
+            raise DatasetManagerUnavailableError("Dataset Manager base URL is not configured.")
 
         url = f"{self._base_url}/api/v1/dataset-builds/{dataset_build_id}"
         try:
@@ -107,9 +196,18 @@ class DatasetManagerClient:
                 resp = client.get(url)
                 if resp.status_code == 404:
                     return None
-                resp.raise_for_status()
+                _handle_response(resp)
                 return resp.json()
-        except httpx.RequestError as exc:
+        except DatasetManagerBusinessError:
+            raise
+        except DatasetManagerUnavailableError:
+            raise
+        except (httpx.TransportError, httpx.TimeoutException) as exc:
+            logger.error(
+                "Dataset Manager get_build transport failed for %s: %s", dataset_build_id, exc
+            )
+            raise DatasetManagerUnavailableError(str(exc)) from exc
+        except Exception as exc:
             logger.error("Dataset Manager get_build failed for %s: %s", dataset_build_id, exc)
             raise DatasetManagerUnavailableError(str(exc)) from exc
 
@@ -117,39 +215,54 @@ class DatasetManagerClient:
         self,
         *,
         source_dataset_build_id: str,
-        new_dataset_build_id: str,
         command_id: str,
         idempotency_key: str,
         batch_size: int | None = None,
         partition_seed: int | None = None,
-        preprocessing: dict[str, Any] | None = None,
+        input_shape: list[int] | None = None,
+        normalization: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Trigger rebuild from an existing build."""
+        """Trigger rebuild from an existing build on Dataset Manager.
+
+        Dataset Manager generates the new build ID.
+        """
         if not self.available:
-            logger.warning(
-                "Dataset Manager unavailable; rebuild %s queued locally.", new_dataset_build_id
-            )
-            return {"status": "QUEUED_LOCAL", "new_dataset_build_id": new_dataset_build_id}
+            raise DatasetManagerUnavailableError("Dataset Manager base URL is not configured.")
 
         url = f"{self._base_url}/api/v1/dataset-builds/{source_dataset_build_id}/rebuild"
         headers = {"Idempotency-Key": idempotency_key}
-        payload = {
+        payload: dict[str, Any] = {
             "command_id": command_id,
-            "new_dataset_build_id": new_dataset_build_id,
-            "batch_size": batch_size,
-            "partition_seed": partition_seed,
-            "preprocessing": preprocessing or {},
         }
+        if batch_size is not None:
+            payload["batch_size"] = batch_size
+        if partition_seed is not None:
+            payload["partition_seed"] = partition_seed
+        if input_shape is not None:
+            payload["input_shape"] = input_shape
+        if normalization is not None:
+            payload["normalization"] = normalization
+
         try:
             with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
                 resp = client.post(url, json=payload, headers=headers)
-                resp.raise_for_status()
+                _handle_response(resp)
                 return resp.json()
-        except httpx.RequestError as exc:
+        except DatasetManagerBusinessError:
+            raise
+        except DatasetManagerUnavailableError:
+            raise
+        except (httpx.TransportError, httpx.TimeoutException) as exc:
             logger.error(
-                "Dataset Manager rebuild failed for %s → %s: %s",
+                "Dataset Manager rebuild transport failed for %s: %s",
                 source_dataset_build_id,
-                new_dataset_build_id,
+                exc,
+            )
+            raise DatasetManagerUnavailableError(str(exc)) from exc
+        except Exception as exc:
+            logger.error(
+                "Dataset Manager rebuild failed for %s: %s",
+                source_dataset_build_id,
                 exc,
             )
             raise DatasetManagerUnavailableError(str(exc)) from exc
@@ -157,47 +270,96 @@ class DatasetManagerClient:
     def deprecate(self, dataset_build_id: str, reason: str | None = None) -> dict[str, Any]:
         """Mark build as DEPRECATED on Dataset Manager."""
         if not self.available:
-            return {"status": "DEPRECATED_LOCAL", "dataset_build_id": dataset_build_id}
+            raise DatasetManagerUnavailableError("Dataset Manager base URL is not configured.")
 
         url = f"{self._base_url}/api/v1/dataset-builds/{dataset_build_id}/deprecate"
         try:
             with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
                 resp = client.post(url, json={"reason": reason})
-                resp.raise_for_status()
+                _handle_response(resp)
                 return resp.json()
-        except httpx.RequestError as exc:
+        except DatasetManagerBusinessError:
+            raise
+        except DatasetManagerUnavailableError:
+            raise
+        except (httpx.TransportError, httpx.TimeoutException) as exc:
+            logger.error(
+                "Dataset Manager deprecate transport failed for %s: %s", dataset_build_id, exc
+            )
+            raise DatasetManagerUnavailableError(str(exc)) from exc
+        except Exception as exc:
             logger.error("Dataset Manager deprecate failed for %s: %s", dataset_build_id, exc)
             raise DatasetManagerUnavailableError(str(exc)) from exc
 
-    def purge(self, dataset_build_id: str) -> dict[str, Any]:
+    def purge(
+        self,
+        dataset_build_id: str,
+        *,
+        command_id: str,
+        reason: str | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
         """Purge artifacts of a DEPRECATED or FAILED build from Dataset Manager storage."""
         if not self.available:
-            return {"status": "PURGED_LOCAL", "dataset_build_id": dataset_build_id}
+            raise DatasetManagerUnavailableError("Dataset Manager base URL is not configured.")
 
         url = f"{self._base_url}/api/v1/dataset-builds/{dataset_build_id}/purge"
+        payload = {
+            "command_id": command_id,
+            "reason": reason or "Operator requested purge",
+            "force": force,
+        }
         try:
             with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
-                resp = client.post(url, json={})
-                resp.raise_for_status()
+                resp = client.post(url, json=payload)
+                _handle_response(resp)
                 return resp.json()
-        except httpx.RequestError as exc:
+        except DatasetManagerBusinessError:
+            raise
+        except DatasetManagerUnavailableError:
+            raise
+        except (httpx.TransportError, httpx.TimeoutException) as exc:
+            logger.error("Dataset Manager purge transport failed for %s: %s", dataset_build_id, exc)
+            raise DatasetManagerUnavailableError(str(exc)) from exc
+        except Exception as exc:
             logger.error("Dataset Manager purge failed for %s: %s", dataset_build_id, exc)
             raise DatasetManagerUnavailableError(str(exc)) from exc
 
     def registration_ack(
-        self, dataset_build_id: str, ack_payload: dict[str, Any]
+        self,
+        dataset_build_id: str,
+        *,
+        dataset_manifest_hash: str,
+        registration_id: str,
+        catalog_persisted_at: str,
     ) -> dict[str, Any]:
-        """Acknowledge manifest persistence and transition to READY."""
+        """Acknowledge manifest persistence and transition to READY on Dataset Manager."""
         if not self.available:
-            return {"status": "ACK_LOCAL", "dataset_build_id": dataset_build_id}
+            raise DatasetManagerUnavailableError("Dataset Manager base URL is not configured.")
 
         url = f"{self._base_url}/api/v1/dataset-builds/{dataset_build_id}/registration-ack"
+        payload = {
+            "dataset_manifest_hash": dataset_manifest_hash,
+            "registration_id": registration_id,
+            "catalog_persisted_at": catalog_persisted_at,
+        }
         try:
             with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
-                resp = client.post(url, json=ack_payload)
-                resp.raise_for_status()
+                resp = client.post(url, json=payload)
+                _handle_response(resp)
                 return resp.json()
-        except httpx.RequestError as exc:
+        except DatasetManagerBusinessError:
+            raise
+        except DatasetManagerUnavailableError:
+            raise
+        except (httpx.TransportError, httpx.TimeoutException) as exc:
+            logger.error(
+                "Dataset Manager registration-ack transport failed for %s: %s",
+                dataset_build_id,
+                exc,
+            )
+            raise DatasetManagerUnavailableError(str(exc)) from exc
+        except Exception as exc:
             logger.error(
                 "Dataset Manager registration-ack failed for %s: %s", dataset_build_id, exc
             )
@@ -212,9 +374,18 @@ class DatasetManagerClient:
         try:
             with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
                 resp = client.get(url)
-                resp.raise_for_status()
+                _handle_response(resp)
                 return resp.json(), resp.content
-        except httpx.RequestError as exc:
+        except DatasetManagerBusinessError:
+            raise
+        except DatasetManagerUnavailableError:
+            raise
+        except (httpx.TransportError, httpx.TimeoutException) as exc:
+            logger.error(
+                "Dataset Manager get_manifest transport failed for %s: %s", dataset_build_id, exc
+            )
+            raise DatasetManagerUnavailableError(str(exc)) from exc
+        except Exception as exc:
             logger.error("Dataset Manager get_manifest failed for %s: %s", dataset_build_id, exc)
             raise DatasetManagerUnavailableError(str(exc)) from exc
 

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useSystemStatus } from '../hooks/useSystemStatus'
 import { datasetsApi } from '../api/datasets'
 import { jobsApi } from '../api/jobs'
+import { createIdempotencyKey } from '../api/client'
 import { useJobList } from '../hooks/useJobs'
 import StatusBadge from '../components/jobs/StatusBadge'
 import TopologyGraph from '../components/topology/TopologyGraph'
@@ -20,7 +21,7 @@ function HealthStrip() {
     <div className="card" style={{ padding: '10px 16px', display: 'flex', flexWrap: 'wrap', gap: 20, alignItems: 'center' }}>
       <StatusItem label="Backend" status={health.backend} good="healthy" />
       <StatusItem label="PostgreSQL" status={health.postgres} good="healthy" />
-      <StatusItem label="Runtime" status={health.runtime_mcp} good="connected" />
+      <StatusItem label="Runtime/MCP" status={health.runtime_mcp} good="connected" />
       <StatusItem label="Dataset Manager" status={health.dataset_manager} good="healthy" />
       {snapshot?.stale && (
         <span className="text-muted" style={{ fontSize: 11 }}>⚠ Runtime snapshot is stale</span>
@@ -58,7 +59,7 @@ const DEFAULT_FORM: JobFormValues = {
   display_name: '',
   description: '',
   dataset_build_id: '',
-  model_id: 'model_v1',
+  model_id: 'resnet18_groupnorm',
   epochs: 5,
   learning_rate: 0.01,
   training_seed: 42,
@@ -111,7 +112,7 @@ function JobCreateForm() {
           training_seed: form.training_seed,
           training_strategy: form.training_strategy,
         },
-      })
+      }, createIdempotencyKey('job_create'))
       navigate('/jobs')
     } catch (e) {
       setServerError(errMsg(e))
@@ -135,8 +136,8 @@ function JobCreateForm() {
           training_seed: form.training_seed,
           training_strategy: form.training_strategy,
         },
-      })
-      await jobsApi.start(job.job_id)
+      }, createIdempotencyKey('job_create'))
+      await jobsApi.start(job.job_id, createIdempotencyKey('job_start'))
       navigate('/current-job')
     } catch (e) {
       setServerError(errMsg(e))
@@ -192,16 +193,17 @@ function JobCreateForm() {
 
       <div className="form-group">
         <label className="form-label" htmlFor="model-id">Model ID <span className="required">*</span></label>
-        <input id="model-id" className="form-input" value={form.model_id} onChange={set('model_id')} placeholder="e.g. model_v1" disabled={submitting} />
+        <input id="model-id" className="form-input" value={form.model_id} onChange={set('model_id')} placeholder="resnet18_groupnorm" disabled={submitting} />
         {errors.model_id && <span className="form-error">{errors.model_id}</span>}
+        <span className="form-hint">V1 supports 'resnet18_groupnorm'</span>
       </div>
 
       <div className="form-group">
         <label className="form-label" htmlFor="strategy">Training Strategy</label>
         <select id="strategy" className="form-select" value={form.training_strategy} onChange={set('training_strategy')} disabled={submitting}>
-          <option value="strict_bsp">Strict BSP (Synchronous)</option>
+          <option value="strict_bsp">Strict BSP (Synchronous, shard_count=3)</option>
         </select>
-        <span className="form-hint">V1 supports Strict BSP only</span>
+        <span className="form-hint">V1 supports Strict BSP only (fixed 3 workers)</span>
       </div>
 
       <div className="grid-3">

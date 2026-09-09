@@ -16,11 +16,20 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture(scope="module")
 def client():
-    from pbl4.management_backend.app import create_app
+    from unittest.mock import patch
 
-    app = create_app()
-    with TestClient(app, raise_server_exceptions=False) as c:
-        yield c
+    from pbl4.management_backend import db
+    from pbl4.management_backend.app import create_app
+    from pbl4.management_backend.config import get_settings
+
+    db.close_pool()
+    settings = get_settings()
+    with patch.object(settings, "database_url", None), patch.object(db, "init_pool"):
+        db.close_pool()
+        app = create_app()
+        with TestClient(app, raise_server_exceptions=False) as c:
+            yield c
+        db.close_pool()
 
 
 # ─── System Endpoints ─────────────────────────────────────────────────────────
@@ -29,17 +38,24 @@ def client():
 def test_health_ok(client):
     r = client.get("/api/v1/health")
     assert r.status_code == 200
-    data = r.json()
+    res = r.json()
+    assert "data" in res and "meta" in res
+    assert res["meta"]["request_id"].startswith("req_")
+    data = res["data"]
     assert data["backend"] == "healthy"
     assert "postgres" in data
     assert "runtime_mcp" in data
+    assert "dataset_manager" in data
     assert "timestamp" in data
 
 
 def test_capabilities_ok(client):
     r = client.get("/api/v1/system/capabilities")
     assert r.status_code == 200
-    data = r.json()
+    res = r.json()
+    assert "data" in res and "meta" in res
+    assert res["meta"]["request_id"].startswith("req_")
+    data = res["data"]
     assert data["api_version"] == "v1"
     assert "strict_bsp" in data["supported_training_strategies"]
     assert data["runtime_connected"] is False
@@ -48,7 +64,10 @@ def test_capabilities_ok(client):
 def test_runtime_snapshot_ok(client):
     r = client.get("/api/v1/runtime/snapshot")
     assert r.status_code == 200
-    data = r.json()
+    res = r.json()
+    assert "data" in res and "meta" in res
+    assert res["meta"]["request_id"].startswith("req_")
+    data = res["data"]
     assert data["stale"] is True
 
 
@@ -204,12 +223,36 @@ def test_dataset_build_create_request_schema():
 
     req = DatasetBuildCreateRequest(
         dataset_id="ds_1",
-        profile="CIFAR10_STANDARD",
+        profile="CNN_IMAGE_CLASSIFICATION_V1",
         batch_size=32,
         partition_seed=0,
         preprocessing=PreprocessingConfig(),
     )
     assert req.batch_size == 32
+
+
+def test_dataset_create_rejects_unsupported_v1_capability():
+    from pydantic import ValidationError
+
+    from pbl4.management_backend.schemas.dataset import DatasetCreateRequest
+
+    with pytest.raises(ValidationError):
+        DatasetCreateRequest(
+            name="unsupported",
+            task_type="text_classification",
+            source_type="local_directory",
+            source_reference="/tmp/data",
+        )
+
+
+def test_openapi_documents_item_envelope(client):
+    schema = client.get("/api/openapi.json").json()
+    response_schema = schema["paths"]["/api/v1/jobs/{job_id}"]["get"]["responses"]["200"][
+        "content"
+    ]["application/json"]["schema"]
+    component = response_schema["$ref"].split("/")[-1]
+    properties = schema["components"]["schemas"][component]["properties"]
+    assert set(properties) == {"data", "meta"}
 
 
 # ─── WebSocket Route Registered ───────────────────────────────────────────────

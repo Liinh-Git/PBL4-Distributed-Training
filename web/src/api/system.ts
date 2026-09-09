@@ -6,7 +6,7 @@ import type {
 } from '../domain/types';
 
 export const systemApi = {
-  health: () => api.get<HealthResponse>('/health'),
-  capabilities: () => api.get<CapabilitiesResponse>('/system/capabilities'),
-  runtimeSnapshot: () => api.get<RuntimeSnapshot>('/runtime/snapshot'),
+  health: () => api.getItem<HealthResponse>('/health'),
+  capabilities: () => api.getItem<CapabilitiesResponse>('/system/capabilities'),
+  runtimeSnapshot: () => api.getItem<RuntimeSnapshot>('/runtime/snapshot'),
 };
