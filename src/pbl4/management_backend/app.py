@@ -94,6 +94,9 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
 
     # Shutdown
+    from pbl4.management_backend.gateways.runtime_gateway import get_gateway
+
+    get_gateway().port.disconnect()
     db.close_pool()
     logger.info("Management Backend shutdown complete.")
 

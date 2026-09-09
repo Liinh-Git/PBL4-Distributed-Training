@@ -1,40 +1,261 @@
-"""Management Endpoint — Runtime-side MCP/1 server endpoint.
-
-CANONICAL REFERENCES
---------------------
-- 02. Mô hình miền
-- 03. Mô hình dữ liệu
-- 04. Cấu trúc mã nguồn
-- docs/IMPLEMENTATION_CONTRACT.md -> Module-to-Canonical-Document mapping
-
-OWNS
-----
-- Runtime-side MCP/1 TCP listener and management connection lifecycle.
-- Ingestion and dispatch of incoming management commands from Management Backend.
-- Streaming runtime events (buffered by EventEmitter) to Management Backend.
-
-MUST NOT OWN
-------------
-- MCP/1 wire codec or message schema definitions (owned by management_protocol).
-- Attempt lifecycle decisions (owned by Coordinator).
-- Direct database access (Management Backend owns persistence).
-- DTP/1 training traffic (Parameter Server owns DTP/1).
-
-CRITICAL V1 INVARIANTS
-----------------------
-- Management control traffic is isolated from DTP/1 training traffic.
-- Management Backend down does not interrupt active training step execution.
-
-IMPLEMENTATION STATUS
----------------------
-Scaffold only. Core behavior is intentionally not implemented.
-"""
+"""Runtime-side MCP/1 TCP endpoint, isolated from training correctness."""
 
 from __future__ import annotations
 
+import concurrent.futures
+import contextlib
+import socket
+import threading
+from collections.abc import Callable
+from datetime import UTC, datetime
+from uuid import uuid4
+
+from pbl4.common.errors import ProtocolError, TransportError
+from pbl4.management_protocol.codec import McpCodec
+from pbl4.management_protocol.messages import (
+    CommandResult,
+    CorrelationTracker,
+    DatasetBuildResolved,
+    McpEnvelope,
+    McpError,
+    MgmtHelloAck,
+    ResolveDatasetBuild,
+    RuntimeEvent,
+    StateSnapshot,
+)
+from pbl4.transport.framed_socket import recv_exact, send_all
+from pbl4.transport.tcp_server import TcpServer
+
+SnapshotProvider = Callable[[], dict[str, object]]
+CommandHandler = Callable[[str, dict[str, object]], dict[str, object]]
+
+
+def _inactive_snapshot(runtime_instance_id: str) -> dict[str, object]:
+    return {
+        "runtime_instance_id": runtime_instance_id,
+        "active_job_id": None,
+        "active_attempt_id": None,
+        "attempt_state": None,
+        "training_strategy": None,
+        "checkpoint_policy": None,
+        "epoch": None,
+        "current_operation_id": None,
+        "current_batch_ordinal": None,
+        "model_version": None,
+        "workers": [],
+        "strategy_state": {},
+        "checkpoint_state": None,
+        "latest_checkpoint_id": None,
+        "recovery_cursor": {},
+        "dataset_build_id": None,
+        "dataset_manifest_hash": None,
+        "last_runtime_event_seq": 0,
+        "management_event_gap_count": 0,
+        "captured_at": datetime.now(UTC).isoformat(),
+    }
+
 
 class ManagementEndpoint:
-    """MCP/1 endpoint for Backend ↔ Runtime communication."""
+    """One-listener MCP endpoint with correlated bidirectional requests."""
 
-    def __init__(self) -> None:
-        raise NotImplementedError
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        *,
+        runtime_instance_id: str | None = None,
+        snapshot_provider: SnapshotProvider | None = None,
+        command_handler: CommandHandler | None = None,
+        request_timeout: float = 5.0,
+    ) -> None:
+        self.runtime_instance_id = runtime_instance_id or f"runtime-{uuid4()}"
+        self._boot_time = datetime.now(UTC).isoformat()
+        self._snapshot_provider = snapshot_provider or (
+            lambda: _inactive_snapshot(self.runtime_instance_id)
+        )
+        self._command_handler = command_handler
+        self._request_timeout = request_timeout
+        self._server = TcpServer(host, port, self._serve_connection)
+        self._connection_lock = threading.Lock()
+        self._send_lock = threading.Lock()
+        self._correlation_lock = threading.Lock()
+        self._sock: socket.socket | None = None
+        self._backend_connected = threading.Event()
+        self._tracker = CorrelationTracker()
+        self._waiters: dict[str, concurrent.futures.Future[McpEnvelope]] = {}
+
+    @property
+    def bound_address(self) -> tuple[str, int] | None:
+        return self._server.bound_address
+
+    @property
+    def backend_connected(self) -> bool:
+        return self._backend_connected.is_set()
+
+    def start(self) -> None:
+        self._server.start()
+
+    def stop(self) -> None:
+        self._backend_connected.clear()
+        self._server.stop()
+        self._fail_waiters("MCP endpoint stopped")
+
+    def _envelope(
+        self,
+        message_type: str,
+        payload: dict[str, object],
+        *,
+        correlation_id: str | None = None,
+    ) -> McpEnvelope:
+        return McpEnvelope(
+            message_type=message_type,
+            message_id=str(uuid4()),
+            correlation_id=correlation_id,
+            sent_at=datetime.now(UTC).isoformat(),
+            runtime_instance_id=self.runtime_instance_id,
+            payload=payload,
+        )
+
+    def _write(self, envelope: McpEnvelope) -> None:
+        with self._connection_lock:
+            sock = self._sock
+        if sock is None:
+            raise TransportError("Management Backend is disconnected")
+        with self._send_lock:
+            McpCodec.write_message(sock, send_all, envelope)
+
+    def _serve_connection(self, sock: socket.socket, _address: tuple[str, int]) -> None:
+        with self._connection_lock:
+            previous = self._sock
+            self._sock = sock
+        if previous is not None and previous is not sock:
+            with contextlib.suppress(OSError):
+                previous.shutdown(socket.SHUT_RDWR)
+        self._tracker = CorrelationTracker()
+        try:
+            while True:
+                envelope = McpCodec.read_message(sock, recv_exact)
+                if envelope.correlation_id is not None:
+                    with self._correlation_lock:
+                        self._tracker.accept(envelope)
+                        waiter = self._waiters.pop(envelope.correlation_id, None)
+                    if waiter is not None and not waiter.done():
+                        waiter.set_result(envelope)
+                        continue
+                self._handle_request(envelope)
+        except Exception:
+            pass
+        finally:
+            with self._connection_lock:
+                if self._sock is sock:
+                    self._sock = None
+                    self._backend_connected.clear()
+            self._fail_waiters("Management Backend disconnected")
+
+    def _handle_request(self, request: McpEnvelope) -> None:
+        if request.message_type == "MGMT_HELLO":
+            snapshot = StateSnapshot.from_dict(self._snapshot_provider()).to_dict()
+            ack = MgmtHelloAck.from_dict(
+                {
+                    "runtime_instance_id": self.runtime_instance_id,
+                    "selected_protocol_version": 1,
+                    "runtime_boot_time": self._boot_time,
+                    "active_attempt_id": snapshot["active_attempt_id"],
+                    "active_job_id": snapshot["active_job_id"],
+                    "active_attempt_state": snapshot["attempt_state"],
+                    "snapshot_required": True,
+                    "last_runtime_event_seq": snapshot["last_runtime_event_seq"],
+                }
+            )
+            self._write(
+                self._envelope("MGMT_HELLO_ACK", ack.to_dict(), correlation_id=request.message_id)
+            )
+            self._backend_connected.set()
+            return
+        if not self.backend_connected:
+            raise ProtocolError("MCP command arrived before MGMT_HELLO")
+        if request.message_type == "GET_STATE":
+            snapshot = StateSnapshot.from_dict(self._snapshot_provider())
+            self._write(
+                self._envelope(
+                    "STATE_SNAPSHOT", snapshot.to_dict(), correlation_id=request.message_id
+                )
+            )
+            return
+        if request.message_type in {"START_ATTEMPT", "ABORT_ATTEMPT", "REQUEST_CHECKPOINT"}:
+            threading.Thread(
+                target=self._serve_command,
+                args=(request,),
+                name="pbl4-mcp-command",
+                daemon=True,
+            ).start()
+            return
+        raise ProtocolError(f"Unsupported Backend request {request.message_type}")
+
+    def _serve_command(self, request: McpEnvelope) -> None:
+        payload = request.payload.to_dict()
+        try:
+            if self._command_handler is None:
+                result = {
+                    "command_id": payload["command_id"],
+                    "target_type": "ATTEMPT",
+                    "target_id": payload["attempt_id"],
+                    "status": "REJECTED",
+                    "result_code": "RUNTIME_NOT_COMPOSED",
+                    "message": "Runtime command handler is not configured.",
+                    "attempt_id": payload["attempt_id"],
+                }
+            else:
+                result = self._command_handler(request.message_type, payload)
+            canonical = CommandResult.from_dict(result)
+            response = self._envelope(
+                "COMMAND_RESULT", canonical.to_dict(), correlation_id=request.message_id
+            )
+        except Exception as exc:
+            response = self._error_response(request.message_id, "COMMAND_FAILED", str(exc))
+        with contextlib.suppress(Exception):
+            self._write(response)
+
+    def _error_response(self, correlation_id: str, code: str, message: str) -> McpEnvelope:
+        payload = McpError.from_dict(
+            {"code": code, "category": "RUNTIME", "message": message, "details": {}}
+        )
+        return self._envelope("ERROR", payload.to_dict(), correlation_id=correlation_id)
+
+    def resolve_dataset_build(self, request: dict[str, object]) -> dict[str, object]:
+        """Ask Backend catalog for location metadata; manifest bytes remain HTTP-only."""
+        payload = ResolveDatasetBuild.from_dict(request)
+        envelope = self._envelope("RESOLVE_DATASET_BUILD", payload.to_dict())
+        future: concurrent.futures.Future[McpEnvelope] = concurrent.futures.Future()
+        with self._correlation_lock:
+            self._tracker.register_request(envelope)
+            self._waiters[envelope.message_id] = future
+        try:
+            self._write(envelope)
+            response = future.result(timeout=self._request_timeout)
+        except Exception:
+            with self._correlation_lock:
+                self._waiters.pop(envelope.message_id, None)
+            raise
+        if response.message_type == "ERROR":
+            raise ProtocolError(str(response.payload.message))
+        return DatasetBuildResolved.from_dict(response.payload.to_dict()).to_dict()
+
+    def send_runtime_event(self, event: dict[str, object]) -> bool:
+        """Best-effort non-barrier event forwarding; false never changes training state."""
+        if not self.backend_connected:
+            return False
+        try:
+            payload = RuntimeEvent.from_dict(event)
+            self._write(self._envelope("RUNTIME_EVENT", payload.to_dict()))
+            return True
+        except Exception:
+            return False
+
+    def _fail_waiters(self, message: str) -> None:
+        with self._correlation_lock:
+            waiters = list(self._waiters.values())
+            self._waiters.clear()
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_exception(TransportError(message))

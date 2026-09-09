@@ -113,6 +113,37 @@ def get_active_session_for_worker(
     return _row_to_dict(row) if row else None
 
 
+def update_snapshot_projection(
+    conn: psycopg.Connection,
+    *,
+    session_id: int,
+    attempt_id: str,
+    worker_id: int,
+    node_label: str,
+    state: str,
+    last_heartbeat_at: datetime | None,
+) -> dict | None:
+    """Update fields carried by canonical MCP without inventing session metadata.
+
+    ``protocol_version`` and ``connected_at`` are established by the DTP session
+    lifecycle and are intentionally retained from the existing database row.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            UPDATE worker_sessions
+            SET node_label = %s,
+                state = %s,
+                last_heartbeat_at = COALESCE(%s, last_heartbeat_at)
+            WHERE session_id = %s AND attempt_id = %s AND worker_id = %s
+            RETURNING *
+            """,
+            (node_label, state, last_heartbeat_at, session_id, attempt_id, worker_id),
+        )
+        row = cur.fetchone()
+    return _row_to_dict(row) if row else None
+
+
 def get_sessions_for_worker(
     conn: psycopg.Connection,
     attempt_id: str,

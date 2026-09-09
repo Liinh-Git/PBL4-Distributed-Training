@@ -21,10 +21,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from pbl4.common.errors import ProtocolError
 from pbl4.management_backend.gateways.mcp_port import (
     McpClientPort,
+    RealMcpClientPort,
     TruthfulDisconnectedMcpPort,
 )
+from pbl4.management_backend.gateways.mcp_projection import project_command
+from pbl4.management_protocol.messages import CommandResult, RuntimeEvent, StateSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +75,7 @@ class RuntimeGateway:
         self._pending_results: dict[str, concurrent.futures.Future[dict[str, Any]]] = {}
 
         self._port.set_message_handler(self._handle_inbound_message)
+        self._port.set_dataset_resolver(self.resolve_dataset_build)
 
     @property
     def port(self) -> McpClientPort:
@@ -80,6 +85,7 @@ class RuntimeGateway:
         """Inject a custom or test port."""
         self._port = port
         self._port.set_message_handler(self._handle_inbound_message)
+        self._port.set_dataset_resolver(self.resolve_dataset_build)
 
     @property
     def connected(self) -> bool:
@@ -240,8 +246,21 @@ class RuntimeGateway:
             self.handle_command_result(payload)
         elif msg_type == "RUNTIME_EVENT":
             self.handle_runtime_event(payload)
+        elif msg_type == "DISCONNECTED":
+            self.on_disconnect()
         else:
             logger.warning("Unknown inbound MCP message type: %s", msg_type)
+
+    @staticmethod
+    def resolve_dataset_build(payload: dict[str, Any]) -> dict[str, object]:
+        """Serve Runtime-originated catalog lookup without exposing PostgreSQL to Runtime."""
+        from pbl4.management_backend import db
+        from pbl4.management_backend.services.runtime_dataset_resolver import (
+            resolve_dataset_build,
+        )
+
+        with db.get_connection() as conn:
+            return resolve_dataset_build(conn, payload)
 
     def handle_hello_ack(self, payload: dict[str, Any]) -> None:
         """MGMT_HELLO_ACK -> ALWAYS request GET_STATE."""
@@ -255,12 +274,16 @@ class RuntimeGateway:
 
     def handle_state_snapshot(self, snapshot: dict[str, Any]) -> None:
         """STATE_SNAPSHOT -> authoritative Runtime projection reconciliation."""
-        attempt_id = snapshot.get("active_attempt_id") or snapshot.get("attempt_id")
-        snap_seq = snapshot.get("runtime_event_seq")
-        if snap_seq is None and "snapshot_seq" in snapshot:
-            snap_seq = snapshot["snapshot_seq"]
-        if not attempt_id or not isinstance(snap_seq, int) or snap_seq < 0:
-            logger.warning("Ignoring malformed STATE_SNAPSHOT without Attempt cursor: %s", snapshot)
+        try:
+            snapshot = StateSnapshot.from_dict(snapshot).to_dict()
+        except ProtocolError as exc:
+            logger.warning("Ignoring malformed STATE_SNAPSHOT: %s", exc)
+            return
+
+        attempt_id = snapshot["active_attempt_id"]
+        snap_seq = snapshot["last_runtime_event_seq"]
+        if attempt_id is None:
+            self.update_snapshot(snapshot)
             return
 
         workers = snapshot.get("workers")
@@ -304,9 +327,7 @@ class RuntimeGateway:
                         "observed_at": observed_at.isoformat(),
                     }
                 )
-                new_state = (
-                    snapshot.get("attempt_state") or snapshot.get("state") or attempt["state"]
-                )
+                new_state = snapshot.get("attempt_state") or attempt["state"]
                 attempt_repository.update_attempt_state(
                     conn,
                     attempt_id,
@@ -323,28 +344,24 @@ class RuntimeGateway:
                             "Worker snapshot missing state; preserving prior projection: %s", worker
                         )
                         continue
-                    required = ("session_id", "node_label", "protocol_version", "connected_at")
-                    if any(worker.get(field) is None for field in required):
-                        logger.warning(
-                            "Worker snapshot missing required identity fields: %s", worker
-                        )
-                        continue
-                    connected_at = worker["connected_at"]
-                    if isinstance(connected_at, str):
-                        connected_at = datetime.fromisoformat(connected_at)
-                    worker_session_repository.upsert_session(
+                    session_id = int(worker["session_id"])
+                    heartbeat = worker.get("last_heartbeat_at")
+                    if isinstance(heartbeat, str):
+                        heartbeat = datetime.fromisoformat(heartbeat.replace("Z", "+00:00"))
+                    updated = worker_session_repository.update_snapshot_projection(
                         conn,
-                        session_id=worker["session_id"],
+                        session_id=session_id,
                         attempt_id=attempt_id,
                         worker_id=worker["worker_id"],
                         node_label=worker["node_label"],
-                        protocol_version=worker["protocol_version"],
                         state=worker["state"],
-                        connected_at=connected_at,
-                        last_heartbeat_at=worker.get("last_heartbeat_at"),
-                        disconnected_at=worker.get("disconnected_at"),
-                        failure_code=worker.get("failure_code"),
+                        last_heartbeat_at=heartbeat,
                     )
+                    if updated is None:
+                        logger.info(
+                            "Snapshot referenced unknown DTP session %s; preserving DB authority",
+                            session_id,
+                        )
         except Exception as exc:
             logger.warning("Could not reconcile STATE_SNAPSHOT into PostgreSQL: %s", exc)
             return
@@ -387,18 +404,24 @@ class RuntimeGateway:
 
     def handle_command_result(self, payload: dict[str, Any]) -> None:
         """COMMAND_RESULT -> update existing durable ControlCommand."""
-        command_id = payload.get("command_id")
-        if not command_id:
-            logger.warning("Received COMMAND_RESULT without command_id: %s", payload)
+        try:
+            payload = CommandResult.from_dict(payload).to_dict()
+        except ProtocolError as exc:
+            logger.warning("Ignoring malformed COMMAND_RESULT: %s", exc)
             return
-
-        state = payload.get("state") or payload.get("command_state")
-        if state not in VALID_COMMAND_STATES:
-            logger.warning(
-                "Received malformed COMMAND_RESULT state for command %s: %r", command_id, state
-            )
-            return
-        result = payload.get("result") or {}
+        command_id = payload["command_id"]
+        state = payload["status"]
+        result = {
+            "target_type": payload["target_type"],
+            "target_id": payload["target_id"],
+            "result_code": payload["result_code"],
+            "message": payload["message"],
+            **{
+                key: payload[key]
+                for key in ("attempt_id", "effective_at", "completed_at")
+                if key in payload
+            },
+        }
 
         try:
             from pbl4.management_backend import db
@@ -433,14 +456,16 @@ class RuntimeGateway:
 
     def handle_runtime_event(self, payload: dict[str, Any]) -> None:
         """RUNTIME_EVENT -> event ingestion / dedup / gap handling / projection / WS publish."""
-        attempt_id = payload.get("attempt_id")
-        seq = payload.get("runtime_event_seq")
-        if not attempt_id or not isinstance(seq, int) or seq < 1:
-            logger.warning("Ignoring malformed RUNTIME_EVENT without Attempt cursor: %s", payload)
+        try:
+            payload = RuntimeEvent.from_dict(payload).to_dict()
+        except ProtocolError as exc:
+            logger.warning("Ignoring malformed RUNTIME_EVENT: %s", exc)
             return
-        event_type = payload.get("event_type", "UNKNOWN")
-        severity = payload.get("severity", "INFO")
-        occurred_at_raw = payload.get("occurred_at")
+        attempt_id = payload["attempt_id"]
+        seq = payload["runtime_event_seq"]
+        event_type = payload["event_type"]
+        severity = payload["severity"]
+        occurred_at_raw = payload["occurred_at"]
         occurred_at = datetime.now(UTC)
         if occurred_at_raw:
             with contextlib.suppress(Exception):
@@ -454,8 +479,8 @@ class RuntimeGateway:
             from pbl4.management_backend import db
             from pbl4.management_backend.services import event_ingest
 
-            source_component = payload.get("source_component", "Runtime")
-            event_payload = payload.get("payload") or payload
+            source_component = payload["source_component"]
+            event_payload = payload["details"]
             with db.transaction() as conn:
                 ingest_result = event_ingest.ingest_runtime_event(
                     conn,
@@ -511,11 +536,17 @@ class RuntimeGateway:
         self._pending_results[command_id] = fut
 
         try:
+            wire_payload = project_command(
+                command_type,
+                command_id=command_id,
+                target_id=target_id,
+                request=payload,
+            )
             dispatched = self._port.send_command(
                 command_type=command_type,
                 command_id=command_id,
                 target_id=target_id,
-                payload=payload,
+                payload=wire_payload,
             )
             if not dispatched:
                 self._pending_results.pop(command_id, None)
@@ -590,9 +621,12 @@ def get_gateway() -> RuntimeGateway:
 
 def init_gateway(host: str | None, port: int | None) -> RuntimeGateway:
     global _gateway
-    _gateway = RuntimeGateway()
     if host and port:
+        real_port = RealMcpClientPort(host, port)
+        _gateway = RuntimeGateway(real_port)
+        real_port.start_reconnecting()
         logger.info("Runtime gateway configured: %s:%d", host, port)
     else:
+        _gateway = RuntimeGateway()
         logger.warning("Runtime host/port not configured; gateway running in disconnected mode.")
     return _gateway

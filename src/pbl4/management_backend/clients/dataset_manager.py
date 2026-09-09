@@ -58,6 +58,46 @@ class DatasetManagerBusinessError(Exception):
         self.retryable = retryable
 
 
+class DatasetManagerProtocolError(DatasetManagerUnavailableError):
+    """Raised when a control response violates the canonical DM envelope."""
+
+
+def _unwrap_control_response(resp: httpx.Response) -> dict[str, Any]:
+    """Return ``data`` from the canonical ``request_id/data/error`` envelope."""
+    try:
+        body = resp.json()
+    except Exception as exc:
+        raise DatasetManagerProtocolError(
+            "Dataset Manager returned a non-JSON control response."
+        ) from exc
+
+    if not isinstance(body, dict) or set(body) != {"request_id", "data", "error"}:
+        raise DatasetManagerProtocolError(
+            "Dataset Manager control response does not match the canonical envelope."
+        )
+    if not isinstance(body["request_id"], str) or not body["request_id"]:
+        raise DatasetManagerProtocolError("Dataset Manager response has an invalid request_id.")
+
+    error = body["error"]
+    if error is not None:
+        if not isinstance(error, dict):
+            raise DatasetManagerProtocolError("Dataset Manager response has an invalid error.")
+        raise DatasetManagerBusinessError(
+            status_code=resp.status_code,
+            code=error.get("code") or "DATASET_MANAGER_ERROR",
+            message=error.get("message") or "Dataset Manager rejected the request.",
+            details=error.get("details"),
+            retryable=bool(error.get("retryable", False)),
+        )
+
+    data = body["data"]
+    if not isinstance(data, dict):
+        raise DatasetManagerProtocolError(
+            "Dataset Manager success response data must be an object."
+        )
+    return data
+
+
 def _handle_response(resp: httpx.Response) -> httpx.Response:
     """Validate response status, separating 4xx business rejections from 5xx/network errors."""
     if resp.status_code < 400:
@@ -173,7 +213,7 @@ class DatasetManagerClient:
             with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
                 resp = client.post(url, json=payload, headers=headers)
                 _handle_response(resp)
-                return resp.json()
+                return _unwrap_control_response(resp)
         except DatasetManagerBusinessError:
             raise
         except DatasetManagerUnavailableError:
@@ -197,7 +237,7 @@ class DatasetManagerClient:
                 if resp.status_code == 404:
                     return None
                 _handle_response(resp)
-                return resp.json()
+                return _unwrap_control_response(resp)
         except DatasetManagerBusinessError:
             raise
         except DatasetManagerUnavailableError:
@@ -247,7 +287,7 @@ class DatasetManagerClient:
             with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
                 resp = client.post(url, json=payload, headers=headers)
                 _handle_response(resp)
-                return resp.json()
+                return _unwrap_control_response(resp)
         except DatasetManagerBusinessError:
             raise
         except DatasetManagerUnavailableError:
@@ -277,7 +317,7 @@ class DatasetManagerClient:
             with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
                 resp = client.post(url, json={"reason": reason})
                 _handle_response(resp)
-                return resp.json()
+                return _unwrap_control_response(resp)
         except DatasetManagerBusinessError:
             raise
         except DatasetManagerUnavailableError:
@@ -313,7 +353,7 @@ class DatasetManagerClient:
             with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
                 resp = client.post(url, json=payload)
                 _handle_response(resp)
-                return resp.json()
+                return _unwrap_control_response(resp)
         except DatasetManagerBusinessError:
             raise
         except DatasetManagerUnavailableError:
@@ -347,7 +387,7 @@ class DatasetManagerClient:
             with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
                 resp = client.post(url, json=payload)
                 _handle_response(resp)
-                return resp.json()
+                return _unwrap_control_response(resp)
         except DatasetManagerBusinessError:
             raise
         except DatasetManagerUnavailableError:

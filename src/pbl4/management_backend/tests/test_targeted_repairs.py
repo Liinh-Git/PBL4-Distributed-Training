@@ -369,11 +369,21 @@ def test_11_3_command_rejected_and_failed_not_202():
     with (
         patch(
             "pbl4.management_backend.repositories.attempt_repository.get_attempt",
-            return_value={"attempt_id": "att_1", "state": "RUNNING"},
+            return_value={"attempt_id": "att_1", "job_id": "job_1", "state": "RUNNING"},
         ),
         patch(
             "pbl4.management_backend.repositories.command_repository.create_command",
-            return_value={"command_id": "cmd_rej_1", "state": "PENDING"},
+            return_value={
+                "command_id": "cmd_rej_1",
+                "state": "PENDING",
+                "request": {
+                    "command_id": "cmd_rej_1",
+                    "job_id": "job_1",
+                    "attempt_id": "att_1",
+                    "reason": "test",
+                    "requested_at": "2026-09-09T00:00:00+00:00",
+                },
+            },
         ),
         patch(
             "pbl4.management_backend.services.idempotency.acquire_or_get_record",
@@ -411,11 +421,21 @@ def test_11_3_command_rejected_and_failed_not_202():
     with (
         patch(
             "pbl4.management_backend.repositories.attempt_repository.get_attempt",
-            return_value={"attempt_id": "att_1", "state": "RUNNING"},
+            return_value={"attempt_id": "att_1", "job_id": "job_1", "state": "RUNNING"},
         ),
         patch(
             "pbl4.management_backend.repositories.command_repository.create_command",
-            return_value={"command_id": "cmd_fail_1", "state": "PENDING"},
+            return_value={
+                "command_id": "cmd_fail_1",
+                "state": "PENDING",
+                "request": {
+                    "command_id": "cmd_fail_1",
+                    "job_id": "job_1",
+                    "attempt_id": "att_1",
+                    "reason": "test",
+                    "requested_at": "2026-09-09T00:00:00+00:00",
+                },
+            },
         ),
         patch(
             "pbl4.management_backend.services.idempotency.acquire_or_get_record",

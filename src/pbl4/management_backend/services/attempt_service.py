@@ -598,6 +598,7 @@ def abort_attempt(conn: psycopg.Connection, attempt_id: str, reason: str | None 
         target_id=attempt_id,
         request={
             "command_id": command_id,
+            "job_id": attempt["job_id"],
             "attempt_id": attempt_id,
             "reason": reason,
             "requested_at": now.isoformat(),
@@ -633,6 +634,7 @@ def request_checkpoint(
         target_id=attempt_id,
         request={
             "command_id": command_id,
+            "job_id": attempt["job_id"],
             "attempt_id": attempt_id,
             "reason": reason,
             "requested_at": now.isoformat(),
@@ -1083,7 +1085,7 @@ def execute_abort_attempt(
             command_type="ABORT_ATTEMPT",
             command_id=command_id,
             target_id=attempt_id,
-            payload={"reason": reason},
+            payload=cmd_row["request"],
             timeout=5.0,
         )
     except RuntimeUnavailableError:
@@ -1178,7 +1180,7 @@ def execute_request_checkpoint(
             command_type="REQUEST_CHECKPOINT",
             command_id=command_id,
             target_id=attempt_id,
-            payload={"reason": reason},
+            payload=cmd_row["request"],
             timeout=5.0,
         )
     except RuntimeUnavailableError:

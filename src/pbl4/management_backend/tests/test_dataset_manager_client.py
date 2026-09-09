@@ -14,6 +14,7 @@ from pbl4.management_backend.app import create_app
 from pbl4.management_backend.clients.dataset_manager import (
     DatasetManagerBusinessError,
     DatasetManagerClient,
+    DatasetManagerProtocolError,
     DatasetManagerUnavailableError,
 )
 from pbl4.management_backend.services.dataset_service import (
@@ -56,7 +57,10 @@ def test_dataset_manager_client_internal_paths():
                 200,
                 json={"dataset_name": "cifar10", "manifest_hash": "abc", "total_samples": 50000},
             )
-        return httpx.Response(200, json={"status": "ok"})
+        return httpx.Response(
+            200,
+            json={"request_id": "req-1", "data": {"status": "ok"}, "error": None},
+        )
 
     transport = httpx.MockTransport(handler)
     client = DatasetManagerClient(base_url="http://mock-dm:8001", transport=transport)
@@ -129,6 +133,72 @@ def test_dataset_manager_client_internal_paths():
         == "http://mock-dm:8001/artifacts/v1/dataset-builds/build-1/manifest.json"
     )
     assert manifest["dataset_name"] == "cifar10"
+
+
+def test_control_response_envelope_is_unwrapped_once_at_client_boundary():
+    payload = {"dataset_build_id": "build-1", "state": "CREATED"}
+    client = DatasetManagerClient(
+        base_url="http://mock-dm:8001",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                201,
+                json={"request_id": "req-1", "data": payload, "error": None},
+            )
+        ),
+    )
+    assert (
+        client.create_build(
+            command_id="cmd-1",
+            idempotency_key="key-1",
+            source={"type": "cifar10_download", "dataset_name": "cifar10"},
+            profile="CNN_IMAGE_CLASSIFICATION_V1",
+            input_shape=[3, 32, 32],
+            normalization={"mean": [0.0, 0.0, 0.0], "std": [1.0, 1.0, 1.0]},
+            batch_size=32,
+            partition_seed=42,
+        )
+        == payload
+    )
+
+
+def test_success_with_structured_error_maps_to_business_error():
+    client = DatasetManagerClient(
+        base_url="http://mock-dm:8001",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "request_id": "req-1",
+                    "data": None,
+                    "error": {
+                        "code": "BUILD_REJECTED",
+                        "message": "Build rejected",
+                        "details": {},
+                        "retryable": False,
+                    },
+                },
+            )
+        ),
+    )
+    with pytest.raises(DatasetManagerBusinessError, match="BUILD_REJECTED"):
+        client.get_build("build-1")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"dataset_build_id": "build-1"},
+        {"request_id": "req-1", "data": {}, "error": None, "extra": True},
+        {"request_id": "", "data": {}, "error": None},
+    ],
+)
+def test_malformed_control_envelope_is_protocol_failure(body):
+    client = DatasetManagerClient(
+        base_url="http://mock-dm:8001",
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=body)),
+    )
+    with pytest.raises(DatasetManagerProtocolError):
+        client.get_build("build-1")
 
 
 def test_dataset_manager_health_uses_healthz_and_rejects_404():
