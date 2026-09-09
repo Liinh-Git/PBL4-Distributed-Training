@@ -215,14 +215,14 @@ def check_pyproject_dependencies() -> bool:
                     if forbidden in dep_lower:
                         found_forbidden.append(f"{forbidden} (found in extra '{extra}': '{dep}')")
         else:
-            # All other extras (worker, runtime, dataset-manager, cli, adapter, etc.) are strictly forbidden
+            # All other extras (worker, runtime, dataset-manager, cli,
+            # adapter, etc.) are strictly forbidden
             for dep in deps:
                 dep_lower = dep.lower()
                 for forbidden in FORBIDDEN_RUNTIME_DEPENDENCIES:
                     if forbidden in dep_lower:
                         found_forbidden.append(
-                            f"{forbidden} "
-                            f"(found in non-persistence extra '{extra}': '{dep}')"
+                            f"{forbidden} (found in non-persistence extra '{extra}': '{dep}')"
                         )
 
     # 3. Check dependency groups: ONLY whitelisted groups can declare migration tooling
