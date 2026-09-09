@@ -1,43 +1,66 @@
-"""Canonical Model — single-writer canonical model parameter state.
+"""Canonical state with one bound update writer and immutable snapshots."""
 
-CANONICAL REFERENCES
---------------------
-- 02. Mô hình miền
-- 03. Mô hình dữ liệu
-- 04. Cấu trúc mã nguồn
-- docs/IMPLEMENTATION_CONTRACT.md -> Module-to-Canonical-Document mapping
+from dataclasses import dataclass
+from threading import RLock
 
-OWNS
-----
-- Canonical model parameter tensor storage and current ModelVersion tracking.
-- Parameter buffer extraction for DTP/1 broadcast to workers.
+import numpy as np
 
-MUST NOT OWN
-------------
-- Direct mutation by workers, synchronization policies, or coordinator.
-- Framework-specific deep learning logic (zero PyTorch imports in Runtime).
-- Checkpoint file I/O (owned by CheckpointManager).
 
-CRITICAL V1 INVARIANTS
-----------------------
-- Controlled single-writer ownership: ONLY UpdateEngine and the checkpoint
-  restore path may write to CanonicalModel.
-- Workers receive read-only parameter copies; workers do NOT call optimizer.step()
-  on the canonical distributed model.
+@dataclass(frozen=True, slots=True)
+class ModelSnapshot:
+    model_version: int
+    parameter_manifest_hash: str
+    _parameters: bytes
 
-IMPLEMENTATION STATUS
----------------------
-Scaffold only. Core behavior is intentionally not implemented.
-"""
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_parameters", bytes(self._parameters))
+        if type(self.model_version) is not int or self.model_version < 0:
+            raise ValueError("Invalid model version")
+        if not self._parameters or len(self._parameters) % 4:
+            raise ValueError("Invalid FP32 parameter vector")
+        if not np.isfinite(self.parameters).all():
+            raise ValueError("Nonfinite parameters")
 
-from __future__ import annotations
+    @property
+    def parameters(self) -> np.ndarray:
+        return np.frombuffer(self._parameters, dtype=np.float32)
 
 
 class CanonicalModel:
-    """Single-writer canonical model state.
+    """Construction accepts initial/verified restored state; publication is private.
 
-    Only UpdateEngine and the restore path may write to this.
+    Lock order is UpdateEngine -> CanonicalModel. Readers only take the model
+    lock. Neither owner executes external I/O while holding these locks.
     """
 
-    def __init__(self) -> None:
-        raise NotImplementedError
+    def __init__(self, parameters: np.ndarray, model_version: int, parameter_manifest_hash: str):
+        values = np.asarray(parameters)
+        if values.dtype != np.float32 or values.ndim != 1:
+            raise ValueError("Expected flat FP32 parameters")
+        self._state = ModelSnapshot(model_version, parameter_manifest_hash, values.tobytes())
+        self._lock = RLock()
+        self._writer: object | None = None
+
+    def snapshot(self) -> ModelSnapshot:
+        with self._lock:
+            return self._state
+
+    def _bind_writer(self, writer: object) -> None:
+        with self._lock:
+            if self._writer is not None:
+                raise ValueError("CanonicalModel already has an update owner")
+            self._writer = writer
+
+    def _publish(self, writer: object, previous: ModelSnapshot, candidate: ModelSnapshot) -> None:
+        with self._lock:
+            if writer is not self._writer or self._writer is None:
+                raise PermissionError("Only the bound UpdateEngine may publish")
+            if self._state is not previous:
+                raise ValueError("Stale canonical snapshot")
+            if (
+                candidate.model_version != previous.model_version + 1
+                or candidate.parameter_manifest_hash != previous.parameter_manifest_hash
+                or candidate.parameters.shape != previous.parameters.shape
+            ):
+                raise ValueError("Invalid canonical publication")
+            self._state = candidate

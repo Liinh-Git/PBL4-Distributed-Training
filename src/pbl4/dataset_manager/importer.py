@@ -1,39 +1,36 @@
-"""Dataset Importer — ingestion of raw source datasets.
+"""CIFAR-10 binary ingestion without torchvision or pickle deserialization."""
 
-CANONICAL REFERENCES
---------------------
-- 02. Mô hình miền
-- 03. Mô hình dữ liệu
-- 04. Cấu trúc mã nguồn
-- docs/IMPLEMENTATION_CONTRACT.md -> Module-to-Canonical-Document mapping
+from pathlib import Path
 
-OWNS
-----
-- Ingesting raw dataset sources for the supported V1 reference scope (CIFAR-10).
-- Initial validation of dataset samples, format integrity, and metadata extraction.
+import numpy as np
 
-MUST NOT OWN
-------------
-- Dataset partitioning into worker shards (owned by Partitioner).
-- Serving shards to workers (owned by DatasetService / app).
-- Training runtime coordination.
-- Claiming arbitrary future archive, generic directory, or remote URI source ecosystems.
+from pbl4.dataset_manager.preprocessing import Samples
 
-CRITICAL V1 INVARIANTS
-----------------------
-- V1 reference scope is focused on CIFAR-10 ingestion.
-- Raw dataset ingestion is completed prior to partitioning and training initialization.
-
-IMPLEMENTATION STATUS
----------------------
-Scaffold only. Core behavior is intentionally not implemented.
-"""
-
-from __future__ import annotations
+_RECORD_BYTES = 1 + 3 * 32 * 32
 
 
 class DatasetImporter:
-    """Imports raw datasets into the Dataset Manager's storage."""
+    """Decode the official CIFAR-10 binary record representation."""
 
-    def __init__(self) -> None:
-        raise NotImplementedError
+    def import_cifar10_binary(self, files: tuple[Path, ...]) -> Samples:
+        paths = tuple(Path(path) for path in files)
+        if not paths:
+            raise ValueError("At least one CIFAR-10 binary batch is required")
+        images: list[np.ndarray] = []
+        labels: list[np.ndarray] = []
+        for path in paths:
+            if path.is_symlink() or not path.is_file():
+                raise ValueError("CIFAR-10 source must be a regular file")
+            raw = path.read_bytes()
+            if not raw or len(raw) % _RECORD_BYTES:
+                raise ValueError("Corrupt CIFAR-10 binary batch")
+            records = np.frombuffer(raw, dtype=np.uint8).reshape(-1, _RECORD_BYTES)
+            batch_labels = records[:, 0].astype(np.int64)
+            if np.any(batch_labels >= 10):
+                raise ValueError("CIFAR-10 label is outside [0, 9]")
+            labels.append(batch_labels)
+            # Official bytes store 1024 red, then green, then blue values.
+            images.append(records[:, 1:].reshape(-1, 3, 32, 32).copy())
+        x = np.concatenate(images)
+        y = np.concatenate(labels)
+        return Samples(x, y, np.arange(len(x), dtype=np.int64))

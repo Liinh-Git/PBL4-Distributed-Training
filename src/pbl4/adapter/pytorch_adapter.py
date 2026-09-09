@@ -1,45 +1,120 @@
-"""PyTorch model adapter — bridges PyTorch nn.Module to PBL4 contracts.
+"""PyTorch local model interaction with no optimizer or wire-format ownership."""
 
-CANONICAL REFERENCES
---------------------
-- 03. Mô hình dữ liệu
-- 04. Cấu trúc mã nguồn
-- docs/IMPLEMENTATION_CONTRACT.md -> Module-to-Canonical-Document mapping
+import math
+from collections.abc import Callable
+from typing import Literal
 
-OWNS
-----
-- PyTorch nn.Module instantiation and local forward/loss/backward execution.
-- Exporting PyTorch model parameters and gradients to framework-neutral tensor representations.
-- Ingesting framework-neutral canonical parameter representations into
-  PyTorch parameters/state_dict.
+import numpy as np
+import torch
+from torch import nn
 
-MUST NOT OWN
-------------
-- Raw wire byte serialization or DTP chunk serialization (owned by TensorCodec in protocol layer).
-- DTP/1 wire framing or socket transport.
-- Gradient aggregation or synchronization barrier mechanics.
-- External distributed training frameworks (forbidden: DDP, FSDP, Horovod, DeepSpeed).
-- Database or Management Backend dependencies.
-
-CRITICAL V1 INVARIANTS
-----------------------
-- ModelAdapter bridges PyTorch to framework-neutral representations;
-  TensorCodec handles DTP wire bytes.
-- Isolated to worker/adapter boundary; Runtime never imports PyTorch.
-- Uses custom DTP/1 and Parameter Server architecture; no PyTorch distributed primitives.
-
-IMPLEMENTATION STATUS
----------------------
-Scaffold only. Core behavior is intentionally not implemented.
-"""
-
-from __future__ import annotations
-
-from pbl4.adapter.base import ModelAdapter
+from pbl4.adapter.base import (
+    LocalGradient,
+    ModelAdapter,
+    ParameterManifest,
+    ParameterSpec,
+    TensorBundle,
+)
 
 
 class PyTorchAdapter(ModelAdapter):
-    """ModelAdapter implementation for PyTorch."""
+    def __init__(
+        self,
+        model: nn.Module,
+        loss: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+        manifest_schema_version: int = 1,
+        *,
+        local_gradient_reduction: Literal["mean"],
+    ):
+        if local_gradient_reduction != "mean":
+            raise ValueError(
+                f"PyTorchAdapter only supports local_gradient_reduction='mean' for "
+                f"correct distributed weighted aggregation; got {local_gradient_reduction!r}"
+            )
+        self._model = model
+        self._loss = loss
+        self._local_gradient_reduction = local_gradient_reduction
+        specs = []
+        offset = 0
+        for tensor_id, (name, parameter) in enumerate(model.named_parameters()):
+            if parameter.dtype != torch.float32 or not parameter.numel():
+                raise ValueError("Model parameters must be nonempty float32 tensors")
+            numel = parameter.numel()
+            specs.append(
+                ParameterSpec(
+                    tensor_id, name, tuple(parameter.shape), "float32", numel, offset, numel * 4
+                )
+            )
+            offset += numel * 4
+        self._manifest = ParameterManifest(manifest_schema_version, tuple(specs))
 
-    # Implementation pending worker adapter phase.
-    pass
+    @property
+    def manifest(self) -> ParameterManifest:
+        return self._manifest
+
+    def _bundle(self, tensors: list[np.ndarray]) -> TensorBundle:
+        return TensorBundle(self.manifest.parameter_manifest_hash, tuple(tensors))
+
+    def export_parameters(self) -> TensorBundle:
+        return self._bundle(
+            [parameter.detach().cpu().numpy().copy() for parameter in self._model.parameters()]
+        )
+
+    def apply_parameters(self, bundle: TensorBundle) -> None:
+        prepared = self._validate_bundle(bundle)
+        parameters = tuple(self._model.parameters())
+        previous = tuple(parameter.detach().clone() for parameter in parameters)
+        try:
+            with torch.no_grad():
+                for parameter, candidate in zip(parameters, prepared, strict=True):
+                    parameter.copy_(candidate)
+        except Exception:
+            with torch.no_grad():
+                for parameter, old in zip(parameters, previous, strict=True):
+                    parameter.copy_(old)
+            raise
+
+    def compute_loss_and_gradients(self, x: np.ndarray, y: np.ndarray) -> LocalGradient:
+        if (
+            x.dtype != np.float32
+            or x.ndim != 4
+            or not len(x)
+            or y.dtype != np.int64
+            or y.shape != (len(x),)
+            or not np.isfinite(x).all()
+        ):
+            raise ValueError("Invalid local image-classification batch")
+        self._model.zero_grad(set_to_none=True)
+        device = next(self._model.parameters()).device
+        inputs = torch.from_numpy(np.ascontiguousarray(x)).to(device)
+        labels = torch.from_numpy(np.ascontiguousarray(y)).to(device)
+        value = self._loss(self._model(inputs), labels)
+        if value.ndim != 0 or not torch.isfinite(value):
+            raise ValueError("Loss must be one finite scalar")
+        value.backward()
+        gradients = []
+        for parameter in self._model.parameters():
+            if parameter.grad is None:
+                raise ValueError("Every canonical parameter must have a gradient")
+            gradients.append(parameter.grad.detach().cpu().numpy().copy())
+        loss_value = float(value.detach().cpu())
+        if not math.isfinite(loss_value):
+            raise ValueError("Nonfinite loss")
+        return LocalGradient(loss_value, self._bundle(gradients), len(x))
+
+    def _validate_bundle(self, bundle: TensorBundle) -> tuple[torch.Tensor, ...]:
+        if bundle.parameter_manifest_hash != self.manifest.parameter_manifest_hash or len(
+            bundle.tensors
+        ) != len(self.manifest.tensors):
+            raise ValueError("Parameter Manifest mismatch")
+        device = next(self._model.parameters()).device
+        candidates = []
+        for value, spec in zip(bundle.tensors, self.manifest.tensors, strict=True):
+            if (
+                value.dtype != np.float32
+                or value.shape != spec.shape
+                or not np.isfinite(value).all()
+            ):
+                raise ValueError("Malformed canonical parameter tensor")
+            candidates.append(torch.from_numpy(np.array(value, copy=True, order="C")).to(device))
+        return tuple(candidates)

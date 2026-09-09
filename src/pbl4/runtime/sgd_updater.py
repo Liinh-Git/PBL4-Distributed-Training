@@ -1,41 +1,28 @@
-"""SGD Updater — plain-SGD parameter update operator.
+"""Pure server-side plain SGD arithmetic. No model mutation privileges."""
 
-CANONICAL REFERENCES
---------------------
-- 02. Mô hình miền
-- 03. Mô hình dữ liệu
-- 04. Cấu trúc mã nguồn
-- docs/IMPLEMENTATION_CONTRACT.md -> Module-to-Canonical-Document mapping
+import math
 
-OWNS
-----
-- Pure plain-SGD parameter update arithmetic (w_new = w_old - lr * g_aggregated).
-- In-place or buffer calculation over canonical FP32 parameters and gradients.
-
-MUST NOT OWN
-------------
-- Framework optimizer abstractions (zero PyTorch optimizer or model imports).
-- Model version lifecycle or broadcast orchestration (owned by UpdateEngine).
-- Synchronization, admission, or gradient aggregation.
-
-CRITICAL V1 INVARIANTS
-----------------------
-- Plain-SGD arithmetic only in V1; framework-neutral execution.
-- No PyTorch optimizer objects on Parameter Server.
-
-IMPLEMENTATION STATUS
----------------------
-Scaffold only. Core behavior is intentionally not implemented.
-"""
-
-from __future__ import annotations
+import numpy as np
 
 
-class SgdUpdater:
-    """Performs plain-SGD arithmetic over canonical FP32 parameters and gradients.
-
-    Runtime remains framework-neutral; no PyTorch optimizer or model objects are used.
-    """
-
-    def __init__(self) -> None:
-        raise NotImplementedError
+class SGDUpdater:
+    def update(
+        self, parameters: np.ndarray, gradient: np.ndarray, learning_rate: float
+    ) -> np.ndarray:
+        if (
+            parameters.dtype != np.float32
+            or gradient.dtype != np.float32
+            or parameters.ndim != 1
+            or parameters.shape != gradient.shape
+            or not parameters.size
+        ):
+            raise ValueError("Incompatible FP32 update operands")
+        if not math.isfinite(learning_rate) or learning_rate <= 0:
+            raise ValueError("Learning rate must be finite and positive")
+        if not np.isfinite(parameters).all() or not np.isfinite(gradient).all():
+            raise ValueError("Nonfinite update operand")
+        with np.errstate(over="raise", invalid="raise"):
+            candidate = parameters - np.float32(learning_rate) * gradient
+        if not np.isfinite(candidate).all():
+            raise ValueError("Nonfinite update candidate")
+        return candidate

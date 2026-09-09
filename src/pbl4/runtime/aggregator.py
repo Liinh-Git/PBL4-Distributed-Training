@@ -1,39 +1,47 @@
-"""Aggregator — sample-weighted gradient tensor aggregation.
+"""Weighted FP32 aggregation of a frozen selection, without membership policy."""
 
-CANONICAL REFERENCES
---------------------
-- 02. Mô hình miền
-- 03. Mô hình dữ liệu
-- 04. Cấu trúc mã nguồn
-- docs/IMPLEMENTATION_CONTRACT.md -> Module-to-Canonical-Document mapping
+from dataclasses import dataclass
 
-OWNS
-----
-- Sample-weighted gradient tensor aggregation over an admitted immutable contribution set.
-- Numerical scaling and sum operations producing aggregated gradient buffers.
+import numpy as np
 
-MUST NOT OWN
-------------
-- Worker admission or update-ready decisions (owned by SynchronizationPolicy).
-- Cluster topology or expected_workers policy (Aggregator is purely mathematical).
-- Applying gradients to CanonicalModel (owned by UpdateEngine / SgdUpdater).
-- Transport or communication handling.
-
-CRITICAL V1 INVARIANTS
-----------------------
-- Aggregator does not know expected_workers and does not decide admission.
-- Operates on immutable contribution sets defined by UpdatePlan.
-
-IMPLEMENTATION STATUS
----------------------
-Scaffold only. Core behavior is intentionally not implemented.
-"""
-
-from __future__ import annotations
+from pbl4.runtime.synchronization.update_plan import UpdatePlan
 
 
-class Aggregator:
-    """Performs sample-weighted aggregation on admitted worker gradients."""
+@dataclass(frozen=True, slots=True)
+class AggregatedGradient:
+    plan: UpdatePlan
+    parameter_manifest_hash: str
+    _values: bytes
 
-    # Math implementation pending aggregation phase.
-    pass
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_values", bytes(self._values))
+
+    @property
+    def gradient(self) -> np.ndarray:
+        return np.frombuffer(self._values, dtype=np.float32)
+
+
+class GradientAggregator:
+    def aggregate(self, plan: UpdatePlan) -> AggregatedGradient:
+        selected = plan.contributions
+        if not selected or plan.total_sample_count <= 0:
+            raise ValueError("Empty sample selection")
+        first = selected[0]
+        shape = first.gradient.shape
+        # Accumulate in FP64 to avoid overflowing sample_count * FP32 gradient.
+        total = np.zeros(shape, dtype=np.float64)
+        for c in selected:
+            if (
+                c.parameter_manifest_hash != first.parameter_manifest_hash
+                or c.gradient.shape != shape
+                or c.gradient.dtype != np.float32
+                or type(c.sample_count) is not int
+                or c.sample_count <= 0
+            ):
+                raise ValueError("Incompatible gradient selection")
+            total += c.gradient.astype(np.float64) * c.sample_count
+        with np.errstate(over="raise", invalid="raise"):
+            values = (total / plan.total_sample_count).astype(np.float32)
+        if not np.isfinite(values).all():
+            raise ValueError("Nonfinite aggregate")
+        return AggregatedGradient(plan, first.parameter_manifest_hash, values.tobytes())

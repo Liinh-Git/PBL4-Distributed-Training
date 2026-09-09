@@ -1,36 +1,28 @@
-"""Runtime state snapshot representation.
+"""Immutable checkpoint revision captured by Coordinator before filesystem I/O."""
 
-CANONICAL REFERENCES
---------------------
-- 02. Mô hình miền
-- 03. Mô hình dữ liệu
-- 04. Cấu trúc mã nguồn
-- docs/IMPLEMENTATION_CONTRACT.md -> Module-to-Canonical-Document mapping
+from dataclasses import dataclass
 
-Canonical responsibility:
-- Captures point-in-time immutable generic state of Runtime subsystems for management queries.
-- Top-level generic snapshot includes management truth:
-  - Attempt lifecycle state;
-  - Worker Session / membership projection;
-  - Canonical model / model_version state;
-  - Checkpoint state;
-  - Event cursor;
-  - strategy_state (discriminated strategy-owned data).
-
-Important boundary:
-- Generic Runtime snapshot must not become StrictBSP-shaped; StrictBSP-only diagnostics
-  (e.g. step/barrier arrival details) belong under strategy_state, not top-level generic schema.
-- Read-only reflection of internal state; does not mutate Runtime entities.
-
-Status:
-- Scaffold only.
-"""
-
-from __future__ import annotations
+from pbl4.runtime.batch_scheduler import RecoveryCursor
+from pbl4.runtime.canonical_model import ModelSnapshot
 
 
-class RuntimeSnapshot:
-    """Immutable snapshot of runtime state for management/monitoring."""
-
-    def __init__(self) -> None:
-        raise NotImplementedError
+@dataclass(frozen=True, slots=True)
+class CheckpointSnapshot:
+    checkpoint_id: str
+    checkpoint_schema_version: int
+    job_id: str
+    created_by_attempt_id: str
+    contract_hash: str
+    checkpoint_policy: str
+    checkpoint_policy_version: int
+    training_strategy: str
+    dataset_build_id: str
+    dataset_manifest_hash: str
+    model_id: str
+    model_profile: str
+    source_operation_id: int
+    source_step_id: int | None
+    optimizer: str
+    created_at: str
+    model: ModelSnapshot
+    recovery_cursor: RecoveryCursor
