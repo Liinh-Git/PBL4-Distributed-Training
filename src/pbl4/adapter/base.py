@@ -5,69 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from pbl4.common.hashing import sha256_canonical_json
-
-
-@dataclass(frozen=True, slots=True)
-class ParameterSpec:
-    tensor_id: int
-    name: str
-    shape: tuple[int, ...]
-    dtype: str
-    numel: int
-    byte_offset: int
-    byte_length: int
-
-    def value(self) -> dict[str, object]:
-        return {
-            "tensor_id": self.tensor_id,
-            "name": self.name,
-            "shape": list(self.shape),
-            "dtype": self.dtype,
-            "numel": self.numel,
-            "byte_offset": self.byte_offset,
-            "byte_length": self.byte_length,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class ParameterManifest:
-    schema_version: int
-    tensors: tuple[ParameterSpec, ...]
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "tensors", tuple(self.tensors))
-        if type(self.schema_version) is not int or self.schema_version <= 0:
-            raise ValueError("Invalid Parameter Manifest schema version")
-        offset = 0
-        for tensor_id, tensor in enumerate(self.tensors):
-            if (
-                tensor.tensor_id != tensor_id
-                or not tensor.name
-                or tensor.dtype != "float32"
-                or not tensor.shape
-                or any(dimension <= 0 for dimension in tensor.shape)
-                or tensor.numel != int(np.prod(tensor.shape))
-                or tensor.byte_offset != offset
-                or tensor.byte_length != tensor.numel * 4
-            ):
-                raise ValueError("Invalid Parameter Manifest")
-            offset += tensor.byte_length
-        if not self.tensors:
-            raise ValueError("Empty Parameter Manifest")
-
-    @property
-    def parameter_manifest_hash(self) -> str:
-        return sha256_canonical_json(
-            {
-                "schema_version": self.schema_version,
-                "tensors": [tensor.value() for tensor in self.tensors],
-            }
-        )
-
-    @property
-    def total_numel(self) -> int:
-        return sum(tensor.numel for tensor in self.tensors)
+from pbl4.protocol.parameter_manifest import ParameterManifest
 
 
 @dataclass(frozen=True, slots=True)

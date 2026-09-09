@@ -5,7 +5,6 @@ from threading import Barrier, Event
 
 import numpy as np
 import pytest
-from test_checkpoint_mechanics import TestOnlySerializer, snapshot
 
 from pbl4.runtime.batch_scheduler import BatchScheduler
 from pbl4.runtime.canonical_model import CanonicalModel
@@ -19,6 +18,7 @@ from pbl4.runtime.synchronization.context import BatchAssignment, Member, Strate
 from pbl4.runtime.synchronization.registry import create_policy
 from pbl4.runtime.update_engine import UpdateEngine
 from pbl4.runtime.worker_registry import SessionState, WorkerRegistry
+from tests.test_checkpoint_mechanics import TestOnlySerializer, snapshot
 
 
 def running(tmp_path):

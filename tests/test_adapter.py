@@ -1,5 +1,7 @@
 """Framework-adapter tests with real PyTorch forward/backward execution."""
 
+import json
+
 import numpy as np
 import pytest
 import torch
@@ -8,6 +10,8 @@ from torch.nn import functional as functional
 from pbl4.adapter.base import TensorBundle
 from pbl4.adapter.models.small_cnn import SmallCNN
 from pbl4.adapter.pytorch_adapter import PyTorchAdapter
+from pbl4.common.hashing import sha256_bytes
+from pbl4.protocol.parameter_manifest import ParameterManifest
 
 F = functional  # short alias used in Issue-D tests
 
@@ -33,10 +37,10 @@ def test_parameter_manifest_is_stable_ordered_and_matches_export():
     second = adapter()
     assert first.manifest == second.manifest
     assert first.manifest.parameter_manifest_hash == second.manifest.parameter_manifest_hash
-    assert [spec.tensor_id for spec in first.manifest.tensors] == list(
-        range(len(first.manifest.tensors))
+    assert [spec.tensor_id for spec in first.manifest.parameters] == list(
+        range(len(first.manifest.parameters))
     )
-    assert [spec.name for spec in first.manifest.tensors] == [
+    assert [spec.name for spec in first.manifest.parameters] == [
         "features.0.weight",
         "features.0.bias",
         "classifier.weight",
@@ -45,7 +49,7 @@ def test_parameter_manifest_is_stable_ordered_and_matches_export():
     bundle = first.export_parameters()
     assert bundle.parameter_manifest_hash == first.manifest.parameter_manifest_hash
     assert [array.shape for array in bundle.tensors] == [
-        spec.shape for spec in first.manifest.tensors
+        spec.shape for spec in first.manifest.parameters
     ]
     assert all(not array.flags.writeable for array in bundle.tensors)
 
@@ -57,15 +61,75 @@ def test_actual_backward_exports_all_gradients_and_zeroes_between_steps():
     second = model_adapter.compute_loss_and_gradients(x, y)
     assert first.sample_count == len(x)
     assert first.loss == pytest.approx(second.loss)
-    assert len(first.bundle.tensors) == len(model_adapter.manifest.tensors)
+    assert len(first.bundle.tensors) == len(model_adapter.manifest.parameters)
     for left, right, spec in zip(
         first.bundle.tensors,
         second.bundle.tensors,
-        model_adapter.manifest.tensors,
+        model_adapter.manifest.parameters,
         strict=True,
     ):
         assert left.shape == spec.shape
         np.testing.assert_allclose(left, right, rtol=0, atol=0)
+
+
+def test_adapter_and_protocol_share_one_canonical_parameter_manifest():
+    manifest = adapter().manifest
+    expected = {
+        "schema_version": 1,
+        "total_numel": 162,
+        "total_bytes": 648,
+        "parameters": [
+            {
+                "tensor_id": 0,
+                "name": "features.0.weight",
+                "shape": [4, 3, 3, 3],
+                "dtype": "float32",
+                "numel": 108,
+                "byte_offset": 0,
+                "byte_length": 432,
+            },
+            {
+                "tensor_id": 1,
+                "name": "features.0.bias",
+                "shape": [4],
+                "dtype": "float32",
+                "numel": 4,
+                "byte_offset": 432,
+                "byte_length": 16,
+            },
+            {
+                "tensor_id": 2,
+                "name": "classifier.weight",
+                "shape": [10, 4],
+                "dtype": "float32",
+                "numel": 40,
+                "byte_offset": 448,
+                "byte_length": 160,
+            },
+            {
+                "tensor_id": 3,
+                "name": "classifier.bias",
+                "shape": [10],
+                "dtype": "float32",
+                "numel": 10,
+                "byte_offset": 608,
+                "byte_length": 40,
+            },
+        ],
+    }
+    canonical = json.dumps(
+        expected,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+    assert isinstance(manifest, ParameterManifest)
+    assert manifest.content_dict() == expected
+    assert manifest.canonical_bytes() == canonical
+    assert manifest.parameter_manifest_hash == sha256_bytes(canonical)
+    assert ParameterManifest.from_dict(manifest.to_dict()) == manifest
 
 
 def test_export_apply_round_trip_and_reject_malformed_bundle_atomically():

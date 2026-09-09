@@ -11,10 +11,10 @@ from torch import nn
 from pbl4.adapter.base import (
     LocalGradient,
     ModelAdapter,
-    ParameterManifest,
-    ParameterSpec,
     TensorBundle,
 )
+from pbl4.protocol.constants import PARAMETER_MANIFEST_SCHEMA_VERSION
+from pbl4.protocol.parameter_manifest import ParameterEntry, ParameterManifest
 
 
 class PyTorchAdapter(ModelAdapter):
@@ -31,6 +31,8 @@ class PyTorchAdapter(ModelAdapter):
                 f"PyTorchAdapter only supports local_gradient_reduction='mean' for "
                 f"correct distributed weighted aggregation; got {local_gradient_reduction!r}"
             )
+        if manifest_schema_version != PARAMETER_MANIFEST_SCHEMA_VERSION:
+            raise ValueError("Unsupported Parameter Manifest schema version")
         self._model = model
         self._loss = loss
         self._local_gradient_reduction = local_gradient_reduction
@@ -41,12 +43,12 @@ class PyTorchAdapter(ModelAdapter):
                 raise ValueError("Model parameters must be nonempty float32 tensors")
             numel = parameter.numel()
             specs.append(
-                ParameterSpec(
+                ParameterEntry(
                     tensor_id, name, tuple(parameter.shape), "float32", numel, offset, numel * 4
                 )
             )
             offset += numel * 4
-        self._manifest = ParameterManifest(manifest_schema_version, tuple(specs))
+        self._manifest = ParameterManifest.create(specs)
 
     @property
     def manifest(self) -> ParameterManifest:
@@ -105,11 +107,11 @@ class PyTorchAdapter(ModelAdapter):
     def _validate_bundle(self, bundle: TensorBundle) -> tuple[torch.Tensor, ...]:
         if bundle.parameter_manifest_hash != self.manifest.parameter_manifest_hash or len(
             bundle.tensors
-        ) != len(self.manifest.tensors):
+        ) != len(self.manifest.parameters):
             raise ValueError("Parameter Manifest mismatch")
         device = next(self._model.parameters()).device
         candidates = []
-        for value, spec in zip(bundle.tensors, self.manifest.tensors, strict=True):
+        for value, spec in zip(bundle.tensors, self.manifest.parameters, strict=True):
             if (
                 value.dtype != np.float32
                 or value.shape != spec.shape
