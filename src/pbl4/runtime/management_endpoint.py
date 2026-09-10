@@ -6,6 +6,7 @@ import concurrent.futures
 import contextlib
 import socket
 import threading
+from collections import OrderedDict
 from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -83,6 +84,10 @@ class ManagementEndpoint:
         self._backend_connected = threading.Event()
         self._tracker = CorrelationTracker()
         self._waiters: dict[str, concurrent.futures.Future[McpEnvelope]] = {}
+        self._command_lock = threading.Lock()
+        self._command_results: OrderedDict[str, dict[str, object]] = OrderedDict()
+        self._in_flight_commands: dict[str, concurrent.futures.Future[dict[str, object]]] = {}
+        self._max_cached_commands = 1024
 
     @property
     def bound_address(self) -> tuple[str, int] | None:
@@ -194,6 +199,40 @@ class ManagementEndpoint:
 
     def _serve_command(self, request: McpEnvelope) -> None:
         payload = request.payload.to_dict()
+        command_id = str(payload.get("command_id"))
+
+        with self._command_lock:
+            if command_id in self._command_results:
+                cached_result = self._command_results[command_id]
+                canonical = CommandResult.from_dict(cached_result)
+                response = self._envelope(
+                    "COMMAND_RESULT", canonical.to_dict(), correlation_id=request.message_id
+                )
+                with contextlib.suppress(Exception):
+                    self._write(response)
+                return
+
+            if command_id in self._in_flight_commands:
+                future = self._in_flight_commands[command_id]
+                in_flight = None
+            else:
+                future = None
+                in_flight = concurrent.futures.Future()
+                self._in_flight_commands[command_id] = in_flight
+
+        if future is not None:
+            try:
+                result = future.result(timeout=self._request_timeout)
+                canonical = CommandResult.from_dict(result)
+                response = self._envelope(
+                    "COMMAND_RESULT", canonical.to_dict(), correlation_id=request.message_id
+                )
+            except Exception as exc:
+                response = self._error_response(request.message_id, "COMMAND_FAILED", str(exc))
+            with contextlib.suppress(Exception):
+                self._write(response)
+            return
+
         try:
             if self._command_handler is None:
                 result = {
@@ -208,11 +247,23 @@ class ManagementEndpoint:
             else:
                 result = self._command_handler(request.message_type, payload)
             canonical = CommandResult.from_dict(result)
+            with self._command_lock:
+                self._command_results[command_id] = canonical.to_dict()
+                if len(self._command_results) > self._max_cached_commands:
+                    self._command_results.popitem(last=False)
+            if in_flight is not None:
+                in_flight.set_result(canonical.to_dict())
             response = self._envelope(
                 "COMMAND_RESULT", canonical.to_dict(), correlation_id=request.message_id
             )
         except Exception as exc:
+            if in_flight is not None:
+                in_flight.set_exception(exc)
             response = self._error_response(request.message_id, "COMMAND_FAILED", str(exc))
+        finally:
+            with self._command_lock:
+                self._in_flight_commands.pop(command_id, None)
+
         with contextlib.suppress(Exception):
             self._write(response)
 
@@ -259,3 +310,9 @@ class ManagementEndpoint:
         for waiter in waiters:
             if not waiter.done():
                 waiter.set_exception(TransportError(message))
+        with self._command_lock:
+            in_flight = list(self._in_flight_commands.values())
+            self._in_flight_commands.clear()
+        for fut in in_flight:
+            if not fut.done():
+                fut.set_exception(TransportError(message))
