@@ -1,155 +1,172 @@
-# BÁO CÁO XÁC MINH QUẢN LÝ THỜI GIAN SỐNG VÀ HOẠT ĐỘNG (LAST_SEEN) TRONG DTP/1
+# BÁO CÁO XÁC MINH CẤU TRÚC VÀ XỬ LÝ TIN NHẮN ERROR TRONG DTP/1
 
 **Dự án**: PBL4 Distributed Training — Parameter Server Architecture  
 **Giao thức kiểm tra**: DTP/1 (Distributed Training Protocol Version 1)  
-**Tiêu chí xác minh**: Quản lý thời gian sống và hoạt động (`last_seen`). `last_seen` được cập nhật khi nhận `HEARTBEAT` hoặc bất kỳ tin nhắn DTP hợp lệ nào từ connection.  
+**Tiêu chí xác minh**: Cấu trúc và xử lý tin nhắn ERROR nghiêm ngặt. Tin nhắn ERROR bắt buộc có `error_code`, `scope` (`MESSAGE` | `SESSION` | `ATTEMPT`), `severity` (`INFO` | `WARNING` | `ERROR` | `CRITICAL`) và `message`. Lỗi nghiêm trọng (`SESSION`/`ATTEMPT`) bắt buộc phải đóng kết nối hoặc chuyển trạng thái rõ ràng, không chỉ ghi log.  
 **Trạng thái**: **ĐẠT (PASSED)**
 
 ---
 
-## 1. TỔNG QUAN THIẾT KẾ & ĐẶC TẢ KIẾN TRÚC
+## 1. TỔNG QUAN YÊU CẦU & NGUYÊN TẮC THIẾT KẾ CHUẨN TẮC
 
-Theo tài liệu thiết kế chuẩn tắc DTP/1 và quyết định kiến trúc:
-1. **Bản chất của quản lý thời gian sống (Liveness Management)**:
-   - Trong huấn luyện phân tán, các tensor tham số và gradient có dung lượng lớn được phân mảnh thành nhiều chunk (`PARAMETER_CHUNK`, `GRADIENT_CHUNK`).
-   - Giao thức DTP/1 nghiêm cấm việc xen kẽ tin nhắn `HEARTBEAT` vào giữa luồng truyền tải tensor trên cùng một kết nối (`transfer_lock` / No Interleaving Rule).
-   - Do đó, để tránh việc một Worker đang tích cực truyền dữ liệu tensor lớn bị coi là đã chết (false positive timeout), **mọi khung truyền DTP hợp lệ (DTP Frame) nhận được từ kết nối đều là bằng chứng về hoạt động sống (activity progress)**.
-2. **Quy tắc cập nhật `last_seen` và `last_heartbeat_at`**:
-   - Khi Parameter Server nhận được tin nhắn `HEARTBEAT` (`0x0030`) hoặc **bất kỳ tin nhắn DTP hợp lệ nào** (`SHARD_READY`, `MODEL_MANIFEST`, `READY`, `GRADIENT_META`, `GRADIENT_CHUNK`, `GRADIENT_END`, `PARAMETER_APPLIED`):
-     1. Ghi nhận mốc thời gian hoạt động cục bộ trên kết nối: `connection.last_seen = time.monotonic()`.
-     2. Cập nhật mốc liveness vào bảng đăng ký phiên làm việc: `self.registry.heartbeat(worker_id, session_id, now)` để làm mới `WorkerSession.last_heartbeat_at`.
-   - **Tối giản hóa phạm vi theo yêu cầu người dùng**:
-     - Server không cần phản hồi `HEARTBEAT` (luồng liveness đi 1 chiều từ worker đến server).
-     - Chưa cần cài đặt `worker.last_seen`, đảm bảo tuân thủ nguyên tắc "Simplicity First" (không sinh mã thừa).
+Theo đặc tả giao thức DTP/1 và mô hình trạng thái:
+1. **Cấu trúc tin nhắn `ERROR` (Message Type `0x00FF`)**:
+   - `error_code` (string): Mã định danh lỗi tiêu chuẩn.
+   - `scope` (enum string): Bắt buộc thuộc tập `{"MESSAGE", "SESSION", "ATTEMPT"}`.
+   - `severity` (enum string): Bắt buộc thuộc tập `{"INFO", "WARNING", "ERROR", "CRITICAL"}`.
+   - `message` (string): Mô tả nguyên nhân sự cố.
+   - `retryable` (bool): Khả năng thử lại gói tin/thao tác.
+2. **Nguyên tắc xử lý lỗi nghiêm ngặt (Strict Error Handling & State Transition)**:
+   - **Lỗi cục bộ (`scope="MESSAGE"`, `severity in ("INFO", "WARNING")`)**:
+     - Ghi nhận thông tin cảnh báo, thông báo handler.
+     - **Không đóng kết nối**, không chuyển trạng thái session, duy trì tiến trình huấn luyện bình thường.
+   - **Lỗi nghiêm trọng (`scope in ("SESSION", "ATTEMPT")` hoặc `severity in ("ERROR", "CRITICAL")`)**:
+     - Không được phép chỉ ghi log đơn thuần.
+     - Bắt buộc phải **đóng kết nối TCP** ngay lập tức.
+     - Phía Server: Bắt buộc chuyển trạng thái phiên làm việc sang `SessionState.FAILED` với `failure_code = message.error_code`, và chuyển validator phase sang `ConnectionPhase.CLOSED`.
+     - Phía Worker: Bắt buộc dừng luồng đọc, giải phóng bộ nhớ tensor (`assembler.discard()`), ngắt kết nối `transport.disconnect()`, và chuyển validator phase sang `ConnectionPhase.CLOSED`.
+     - Với `scope == "ATTEMPT"`: Thông báo `error_handler` để Coordinator quản lý việc fail/abort toàn bộ đợt huấn luyện.
 
 ---
 
 ## 2. BẰNG CHỨNG MÃ NGUỒN CÀI ĐẶT (CODE PROOF)
 
-Hệ thống đã triển khai đầy đủ và chuẩn xác theo kế hoạch trong [src/pbl4/runtime/parameter_server.py](file:///d:/HKI%2026-27/PBL4/demo/src/pbl4/runtime/parameter_server.py):
-
----
-
-### Bằng chứng 1: Đối tượng kết nối `_Connection` lưu trữ mốc thời gian `last_seen`
-
-Trong file [src/pbl4/runtime/parameter_server.py:66-75](file:///d:/HKI%2026-27/PBL4/demo/src/pbl4/runtime/parameter_server.py#L66-L75):
-
+### Bằng chứng 1: Định nghĩa cấu trúc `Error` nghiêm ngặt theo schema
+Trong file [src/pbl4/protocol/messages.py:449-469](file:///d:/HKI%2026-27/PBL4/demo/src/pbl4/protocol/messages.py#L449-L469):
 ```python
-# Trích xuất từ src/pbl4/runtime/parameter_server.py:
-@dataclass(slots=True)
-class _Connection:
-    sock: socket.socket
-    session_id: int
-    worker_id: int
-    validator: ConnectionProtocolValidator
-    assembler: TensorTransferAssembler
-    sender: LogicalTransferSender
-    last_seen: float = 0.0
-```
-
-Tại thời điểm kết nối TCP được xác thực qua bắt tay `HELLO` thành công, trường `last_seen` được khởi tạo bằng đồng hồ monotonic chuẩn tắc ([src/pbl4/runtime/parameter_server.py:182-195](file:///d:/HKI%2026-27/PBL4/demo/src/pbl4/runtime/parameter_server.py#L182-L195)):
-
-```python
-                connection = _Connection(
-                    sock=sock,
-                    session_id=session_id,
-                    worker_id=registered.worker_id,
-                    validator=validator,
-                    assembler=TensorTransferAssembler(
-                        self.manifest,
-                        max_model_bytes=self.manifest.total_bytes,
-                        max_tensor_chunk_bytes=self._max_chunk,
-                    ),
-                    sender=LogicalTransferSender(self._write_frame),
-                    last_seen=time.monotonic(),
-                )
+# Trích xuất từ src/pbl4/protocol/messages.py:
+class Error(DtpControlMessage):
+    MESSAGE_TYPE = MESSAGE_TYPE_ERROR
+    REQUIRED = {
+        "error_code": "string",
+        "scope": "string",
+        "severity": "string",
+        "message": "string",
+        "retryable": "bool",
+    }
+    OPTIONAL = {
+        "related_message_type": "string",
+        "operation_id": "nonnegative_int",
+        "model_version": "nonnegative_int",
+        "tensor_id": "nonnegative_int",
+        "step_id": "nonnegative_int",
+    }
+    ENUMS = {
+        "scope": frozenset({"MESSAGE", "SESSION", "ATTEMPT"}),
+        "severity": frozenset({"INFO", "WARNING", "ERROR", "CRITICAL"}),
+    }
 ```
 
 ---
 
-### Bằng chứng 2: Vòng lặp `_read_bound` cập nhật `last_seen` và `registry.heartbeat()` trên mọi frame DTP hợp lệ
-
-Trong file [src/pbl4/runtime/parameter_server.py:230-252](file:///d:/HKI%2026-27/PBL4/demo/src/pbl4/runtime/parameter_server.py#L230-L252):
-
+### Bằng chứng 2: Parameter Server xử lý `ERROR`, chuyển trạng thái `FAILED` và ngắt kết nối
+Trong file [src/pbl4/runtime/parameter_server.py:288-316](file:///d:/HKI%2026-27/PBL4/demo/src/pbl4/runtime/parameter_server.py#L288-L316):
 ```python
-# Trích xuất từ src/pbl4/runtime/parameter_server.py:
-    def _read_bound(self, connection: _Connection) -> None:
-        while True:
-            frame = DTPFrame.read_from(
-                connection.sock,
-                recv_exact,
-                bound_identity=(connection.session_id, connection.worker_id),
-            )
-            message: DtpControlMessage | None = None
-            if frame.header.message_type not in {
-                MESSAGE_TYPE_GRADIENT_CHUNK,
-                MESSAGE_TYPE_PARAMETER_CHUNK,
-            }:
-                message = decode_control_message(frame.header.message_type, frame.payload)
-            connection.validator.validate(frame.header, message)
-            now = time.monotonic()
-            connection.last_seen = now
-            with contextlib.suppress(ValueError):
-                self.registry.heartbeat(connection.worker_id, connection.session_id, now)
+# Trích xuất từ src/pbl4/runtime/parameter_server.py (_read_bound):
+            elif frame.header.message_type == MESSAGE_TYPE_ERROR:
+                assert isinstance(message, Error)
+                if self._error_handler is not None:
+                    self._error_handler(connection.worker_id, connection.session_id, message)
+                if message.scope in {"SESSION", "ATTEMPT"} or message.severity in {
+                    "ERROR",
+                    "CRITICAL",
+                }:
+                    now = time.monotonic()
+                    with contextlib.suppress(ValueError):
+                        self.registry.transition(
+                            connection.worker_id,
+                            connection.session_id,
+                            SessionState.FAILED,
+                            now,
+                            failure_code=message.error_code,
+                        )
+                    connection.validator.set_phase(ConnectionPhase.CLOSED)
+                    raise ProtocolError(
+                        f"Fatal worker error (scope={message.scope}, "
+                        f"code={message.error_code}): {message.message}"
+                    )
 ```
 
-**Phân tích kỹ thuật**:
-1. `connection.validator.validate(frame.header, message)` đảm bảo frame đúng cấu trúc, đúng pha trạng thái của session và không vi phạm ràng buộc DTP/1.
-2. Ngay sau khi validate thành công, `connection.last_seen` được gán mốc `now = time.monotonic()`.
-3. Đồng thời gọi `self.registry.heartbeat(connection.worker_id, connection.session_id, now)` để cập nhật trường `session.last_heartbeat_at` trong `WorkerRegistry`.
-4. Cơ chế này áp dụng nhất quán cho:
-   - Tin nhắn `HEARTBEAT` (`0x0030`).
-   - Các gói nhị phân chunk dữ liệu (`GRADIENT_CHUNK`, `PARAMETER_CHUNK`).
-   - Mọi tin nhắn điều khiển hợp lệ khác (`SHARD_READY`, `READY`, `GRADIENT_META`, `GRADIENT_END`, `PARAMETER_APPLIED`).
-5. Nếu frame là `HEARTBEAT`, gói tin rơi xuống cuối vòng lặp và tiếp tục lắng nghe mà không cần phản hồi dư thừa (đúng yêu cầu *"server ko cần phản hồi heartbeat"*).
+**Phân tích**:
+- Khi nhận lỗi `MESSAGE` với severity `INFO`/`WARNING`: Server kích hoạt `_error_handler` (nếu có), không raise exception, giữ nguyên trạng thái kết nối và session.
+- Khi nhận lỗi `SESSION` hoặc `ATTEMPT`, hoặc severity `ERROR`/`CRITICAL`:
+  1. `self.registry.transition` được gọi để chuyển Worker Session sang trạng thái `SessionState.FAILED` kèm `failure_code`.
+  2. `connection.validator.set_phase(ConnectionPhase.CLOSED)` đánh dấu phase đóng.
+  3. `raise ProtocolError` làm thoát khỏi vòng lặp `_read_bound`, giải phóng bộ đệm tensor, đóng socket và dọn dẹp kết nối trong khối `finally`.
+
+Đồng thời, Parameter Server cung cấp API gửi tin nhắn `send_error` [src/pbl4/runtime/parameter_server.py:429-436](file:///d:/HKI%2026-27/PBL4/demo/src/pbl4/runtime/parameter_server.py#L429-L436):
+```python
+    def send_error(
+        self,
+        worker_id: int,
+        error: Error,
+        *,
+        operation_id: int = NO_OPERATION,
+    ) -> None:
+        self._send_control(self._connection(worker_id), error, operation_id=operation_id)
+```
 
 ---
 
-### Bằng chứng 3: Bổ sung phương thức truy xuất `ParameterServer.last_seen(worker_id)`
-
-Trong file [src/pbl4/runtime/parameter_server.py:367-373](file:///d:/HKI%2026-27/PBL4/demo/src/pbl4/runtime/parameter_server.py#L367-L373):
-
+### Bằng chứng 3: Worker Client xử lý lỗi nghiêm trọng từ Server và cung cấp `send_error`
+Trong file [src/pbl4/worker/worker_client.py:328-343](file:///d:/HKI%2026-27/PBL4/demo/src/pbl4/worker/worker_client.py#L328-L343):
 ```python
-# Trích xuất từ src/pbl4/runtime/parameter_server.py:
-    def last_seen(self, worker_id: int) -> float:
-        with self._lock:
-            try:
-                return self._connections[worker_id].last_seen
-            except KeyError as exc:
-                raise ValueError(f"Worker {worker_id} is not connected") from exc
+# Trích xuất từ src/pbl4/worker/worker_client.py (_read_loop):
+                elif isinstance(message, Error):
+                    if self._message_handler is not None:
+                        self._message_handler(message, frame.header.operation_id)
+                    if message.scope in {"SESSION", "ATTEMPT"} or message.severity in {
+                        "ERROR",
+                        "CRITICAL",
+                    }:
+                        self._closing.set()
+                        self._validator.set_phase(ConnectionPhase.CLOSED)
+                        raise TransportError(
+                            f"Fatal error from runtime (scope={message.scope}, "
+                            f"code={message.error_code}): {message.message}"
+                        )
 ```
 
-Cung cấp API an toàn theo thread (`self._lock`) để các subsystem khác (hoặc test harness) truy vấn trạng thái hoạt động thực tế của từng Worker.
+Và phương thức gửi lỗi của Worker [src/pbl4/worker/worker_client.py:284-286](file:///d:/HKI%2026-27/PBL4/demo/src/pbl4/worker/worker_client.py#L284-L286):
+```python
+    def send_error(self, error: Error, *, operation_id: int = NO_OPERATION) -> None:
+        self._send_control(error, operation_id=operation_id)
+```
+
+**Phân tích**:
+- Khi Server báo lỗi nghiêm trọng (`SESSION`/`ATTEMPT` hoặc `ERROR`/`CRITICAL`), WorkerClient đặt cờ `_closing.set()`, chuyển validator sang `ConnectionPhase.CLOSED` và ném `TransportError`, dẫn tới ngắt kết nối TCP và giải phóng tài nguyên trong khối `finally`.
 
 ---
 
-## 3. KẾT QUẢ KIỂM THỬ TỰ ĐỘNG (AUTOMATED TEST PROOF)
+## 3. KẾT QUẢ KIỂM THỬ TỰ ĐỘNG (TEST PROOF)
 
-Đã bổ sung unit test chuyên biệt `test_last_seen_updated_on_heartbeat_and_any_valid_dtp_message` trong [tests/unit/test_dtp_messages.py:775-871](file:///d:/HKI%2026-27/PBL4/demo/tests/unit/test_dtp_messages.py#L775-L871) để xác minh:
-1. Giá trị ban đầu của `last_seen` khi worker kết nối.
-2. Khi server nhận `SHARD_READY` (một tin nhắn DTP thông thường không phải heartbeat), `server.last_seen(0)` và `registry.snapshot()[0].last_heartbeat_at` được cập nhật tức thì.
-3. Khi server nhận tin nhắn `HEARTBEAT`, `server.last_seen(0)` và `registry.snapshot()[0].last_heartbeat_at` tiếp tục được cập nhật.
-4. `HeartbeatMonitor` không bị kích hoạt timeout giả sau khi nhận tin nhắn hợp lệ.
-5. Truy vấn `server.last_seen(99)` cho worker không tồn tại raise `ValueError`.
+Đã bổ sung 4 test case chuyên biệt trong [tests/unit/test_dtp_messages.py](file:///d:/HKI%2026-27/PBL4/demo/tests/unit/test_dtp_messages.py):
+1. `test_runtime_handles_message_scope_error_without_disconnecting`: Xác minh lỗi scope `MESSAGE` không làm đứt kết nối, không chuyển `FAILED`.
+2. `test_runtime_handles_session_and_attempt_scope_fatal_errors`: Xác minh lỗi scope `SESSION`/`ATTEMPT` làm chuyển `SessionState.FAILED`, lưu `failure_code`, và đóng kết nối.
+3. `test_worker_client_handles_fatal_error_from_server`: Xác minh WorkerClient tự động ngắt kết nối, chuyển phase `CLOSED`, và kiểm tra `client.send_error()`.
+4. `test_parameter_server_send_error`: Xác minh `server.send_error()` tạo frame chuẩn xác trên đường truyền.
 
-### Bằng chứng thực thi kiểm thử:
-
+### Bằng chứng thực thi:
 ```bash
 uv run pytest tests/unit/test_dtp_messages.py -v
 ```
 **Kết quả**:
 ```
-tests/unit/test_dtp_messages.py::RuntimeSeamTest::test_last_seen_updated_on_heartbeat_and_any_valid_dtp_message PASSED [ 88%]
-=================== 27 passed, 97 subtests passed in 0.25s ====================
+tests/unit/test_dtp_messages.py::RuntimeSeamTest::test_parameter_server_send_error PASSED [ 87%]
+tests/unit/test_dtp_messages.py::RuntimeSeamTest::test_runtime_handles_message_scope_error_without_disconnecting PASSED [ 90%]
+tests/unit/test_dtp_messages.py::RuntimeSeamTest::test_runtime_handles_session_and_attempt_scope_fatal_errors PASSED [ 93%]
+tests/unit/test_dtp_messages.py::RuntimeSeamTest::test_worker_client_handles_fatal_error_from_server PASSED [100%]
+
+=================== 31 passed, 97 subtests passed in 0.27s ====================
 ```
 
-Chạy toàn bộ 208 test case thuộc phạm vi core distributed training:
+Chạy toàn bộ 212 test case trong `tests/`:
 ```bash
 uv run pytest tests/
 ```
 **Kết quả**:
 ```
-======================= 208 passed, 2 warnings in 6.63s =======================
+====================== 212 passed, 2 warnings in 10.77s =======================
 ```
 
 Kiểm tra ranh giới kiến trúc và quy chuẩn định dạng:
@@ -169,16 +186,19 @@ All checks passed!
 
 ## 4. BẢNG ĐỐI CHIẾU TIÊU CHÍ XÁC MINH
 
-| Tiêu chuẩn yêu cầu | Hiện trạng mã nguồn | Đánh giá | Ghi chú |
+| Tiêu chuẩn yêu cầu | Hiện trạng mã nguồn | Đánh giá | Chi tiết phân tích |
 |---|---|:---:|---|
-| **Theo dõi `last_seen` trên kết nối DTP** | `_Connection` có thuộc tính `last_seen`, `ParameterServer` có hàm `last_seen(worker_id)`. | **ĐẠT (PASSED)** | Khởi tạo khi bắt tay thành công, thread-safe. |
-| **Cập nhật khi nhận tin nhắn `HEARTBEAT`** | Được validate và cập nhật cả `connection.last_seen` lẫn `registry.heartbeat()`. | **ĐẠT (PASSED)** | Không gửi phản hồi dư thừa theo chỉ đạo thiết kế. |
-| **Cập nhật khi nhận bất kỳ tin nhắn DTP hợp lệ nào** | Trong `_read_bound`, mọi frame qua `validator.validate` đều cập nhật `last_seen`. | **ĐẠT (PASSED)** | Đáp ứng quy tắc Validated Progress, tránh timeout giả khi truyền chunk lớn. |
-| **Đồng bộ với bảng đăng ký phiên (`WorkerRegistry`)** | `self.registry.heartbeat()` được kích hoạt ngay trong `_read_bound`. | **ĐẠT (PASSED)** | `HeartbeatMonitor` đồng bộ trực tiếp với luồng DTP transport. |
-| **Tuân thủ giới hạn phạm vi người dùng yêu cầu** | Không bổ sung echo heartbeat trên server; không bổ sung `worker.last_seen`. | **ĐẠT (PASSED)** | Giữ mã nguồn đơn giản, chuẩn xác theo yêu cầu. |
+| **Bắt buộc có `error_code`** | `Error.REQUIRED["error_code"] = "string"`. | **ĐẠT (PASSED)** | Thiếu trường bị từ chối ngay. |
+| **Bắt buộc có `scope` (`MESSAGE` \| `SESSION` \| `ATTEMPT`)** | `Error.ENUMS["scope"] = frozenset(...)`. | **ĐẠT (PASSED)** | Enum kiểm tra chặt chẽ 3 giá trị cho phép. |
+| **Bắt buộc có `severity` (`INFO` \| `WARNING` \| `ERROR` \| `CRITICAL`)** | `Error.ENUMS["severity"] = frozenset(...)`. | **ĐẠT (PASSED)** | Enum kiểm tra chặt chẽ 4 mức nghiêm trọng. |
+| **Bắt buộc có `message`** | `Error.REQUIRED["message"] = "string"`. | **ĐẠT (PASSED)** | Chuỗi mô tả lỗi bắt buộc. |
+| **Bắt buộc có `retryable`** | `Error.REQUIRED["retryable"] = "bool"`. | **ĐẠT (PASSED)** | Cờ boolean theo chuẩn wire schema. |
+| **Xử lý lỗi `SESSION`/`ATTEMPT` trên Runtime** | `_read_bound` chuyển `SessionState.FAILED`, đóng kết nối TCP. | **ĐẠT (PASSED)** | Lưu `failure_code`, chuyển phase `CLOSED`, đóng socket. |
+| **Xử lý lỗi `SESSION`/`ATTEMPT` trên Worker** | `_read_loop` ngắt transport, chuyển phase `CLOSED`, dừng worker. | **ĐẠT (PASSED)** | Giải phóng assembler, ngắt kết nối dứt điểm. |
+| **Cấm việc chỉ ghi log đối với lỗi nghiêm trọng** | Mã nguồn cưỡng chế đóng kết nối TCP và chuyển đổi trạng thái rõ ràng. | **ĐẠT (PASSED)** | Tuân thủ triệt để nguyên tắc Fail-Fast. |
 
 ---
 
 ## 5. KẾT LUẬN
 
-Yêu cầu: **"Quản lý thời gian sống và hoạt động (last_seen). last_seen được cập nhật khi nhận HEARTBEAT hoặc bất kỳ tin nhắn DTP hợp lệ nào từ connection"** đã được triển khai hoàn chỉnh, kiểm thử toàn diện, và chính thức đạt trạng thái **ĐẠT (PASSED)**.
+Yêu cầu: **"Cấu trúc và xử lý tin nhắn ERROR nghiêm ngặt. Tin nhắn ERROR bắt buộc có error_code, scope (MESSAGE | SESSION | ATTEMPT), severity (INFO | WARNING | ERROR | CRITICAL) và message. Lỗi nghiêm trọng (SESSION/ATTEMPT) bắt buộc phải đóng kết nối hoặc chuyển trạng thái rõ ràng, không chỉ ghi log"** đã được thực hiện và kiểm thử hoàn chỉnh, chính thức đạt trạng thái **ĐẠT (PASSED)**.
