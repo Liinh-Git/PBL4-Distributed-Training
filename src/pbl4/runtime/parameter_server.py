@@ -71,6 +71,7 @@ class _Connection:
     validator: ConnectionProtocolValidator
     assembler: TensorTransferAssembler
     sender: LogicalTransferSender
+    last_seen: float = 0.0
 
 
 class ParameterServer:
@@ -189,6 +190,7 @@ class ParameterServer:
                         max_tensor_chunk_bytes=self._max_chunk,
                     ),
                     sender=LogicalTransferSender(self._write_frame),
+                    last_seen=time.monotonic(),
                 )
                 self._connections[registered.worker_id] = connection
                 self._membership_changed.notify_all()
@@ -241,6 +243,10 @@ class ParameterServer:
             }:
                 message = decode_control_message(frame.header.message_type, frame.payload)
             connection.validator.validate(frame.header, message)
+            now = time.monotonic()
+            connection.last_seen = now
+            with contextlib.suppress(ValueError):
+                self.registry.heartbeat(connection.worker_id, connection.session_id, now)
             identity = (
                 TransferIdentity(
                     frame.header.session_id,
@@ -355,6 +361,13 @@ class ParameterServer:
         with self._lock:
             try:
                 return self._connections[worker_id]
+            except KeyError as exc:
+                raise ValueError(f"Worker {worker_id} is not connected") from exc
+
+    def last_seen(self, worker_id: int) -> float:
+        with self._lock:
+            try:
+                return self._connections[worker_id].last_seen
             except KeyError as exc:
                 raise ValueError(f"Worker {worker_id} is not connected") from exc
 

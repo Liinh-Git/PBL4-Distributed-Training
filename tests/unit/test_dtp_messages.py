@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import struct
 import threading
@@ -770,6 +771,105 @@ class RuntimeSeamTest(unittest.TestCase):
         validator.bind(7, 0)
         self.assertEqual(validator.close(), (7, 0))
         self.assertEqual(validator.phase, ConnectionPhase.CLOSED)
+
+    def test_last_seen_updated_on_heartbeat_and_any_valid_dtp_message(self) -> None:
+        import socket
+
+        from pbl4.protocol.messages import build_control_frame
+        from pbl4.runtime.heartbeat import HeartbeatMonitor
+        from pbl4.runtime.parameter_server import ParameterServer, _Connection
+        from pbl4.runtime.worker_registry import SessionState, WorkerRegistry
+
+        registry = WorkerRegistry("attempt-liveness", 1)
+        server = ParameterServer(
+            "127.0.0.1",
+            0,
+            attempt_id="attempt-liveness",
+            job_id="job-liveness",
+            expected_workers=1,
+            manifest=manifest(),
+            registry=registry,
+        )
+        registry.register(10, time.monotonic(), 0)
+        registry.transition(0, 10, SessionState.REGISTERING, time.monotonic())
+        registry.transition(0, 10, SessionState.PROVISIONING, time.monotonic())
+
+        validator = ConnectionProtocolValidator(inbound_peer=PeerRole.WORKER)
+        validator.bind(10, 0)
+
+        server_sock, client_sock = socket.socketpair()
+        try:
+            initial_time = time.monotonic() - 10.0
+            conn = _Connection(
+                sock=server_sock,
+                session_id=10,
+                worker_id=0,
+                validator=validator,
+                assembler=TensorTransferAssembler(
+                    manifest(), max_model_bytes=12, max_tensor_chunk_bytes=8
+                ),
+                sender=LogicalTransferSender(lambda s, f: None),
+                last_seen=initial_time,
+            )
+            server._connections[0] = conn
+
+            # Test server query method
+            self.assertEqual(server.last_seen(0), initial_time)
+            with self.assertRaises(ValueError):
+                server.last_seen(99)
+
+            # Start _read_bound in a background daemon thread with clean suppression
+            def run_reader() -> None:
+                with contextlib.suppress(Exception):
+                    server._read_bound(conn)
+
+            read_thread = threading.Thread(target=run_reader, daemon=True)
+            read_thread.start()
+
+            # Send SHARD_READY frame -> triggers _read_bound -> updates last_seen & heartbeat
+            ready_msg = ShardReady.from_dict(payloads()[3][1])
+            frame1 = build_control_frame(ready_msg, session_id=10, worker_id=0)
+            frame1.write_to(client_sock, lambda s, b: s.sendall(b))
+
+            # Wait briefly for server thread to process frame
+            deadline = time.monotonic() + 2.0
+            while server.last_seen(0) == initial_time and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            t1 = server.last_seen(0)
+            self.assertGreater(t1, initial_time)
+            self.assertEqual(registry.snapshot()[0].state, SessionState.SHARD_READY)
+            self.assertEqual(registry.snapshot()[0].last_heartbeat_at, t1)
+
+            # Send HEARTBEAT frame -> triggers _read_bound -> updates last_seen & registry.heartbeat
+            time.sleep(0.02)
+            hb = Heartbeat.from_dict(
+                {
+                    "attempt_id": "attempt-liveness",
+                    "worker_state": "SHARD_READY",
+                    "local_model_version": 0,
+                    "last_completed_operation_id": None,
+                    "recovery_cursor": {"epoch": 0},
+                    "monotonic_timestamp_ms": 200.0,
+                }
+            )
+            frame2 = build_control_frame(hb, session_id=10, worker_id=0)
+            frame2.write_to(client_sock, lambda s, b: s.sendall(b))
+
+            deadline = time.monotonic() + 2.0
+            while server.last_seen(0) == t1 and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            t2 = server.last_seen(0)
+            self.assertGreater(t2, t1)
+            self.assertEqual(registry.snapshot()[0].last_heartbeat_at, t2)
+
+            # Verify HeartbeatMonitor does not expire active session
+            monitor = HeartbeatMonitor(registry, timeout_seconds=15.0)
+            self.assertEqual(monitor.expired(t2 + 5.0), ())
+        finally:
+            server_sock.close()
+            client_sock.close()
 
 
 if __name__ == "__main__":
