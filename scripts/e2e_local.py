@@ -99,12 +99,16 @@ class Harness:
         }
         self.backend_port = args.backend_port or _free_port()
         self.dataset_port = args.dataset_port or _free_port()
+        self.dataset_manager_url = (
+            args.dataset_manager_url or f"http://127.0.0.1:{self.dataset_port}"
+        )
         self.management_port = args.management_port or _free_port()
         self.dtp_port = args.dtp_port or _free_port()
         self.postgres_port = args.postgres_port or _free_port()
         self.result["ports"] = {
             "postgres": self.postgres_port,
             "dataset_manager": self.dataset_port,
+            "dataset_manager_url": self.dataset_manager_url,
             "backend": self.backend_port,
             "runtime_mcp": self.management_port,
             "runtime_dtp": self.dtp_port,
@@ -381,29 +385,8 @@ class Harness:
         )
         self.result["migrations"] = "upgrade head succeeded"
 
-        dataset_store = self.runtime_data / "dataset-store"
-        dataset_temp = self.runtime_data / "dataset-temp"
         checkpoint_dir = self.artifacts / "checkpoints"
-        self.start_child(
-            "dataset-manager",
-            [
-                sys.executable,
-                "-m",
-                "pbl4.dataset_manager.entrypoint",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(self.dataset_port),
-                "--store-dir",
-                str(dataset_store),
-                "--temp-dir",
-                str(dataset_temp),
-                "--public-base-url",
-                f"http://127.0.0.1:{self.dataset_port}",
-            ],
-            env,
-        )
-        self.wait_http(f"http://127.0.0.1:{self.dataset_port}/healthz", 30, "Dataset Manager")
+        self.wait_http(f"{self.dataset_manager_url}/healthz", 30, "Dataset Manager")
         self.start_child(
             "runtime",
             [
@@ -417,7 +400,7 @@ class Harness:
                 "--management-port",
                 str(self.management_port),
                 "--dataset-manager-url",
-                f"http://127.0.0.1:{self.dataset_port}",
+                self.dataset_manager_url,
                 "--checkpoint-dir",
                 str(checkpoint_dir),
                 "--parameter-manifest",
@@ -433,6 +416,7 @@ class Harness:
             "BACKEND_PORT": str(self.backend_port),
             "RUNTIME_HOST": "127.0.0.1",
             "RUNTIME_MANAGEMENT_PORT": str(self.management_port),
+            "DATASET_MANAGER_URL": self.dataset_manager_url,
             "DATASET_MANAGER_HOST": "127.0.0.1",
             "DATASET_MANAGER_PORT": str(self.dataset_port),
             "EXPECTED_WORKERS": "3",
@@ -888,6 +872,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--postgres-bin")
     parser.add_argument("--postgres-port", type=int)
     parser.add_argument("--dataset-port", type=int)
+    parser.add_argument(
+        "--dataset-manager-url",
+        default=None,
+        help="External Dataset Manager service URL (default: http://127.0.0.1:<dataset_port>)",
+    )
     parser.add_argument("--backend-port", type=int)
     parser.add_argument("--management-port", type=int)
     parser.add_argument("--dtp-port", type=int)
