@@ -68,6 +68,7 @@ class ManagementEndpoint:
         snapshot_provider: SnapshotProvider | None = None,
         command_handler: CommandHandler | None = None,
         request_timeout: float = 5.0,
+        send_timeout: float | None = None,
     ) -> None:
         self.runtime_instance_id = runtime_instance_id or f"runtime-{uuid4()}"
         self._boot_time = datetime.now(UTC).isoformat()
@@ -76,6 +77,7 @@ class ManagementEndpoint:
         )
         self._command_handler = command_handler
         self._request_timeout = request_timeout
+        self.send_timeout = send_timeout if send_timeout is not None else request_timeout
         self._server = TcpServer(host, port, self._serve_connection)
         self._connection_lock = threading.Lock()
         self._send_lock = threading.Lock()
@@ -101,9 +103,22 @@ class ManagementEndpoint:
         self._server.start()
 
     def stop(self) -> None:
-        self._backend_connected.clear()
+        self._disconnect_socket(reason="MCP endpoint stopped")
         self._server.stop()
-        self._fail_waiters("MCP endpoint stopped")
+
+    def _disconnect_socket(self, sock: socket.socket | None = None, reason: str = "") -> None:
+        with self._connection_lock:
+            target = self._sock
+            if sock is not None and target is not sock:
+                return
+            self._sock = None
+            self._backend_connected.clear()
+        if target is not None:
+            with contextlib.suppress(OSError):
+                target.shutdown(socket.SHUT_RDWR)
+            with contextlib.suppress(OSError):
+                target.close()
+        self._fail_waiters(reason or "Management Backend disconnected")
 
     def _envelope(
         self,
@@ -127,7 +142,15 @@ class ManagementEndpoint:
         if sock is None:
             raise TransportError("Management Backend is disconnected")
         with self._send_lock:
-            McpCodec.write_message(sock, send_all, envelope)
+            try:
+                McpCodec.write_message(
+                    sock,
+                    lambda s, d: send_all(s, d, timeout=self.send_timeout),
+                    envelope,
+                )
+            except TransportError as exc:
+                self._disconnect_socket(sock, f"Write error: {exc}")
+                raise
 
     def _serve_connection(self, sock: socket.socket, _address: tuple[str, int]) -> None:
         with self._connection_lock:
@@ -151,11 +174,14 @@ class ManagementEndpoint:
         except Exception:
             pass
         finally:
+            should_fail = False
             with self._connection_lock:
                 if self._sock is sock:
                     self._sock = None
                     self._backend_connected.clear()
-            self._fail_waiters("Management Backend disconnected")
+                    should_fail = True
+            if should_fail:
+                self._fail_waiters("Management Backend disconnected")
 
     def _handle_request(self, request: McpEnvelope) -> None:
         if request.message_type == "MGMT_HELLO":

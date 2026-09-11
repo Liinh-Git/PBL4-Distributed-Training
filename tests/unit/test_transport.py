@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 import unittest
 
 from pbl4.common.errors import TransportError
@@ -71,6 +72,31 @@ class SendAllTest(unittest.TestCase):
     def test_timeout_raises_transport_error(self) -> None:
         with self.assertRaises(TransportError):
             send_all(TimeoutSendSocket(), b"abc")
+
+    def test_send_all_with_timeout_succeeds_when_writable(self) -> None:
+        s1, s2 = socket.socketpair()
+        try:
+            send_all(s1, b"hello world", timeout=1.0)
+            self.assertEqual(recv_exact(s2, 11), b"hello world")
+        finally:
+            s1.close()
+            s2.close()
+
+    def test_send_all_with_timeout_raises_when_congested_socket_fills(self) -> None:
+        s1, s2 = socket.socketpair()
+        try:
+            s1.setblocking(False)
+            try:
+                while True:
+                    s1.send(b"X" * 65536)
+            except BlockingIOError:
+                pass
+            with self.assertRaises(TransportError) as ctx:
+                send_all(s1, b"MORE DATA", timeout=0.1)
+            self.assertIn("Timed out after sending", str(ctx.exception))
+        finally:
+            s1.close()
+            s2.close()
 
 
 if __name__ == "__main__":
