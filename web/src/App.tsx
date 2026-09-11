@@ -1,41 +1,45 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom'
-import AppShell from './components/layout/AppShell'
-import HomePage from './pages/HomePage'
-import CurrentJobPage from './pages/CurrentJobPage'
-import JobManagementPage from './pages/JobManagementPage'
-import DatasetsPage from './pages/DatasetsPage'
-import CheckpointsPage from './pages/CheckpointsPage'
-import EventsPage from './pages/EventsPage'
-import SystemPage from './pages/SystemPage'
+import React from 'react';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { AppProvider } from './context/AppContext';
+import { AppLayout } from './components/layout/AppLayout';
 
-function NotFound() {
-  return (
-    <div className="empty-state" style={{ marginTop: 60 }}>
-      <div className="empty-state-icon">◌</div>
-      <div className="empty-state-title">404 — Page not found</div>
-    </div>
-  )
-}
+import { OverviewPage } from './pages/OverviewPage';
+import { LiveTrainingPage } from './pages/LiveTrainingPage';
+import { JobsPage } from './pages/JobsPage';
+import { JobDetailPage } from './pages/JobDetailPage';
+import { NewTrainingFlowPage } from './pages/NewTrainingFlowPage';
+import { DatasetsPage } from './pages/DatasetsPage';
+import { DatasetDetailPage } from './pages/DatasetDetailPage';
+import { DatasetBuildsPage } from './pages/DatasetBuildsPage';
+import { DatasetBuildDetailPage } from './pages/DatasetBuildDetailPage';
+import { CheckpointsPage } from './pages/CheckpointsPage';
+import { EventsPage } from './pages/EventsPage';
+import { SystemPage } from './pages/SystemPage';
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <AppShell>
+    <AppProvider>
+      <BrowserRouter>
         <Routes>
-          <Route path="/" element={<HomePage />} />
-          <Route path="/current-job" element={<CurrentJobPage />} />
-          <Route path="/attempts/:attemptId" element={<CurrentJobPage />} />
-          <Route path="/jobs" element={<JobManagementPage />} />
-          <Route path="/jobs/:jobId" element={<JobManagementPage />} />
-          <Route path="/datasets" element={<DatasetsPage />} />
-          <Route path="/dataset-builds/:datasetBuildId" element={<DatasetsPage />} />
-          <Route path="/checkpoints" element={<CheckpointsPage />} />
-          <Route path="/checkpoints/:checkpointId" element={<CheckpointsPage />} />
-          <Route path="/events" element={<EventsPage />} />
-          <Route path="/system" element={<SystemPage />} />
-          <Route path="*" element={<NotFound />} />
+          <Route path="/" element={<AppLayout />}>
+            <Route index element={<OverviewPage />} />
+            <Route path="live" element={<LiveTrainingPage />} />
+            <Route path="training/new" element={<NewTrainingFlowPage />} />
+            <Route path="jobs" element={<JobsPage />} />
+            <Route path="jobs/new" element={<NewTrainingFlowPage />} />
+            <Route path="jobs/:jobId" element={<JobDetailPage />} />
+            <Route path="datasets" element={<DatasetsPage />} />
+            <Route path="datasets/:datasetId" element={<DatasetDetailPage />} />
+            <Route path="datasets/:datasetId/builds/:buildId" element={<DatasetBuildDetailPage />} />
+            <Route path="dataset-builds" element={<DatasetBuildsPage />} />
+            <Route path="dataset-builds/:buildId" element={<DatasetBuildDetailPage />} />
+            <Route path="checkpoints" element={<CheckpointsPage />} />
+            <Route path="events" element={<EventsPage />} />
+            <Route path="system" element={<SystemPage />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Route>
         </Routes>
-      </AppShell>
-    </BrowserRouter>
-  )
+      </BrowserRouter>
+    </AppProvider>
+  );
 }
