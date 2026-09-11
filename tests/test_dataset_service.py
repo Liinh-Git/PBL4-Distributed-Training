@@ -1,8 +1,10 @@
 """Dataset Manager lifecycle, queue, HTTP contract, restart, and artifact tests."""
 
+import hashlib
 import threading
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -14,6 +16,7 @@ from pbl4.dataset_manager.preprocessing import Preprocessor
 from pbl4.dataset_manager.schemas import DatasetBuildState
 from pbl4.dataset_manager.service import (
     BuildExecutionResult,
+    DatasetBuildPipeline,
     DatasetService,
     DatasetServiceError,
 )
@@ -123,6 +126,48 @@ def wait_for_state(service: DatasetService, build_id: str, expected: str) -> dic
             return value
         time.sleep(0.01)
     pytest.fail(f"build {build_id} did not reach {expected}")
+
+
+def test_source_cache_requires_official_checksum(tmp_path, monkeypatch):
+    cached = tmp_path / "cached.tar.gz"
+    cached.write_bytes(b"wrong")
+    destination = tmp_path / "download.part"
+    downloaded = b"fresh"
+    config = DatasetManagerConfig(
+        store_dir=str(tmp_path / "store"),
+        temp_dir=str(tmp_path / "source"),
+        download_parallelism=1,
+    )
+    pipeline = DatasetBuildPipeline(config, DatasetStorage(config.store_dir))
+    monkeypatch.setenv("PBL4_CIFAR10_SOURCE_ARCHIVE", str(cached))
+    monkeypatch.setattr(
+        "pbl4.dataset_manager.service._CIFAR10_BINARY_ARCHIVE_BYTES", len(cached.read_bytes())
+    )
+    monkeypatch.setattr(
+        "pbl4.dataset_manager.service._CIFAR10_BINARY_ARCHIVE_MD5",
+        hashlib.md5(b"official", usedforsecurity=False).hexdigest(),
+    )
+
+    class HeadResponse:
+        def __init__(self):
+            self.headers = {"Content-Length": str(len(downloaded)), "Accept-Ranges": "none"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def geturl(self):
+            return "https://example.invalid/cifar.tar.gz"
+
+    monkeypatch.setattr(
+        "pbl4.dataset_manager.service._CIFAR10_BINARY_ARCHIVE_BYTES", len(downloaded)
+    )
+    monkeypatch.setattr(pipeline, "_download_sequential", lambda path: path.write_bytes(downloaded))
+    with patch("urllib.request.urlopen", return_value=HeadResponse()):
+        pipeline._download(destination)
+    assert destination.read_bytes() == downloaded
 
 
 def test_single_active_fifo_queue_saturation_and_no_orphan(tmp_path):

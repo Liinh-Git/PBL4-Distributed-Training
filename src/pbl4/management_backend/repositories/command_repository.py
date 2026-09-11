@@ -6,6 +6,7 @@ V1 command types: CREATE_DATASET_BUILD, REBUILD_DATASET_BUILD, DELETE_DATASET_BU
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from datetime import datetime
@@ -30,7 +31,20 @@ TERMINAL_COMMAND_STATES = {"SUCCEEDED", "REJECTED", "FAILED"}
 
 
 def _row_to_dict(row: dict) -> dict:
-    return dict(row)
+    d = dict(row)
+    if "request_jsonb" in d and "request" not in d:
+        req = d["request_jsonb"]
+        if isinstance(req, str):
+            with contextlib.suppress(Exception):
+                req = json.loads(req)
+        d["request"] = req
+    if "result_jsonb" in d and "result" not in d:
+        res = d["result_jsonb"]
+        if isinstance(res, str):
+            with contextlib.suppress(Exception):
+                res = json.loads(res)
+        d["result"] = res
+    return d
 
 
 def create_command(

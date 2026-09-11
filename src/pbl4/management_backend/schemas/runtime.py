@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from pbl4.management_backend.schemas.attempt import StrategyStateStrictBSP, WorkerSessionItem
 
@@ -70,3 +70,10 @@ class RuntimeSnapshot(BaseModel):
     stale: bool = True
     observed_at: datetime | None = None
     runtime_event_seq: int | None = None
+
+    @field_validator("strategy_state", "recovery_cursor", mode="before")
+    @classmethod
+    def _normalize_empty_objects(cls, v: object) -> object:
+        if not v:
+            return None
+        return v

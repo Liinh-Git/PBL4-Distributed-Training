@@ -205,6 +205,14 @@ class PayloadSchemaTest(unittest.TestCase):
             "captured_at": "2026-09-08T00:00:00Z",
         }
         StateSnapshot.from_dict(base)
+        tuple_workers = dict(base)
+        tuple_workers["workers"] = tuple(base["workers"])
+        with self.assertRaises(ProtocolError):
+            StateSnapshot.from_dict(tuple_workers)
+        tuple_diagnostic = dict(base)
+        tuple_diagnostic["workers"] = [{**base["workers"][0], "diagnostic": {"worker_ids": (0, 1)}}]
+        with self.assertRaises(ProtocolError):
+            StateSnapshot.from_dict(tuple_diagnostic)
         for mutation in ("missing", "wrong"):
             bad = dict(base)
             worker = dict(base["workers"][0])

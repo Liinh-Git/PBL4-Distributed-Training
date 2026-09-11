@@ -1,6 +1,7 @@
 """Persistent single-worker Dataset Build orchestration and artifact state gates."""
 
 import contextlib
+import hashlib
 import json
 import os
 import shutil
@@ -9,6 +10,7 @@ import threading
 import urllib.request
 from collections import deque
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +27,8 @@ from pbl4.dataset_manager.schemas import CreateBuildRequest, DatasetBuildState
 from pbl4.dataset_manager.storage import DatasetStorage, PublishedDatasetBuild
 
 _CIFAR10_BINARY_URL = "https://www.cs.toronto.edu/~kriz/cifar-10-binary.tar.gz"
+_CIFAR10_BINARY_ARCHIVE_BYTES = 170_052_171
+_CIFAR10_BINARY_ARCHIVE_MD5 = "c32a1d4ab5d03f1284b67883e8d87530"
 _ACTIVE_BUILD_STATES = {
     DatasetBuildState.IMPORTING,
     DatasetBuildState.VALIDATING,
@@ -153,6 +157,83 @@ class DatasetBuildPipeline:
         return BuildExecutionResult(published, workspace)
 
     def _download(self, destination: Path) -> None:
+        cache_env = os.environ.get("PBL4_CIFAR10_SOURCE_ARCHIVE")
+        cache_candidates = [
+            Path(cache_env).resolve() if cache_env else None,
+            (Path.cwd() / ".var" / "cache" / "cifar-10-binary.tar.gz").resolve(),
+        ]
+        for candidate in cache_candidates:
+            if (
+                candidate
+                and candidate.is_file()
+                and candidate.stat().st_size == _CIFAR10_BINARY_ARCHIVE_BYTES
+            ):
+                with candidate.open("rb") as source:
+                    digest = hashlib.file_digest(source, "md5").hexdigest()
+                if digest == _CIFAR10_BINARY_ARCHIVE_MD5:
+                    shutil.copyfile(candidate, destination)
+                    return
+
+        request = urllib.request.Request(
+            _CIFAR10_BINARY_URL, headers={"User-Agent": "pbl4/1"}, method="HEAD"
+        )
+        with urllib.request.urlopen(
+            request, timeout=self._config.source_download_timeout_seconds
+        ) as response:
+            content_length = int(response.headers.get("Content-Length", "0"))
+            supports_ranges = response.headers.get("Accept-Ranges", "").lower() == "bytes"
+            etag = response.headers.get("ETag")
+            resolved_url = response.geturl()
+        if content_length != _CIFAR10_BINARY_ARCHIVE_BYTES:
+            raise ValueError("Official CIFAR-10 source has an unexpected archive size")
+        if not supports_ranges or self._config.download_parallelism == 1:
+            self._download_sequential(destination)
+            if destination.stat().st_size != content_length:
+                raise ValueError("Incomplete CIFAR-10 source download")
+            return
+
+        parallelism = min(self._config.download_parallelism, content_length)
+        span = (content_length + parallelism - 1) // parallelism
+        ranges = tuple(
+            (index, index * span, min(content_length - 1, (index + 1) * span - 1))
+            for index in range(parallelism)
+            if index * span < content_length
+        )
+        parts = tuple(
+            destination.with_name(f"{destination.name}.{index}.range") for index, _, _ in ranges
+        )
+        try:
+            with ThreadPoolExecutor(
+                max_workers=len(ranges), thread_name_prefix="cifar10-range"
+            ) as pool:
+                futures = [
+                    pool.submit(
+                        self._download_range,
+                        resolved_url,
+                        part,
+                        start,
+                        end,
+                        content_length,
+                        etag,
+                    )
+                    for part, (_, start, end) in zip(parts, ranges, strict=True)
+                ]
+                for future in futures:
+                    future.result()
+            with destination.open("xb") as output:
+                for part in parts:
+                    with part.open("rb") as source:
+                        shutil.copyfileobj(source, output, self._config.download_chunk_size)
+                output.flush()
+                os.fsync(output.fileno())
+            if destination.stat().st_size != content_length:
+                raise ValueError("Incomplete parallel CIFAR-10 source download")
+        finally:
+            for part in parts:
+                with contextlib.suppress(FileNotFoundError):
+                    part.unlink()
+
+    def _download_sequential(self, destination: Path) -> None:
         total = 0
         request = urllib.request.Request(_CIFAR10_BINARY_URL, headers={"User-Agent": "pbl4/1"})
         with (
@@ -170,6 +251,44 @@ class DatasetBuildPipeline:
             os.fsync(stream.fileno())
         if not total:
             raise ValueError("Empty CIFAR-10 source download")
+
+    def _download_range(
+        self,
+        source_url: str,
+        destination: Path,
+        start: int,
+        end: int,
+        total_size: int,
+        etag: str | None,
+    ) -> None:
+        headers = {"User-Agent": "pbl4/1", "Range": f"bytes={start}-{end}"}
+        if etag:
+            headers["If-Range"] = etag
+        request = urllib.request.Request(source_url, headers=headers)
+        expected = end - start + 1
+        received = 0
+        with (
+            urllib.request.urlopen(
+                request, timeout=self._config.source_download_timeout_seconds
+            ) as response,
+            destination.open("xb") as stream,
+        ):
+            if response.status != 206 or response.headers.get("Content-Range") != (
+                f"bytes {start}-{end}/{total_size}"
+            ):
+                raise ValueError("Official CIFAR-10 server returned an invalid byte range")
+            if etag and response.headers.get("ETag") != etag:
+                raise ValueError("Official CIFAR-10 source identity changed during download")
+            read_size = min(self._config.download_chunk_size, 64 * 1024)
+            while chunk := response.read(read_size):
+                received += len(chunk)
+                if received > expected:
+                    raise ValueError("CIFAR-10 range exceeded its requested extent")
+                stream.write(chunk)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if received != expected:
+            raise ValueError("Incomplete CIFAR-10 byte range")
 
     def _extract(self, archive: Path, destination: Path) -> None:
         with tarfile.open(archive, "r:gz") as bundle:
@@ -447,7 +566,7 @@ class DatasetService:
             digest = published.dataset_manifest_hash
             media_type = "application/json"
         else:
-            root = self.storage.verify(published).value
+            root = json.loads(published.manifest_path.read_bytes())
             if shard_id < 0 or shard_id >= len(root["shards"]):
                 raise DatasetServiceError("ARTIFACT_NOT_FOUND", "Shard is absent", 404)
             reference = root["shards"][shard_id]

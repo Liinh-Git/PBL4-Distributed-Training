@@ -5,6 +5,8 @@ GET /api/v1/runtime/snapshot
 
 from __future__ import annotations
 
+import contextlib
+
 from fastapi import APIRouter
 
 from pbl4.management_backend.gateways.runtime_gateway import get_gateway
@@ -26,5 +28,16 @@ def runtime_snapshot() -> ItemResponse[RuntimeSnapshot]:
     The snapshot reflects DB projections; live data requires runtime connection.
     """
     gateway = get_gateway()
+    if gateway.connected:
+        with contextlib.suppress(Exception):
+            state = gateway.port.request_state()
+            if state:
+                gateway.handle_state_snapshot(state)
     snap = gateway.get_snapshot()
+    # MCP/1 represents an inactive Runtime's structurally required state objects
+    # as empty objects; the public REST schema represents their absence as null.
+    if snap.get("strategy_state") == {}:
+        snap["strategy_state"] = None
+    if snap.get("recovery_cursor") == {}:
+        snap["recovery_cursor"] = None
     return ItemResponse(data=RuntimeSnapshot(**snap))

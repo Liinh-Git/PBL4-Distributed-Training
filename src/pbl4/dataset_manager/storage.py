@@ -182,7 +182,13 @@ class DatasetStorage:
         return manifest
 
     def resolve_artifact(self, published: PublishedDatasetBuild, relative: str) -> Path:
-        self.verify(published)
+        expected = self._root / self._directory_key(published.dataset_build_id)
+        if (
+            published.directory.resolve() != expected
+            or published.directory.is_symlink()
+            or published.manifest_path != expected / "dataset-manifest.json"
+        ):
+            raise ValueError("Published paths do not belong to the Dataset Store")
         path = self._safe(published.directory, relative)
         if path.is_symlink() or not path.is_file():
             raise ValueError("Artifact is not a regular published file")

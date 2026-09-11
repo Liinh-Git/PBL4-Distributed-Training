@@ -86,7 +86,7 @@ def ready(policy, n=3):
 @pytest.mark.parametrize("n", [2, 3, 4])
 def test_full_membership_then_full_application(n):
     policy = started(n)
-    assert policy.snapshot()["accepted_workers"] == ()
+    assert policy.snapshot()["accepted_workers"] == []
     assert not policy.synchronization_complete
     for w in range(n):
         result = policy.admit(contribution(w))
@@ -138,7 +138,7 @@ def test_rejection_never_counts(changes, code):
     assert result.code == code
     assert result.reason
     assert result.update_plan is None
-    assert policy.snapshot()["accepted_workers"] == ()
+    assert policy.snapshot()["accepted_workers"] == []
     assert policy.admit(contribution()).code == Code.ACCEPT
 
 
@@ -229,8 +229,8 @@ def test_plan_context_and_diagnostics_have_no_mutable_aliases():
     contributions.clear()
     assert len(copied.contributions) == 3
     diag = policy.snapshot()
-    diag["accepted_workers"] = ()
-    assert policy.snapshot()["accepted_workers"] == (0, 1, 2)
+    diag["accepted_workers"] = []
+    assert policy.snapshot()["accepted_workers"] == [0, 1, 2]
 
 
 def test_two_final_contributions_create_one_execution_intent():
@@ -274,7 +274,7 @@ def test_failure_closes_admission_and_reconnect_cannot_replace_member():
     assert policy.worker_failed(0, 99).code == Code.REJECT_MEMBERSHIP
     assert policy.worker_failed(0, 1).code == Code.FATAL_STRATEGY_ERROR
     assert policy.admit(contribution(session_id=100)).code == Code.REJECT_STRATEGY_STATE
-    assert policy.snapshot()["accepted_workers"] == ()
+    assert policy.snapshot()["accepted_workers"] == []
     assert not policy.synchronization_complete
     with pytest.raises(ValueError):
         policy.open_operation(operation())

@@ -149,7 +149,7 @@ def get_dataset(conn: psycopg.Connection, dataset_id: str) -> dict:
     row = dataset_repository.get_dataset(conn, dataset_id)
     if row is None:
         raise DatasetNotFoundError(f"Dataset '{dataset_id}' not found.")
-    counts = dataset_repository.get_build_counts(conn, dataset_id)
+    counts = dataset_repository.get_build_counts_for_dataset(conn, dataset_id)
     return {**row, "build_counts": counts}
 
 
@@ -1050,6 +1050,37 @@ def verify_and_register_build(
         authoritative_state,
     )
     return updated_row or {}
+
+
+def refresh_build_from_dataset_manager(db_module: Any, dataset_build_id: str) -> dict:
+    """Refresh a build and complete the canonical registration gate when ready.
+
+    This is invoked by the public status read path.  It never infers READY: the
+    Dataset Manager must first report REGISTERING and must return READY from the
+    explicit registration acknowledgement.
+    """
+    dm_status = get_client().get_build(dataset_build_id)
+    if dm_status is None:
+        raise DatasetBuildNotFoundError(
+            f"Dataset build '{dataset_build_id}' not found on Dataset Manager."
+        )
+    state = _require_dm_state(dm_status, "status refresh")
+    if state == "REGISTERING":
+        return verify_and_register_build(db_module, dataset_build_id)
+    with db_module.transaction() as conn:
+        current = dataset_build_repository.get_build(conn, dataset_build_id)
+        if current is None:
+            raise DatasetBuildNotFoundError(f"Dataset build '{dataset_build_id}' not found.")
+        if current["state"] in {"READY", "FAILED", "DEPRECATED", "DELETED"}:
+            return current
+        updated = dataset_build_repository.update_build_state(
+            conn,
+            dataset_build_id,
+            state,
+            sample_count=dm_status.get("sample_count"),
+            shard_count=dm_status.get("shard_count"),
+        )
+    return updated or current
 
 
 # ─── Backward compatibility wrappers for direct connection callers ───────────
