@@ -32,7 +32,9 @@ as TransportError (common.errors).
 
 from __future__ import annotations
 
+import select
 import socket
+import time
 
 from pbl4.common.errors import TransportError
 
@@ -68,7 +70,7 @@ def recv_exact(sock: socket.socket, n: int) -> bytes:
     return bytes(chunks)
 
 
-def send_all(sock: socket.socket, data: bytes) -> None:
+def send_all(sock: socket.socket, data: bytes, timeout: float | None = None) -> None:
     """Send all bytes in data, handling partial writes.
 
     Raises:
@@ -78,7 +80,18 @@ def send_all(sock: socket.socket, data: bytes) -> None:
     view = memoryview(data)
     total = len(view)
     sent = 0
+    deadline = (time.monotonic() + timeout) if timeout is not None else None
     while sent < total:
+        if deadline is not None and hasattr(sock, "fileno"):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TransportError(f"Timed out after sending {sent} of {total} bytes")
+            try:
+                ready_w = select.select([], [sock], [], max(0.0, remaining))[1]
+            except OSError as exc:
+                raise TransportError(f"Connection error while waiting to send: {exc}") from exc
+            if not ready_w:
+                raise TransportError(f"Timed out after sending {sent} of {total} bytes")
         try:
             sent_now = sock.send(view[sent:])
         except TimeoutError as exc:

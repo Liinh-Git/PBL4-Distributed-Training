@@ -15,6 +15,7 @@ import numpy as np
 from pbl4.common.errors import ProtocolError, TransportError
 from pbl4.protocol.codec import DTPFrame
 from pbl4.protocol.constants import (
+    MESSAGE_TYPE_ERROR,
     MESSAGE_TYPE_GRADIENT_CHUNK,
     MESSAGE_TYPE_GRADIENT_END,
     MESSAGE_TYPE_GRADIENT_META,
@@ -33,6 +34,7 @@ from pbl4.protocol.constants import (
 from pbl4.protocol.messages import (
     DatasetAssignment,
     DtpControlMessage,
+    Error,
     GradientEnd,
     GradientMeta,
     Heartbeat,
@@ -66,6 +68,7 @@ GradientHandler = Callable[[Contribution], None]
 ParameterAppliedHandler = Callable[[ParameterApplied], None]
 ModelInitHandler = Callable[[CompletedTensorTransfer], None]
 DisconnectHandler = Callable[[int, int], None]
+ErrorHandler = Callable[[int, int, Error], None]
 
 
 @dataclass(slots=True)
@@ -76,13 +79,14 @@ class _Connection:
     validator: ConnectionProtocolValidator
     assembler: TensorTransferAssembler
     sender: LogicalTransferSender
-    node_label: str
-    protocol_version: int
-    connected_at: str
-    last_heartbeat_at: str
+    node_label: str = ""
+    protocol_version: int = 1
+    connected_at: str = ""
+    last_heartbeat_at: str = ""
     terminal_stop_sent: bool = False
     shard_id: int | None = None
     local_model_version: int | None = None
+    last_seen: float = 0.0
 
 
 class ParameterServer:
@@ -102,6 +106,7 @@ class ParameterServer:
         parameter_applied_handler: ParameterAppliedHandler | None = None,
         model_init_handler: ModelInitHandler | None = None,
         disconnect_handler: DisconnectHandler | None = None,
+        error_handler: ErrorHandler | None = None,
         heartbeat_interval_ms: int = 5_000,
         heartbeat_timeout_ms: int = 15_000,
         max_tensor_chunk_bytes: int = 1024 * 1024,
@@ -117,6 +122,7 @@ class ParameterServer:
         self._parameter_applied_handler = parameter_applied_handler
         self._model_init_handler = model_init_handler
         self._disconnect_handler = disconnect_handler
+        self._error_handler = error_handler
         self._heartbeat_interval_ms = heartbeat_interval_ms
         self._heartbeat_timeout_ms = heartbeat_timeout_ms
         self._max_chunk = max_tensor_chunk_bytes
@@ -226,6 +232,7 @@ class ParameterServer:
                     protocol_version=1,
                     connected_at=connected_at,
                     last_heartbeat_at=connected_at,
+                    last_seen=time.monotonic(),
                 )
                 self._connections[registered.worker_id] = connection
                 self._membership_changed.notify_all()
@@ -284,9 +291,10 @@ class ParameterServer:
             }:
                 message = decode_control_message(frame.header.message_type, frame.payload)
             connection.validator.validate(frame.header, message)
-            # Canonical liveness advances on every valid DTP message, not only
-            # explicit HEARTBEAT frames.
-            self.registry.heartbeat(connection.worker_id, connection.session_id, time.monotonic())
+            now = time.monotonic()
+            connection.last_seen = now
+            with contextlib.suppress(ValueError):
+                self.registry.heartbeat(connection.worker_id, connection.session_id, now)
             with self._lock:
                 connection.last_heartbeat_at = datetime.now(UTC).isoformat()
             identity = (
@@ -318,7 +326,39 @@ class ParameterServer:
                 )
                 connection.validator.set_phase(ConnectionPhase.SHARD_READY)
             elif frame.header.message_type == MESSAGE_TYPE_SHARD_ERROR:
+                now = time.monotonic()
+                with contextlib.suppress(ValueError):
+                    self.registry.transition(
+                        connection.worker_id,
+                        connection.session_id,
+                        SessionState.FAILED,
+                        now,
+                        failure_code="SHARD_PROVISIONING_FAILED",
+                    )
+                connection.validator.set_phase(ConnectionPhase.CLOSED)
                 raise ProtocolError("Worker reported shard provisioning failure")
+            elif frame.header.message_type == MESSAGE_TYPE_ERROR:
+                assert isinstance(message, Error)
+                if self._error_handler is not None:
+                    self._error_handler(connection.worker_id, connection.session_id, message)
+                if message.scope in {"SESSION", "ATTEMPT"} or message.severity in {
+                    "ERROR",
+                    "CRITICAL",
+                }:
+                    now = time.monotonic()
+                    with contextlib.suppress(ValueError):
+                        self.registry.transition(
+                            connection.worker_id,
+                            connection.session_id,
+                            SessionState.FAILED,
+                            now,
+                            failure_code=message.error_code,
+                        )
+                    connection.validator.set_phase(ConnectionPhase.CLOSED)
+                    raise ProtocolError(
+                        f"Fatal worker error (scope={message.scope}, "
+                        f"code={message.error_code}): {message.message}"
+                    )
             elif frame.header.message_type == MESSAGE_TYPE_MODEL_MANIFEST:
                 assert isinstance(message, ModelManifest)
                 if message.to_dict() != self.manifest.to_dict():
@@ -416,6 +456,13 @@ class ParameterServer:
             except KeyError as exc:
                 raise ValueError(f"Worker {worker_id} is not connected") from exc
 
+    def last_seen(self, worker_id: int) -> float:
+        with self._lock:
+            try:
+                return self._connections[worker_id].last_seen
+            except KeyError as exc:
+                raise ValueError(f"Worker {worker_id} is not connected") from exc
+
     def _send_control(
         self,
         connection: _Connection,
@@ -433,6 +480,15 @@ class ParameterServer:
 
     def send_dataset_assignment(self, worker_id: int, assignment: DatasetAssignment) -> None:
         self._send_control(self._connection(worker_id), assignment)
+
+    def send_error(
+        self,
+        worker_id: int,
+        error: Error,
+        *,
+        operation_id: int = NO_OPERATION,
+    ) -> None:
+        self._send_control(self._connection(worker_id), error, operation_id=operation_id)
 
     def mark_model_syncing(self) -> None:
         """Apply the Runtime-owned semantic transition after manifest admission."""

@@ -19,6 +19,7 @@ from pbl4.protocol.constants import (
 )
 from pbl4.protocol.messages import (
     DtpControlMessage,
+    Error,
     GradientEnd,
     GradientMeta,
     Heartbeat,
@@ -283,6 +284,9 @@ class WorkerClient:
         )
         self._validator.set_phase(ConnectionPhase.WAITING_NEXT)
 
+    def send_error(self, error: Error, *, operation_id: int = NO_OPERATION) -> None:
+        self._send_control(error, operation_id=operation_id)
+
     def send_heartbeat(
         self,
         *,
@@ -348,6 +352,19 @@ class WorkerClient:
                     self._validator.set_phase(ConnectionPhase.UPLOADING)
                     if self._message_handler is not None:
                         self._message_handler(message, frame.header.operation_id)
+                elif isinstance(message, Error):
+                    if self._message_handler is not None:
+                        self._message_handler(message, frame.header.operation_id)
+                    if message.scope in {"SESSION", "ATTEMPT"} or message.severity in {
+                        "ERROR",
+                        "CRITICAL",
+                    }:
+                        self._closing.set()
+                        self._validator.set_phase(ConnectionPhase.CLOSED)
+                        raise TransportError(
+                            f"Fatal error from runtime (scope={message.scope}, "
+                            f"code={message.error_code}): {message.message}"
+                        )
                 elif message is not None and self._message_handler is not None:
                     self._message_handler(message, frame.header.operation_id)
         except Exception:

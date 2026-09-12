@@ -7,6 +7,7 @@ import contextlib
 import logging
 import socket
 import threading
+from collections import OrderedDict
 from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -70,6 +71,7 @@ class ManagementEndpoint:
         snapshot_provider: SnapshotProvider | None = None,
         command_handler: CommandHandler | None = None,
         request_timeout: float = 5.0,
+        send_timeout: float | None = None,
     ) -> None:
         self.runtime_instance_id = runtime_instance_id or f"runtime-{uuid4()}"
         self._boot_time = datetime.now(UTC).isoformat()
@@ -78,6 +80,7 @@ class ManagementEndpoint:
         )
         self._command_handler = command_handler
         self._request_timeout = request_timeout
+        self.send_timeout = send_timeout if send_timeout is not None else request_timeout
         self._server = TcpServer(host, port, self._serve_connection)
         self._connection_lock = threading.Lock()
         self._send_lock = threading.Lock()
@@ -86,6 +89,10 @@ class ManagementEndpoint:
         self._backend_connected = threading.Event()
         self._tracker = CorrelationTracker()
         self._waiters: dict[str, concurrent.futures.Future[McpEnvelope]] = {}
+        self._command_lock = threading.Lock()
+        self._command_results: OrderedDict[str, dict[str, object]] = OrderedDict()
+        self._in_flight_commands: dict[str, concurrent.futures.Future[dict[str, object]]] = {}
+        self._max_cached_commands = 1024
 
     @property
     def bound_address(self) -> tuple[str, int] | None:
@@ -99,9 +106,22 @@ class ManagementEndpoint:
         self._server.start()
 
     def stop(self) -> None:
-        self._backend_connected.clear()
+        self._disconnect_socket(reason="MCP endpoint stopped")
         self._server.stop()
-        self._fail_waiters("MCP endpoint stopped")
+
+    def _disconnect_socket(self, sock: socket.socket | None = None, reason: str = "") -> None:
+        with self._connection_lock:
+            target = self._sock
+            if sock is not None and target is not sock:
+                return
+            self._sock = None
+            self._backend_connected.clear()
+        if target is not None:
+            with contextlib.suppress(OSError):
+                target.shutdown(socket.SHUT_RDWR)
+            with contextlib.suppress(OSError):
+                target.close()
+        self._fail_waiters(reason or "Management Backend disconnected")
 
     def _envelope(
         self,
@@ -125,7 +145,15 @@ class ManagementEndpoint:
         if sock is None:
             raise TransportError("Management Backend is disconnected")
         with self._send_lock:
-            McpCodec.write_message(sock, send_all, envelope)
+            try:
+                McpCodec.write_message(
+                    sock,
+                    lambda s, d: send_all(s, d, timeout=self.send_timeout),
+                    envelope,
+                )
+            except TransportError as exc:
+                self._disconnect_socket(sock, f"Write error: {exc}")
+                raise
 
     def _serve_connection(self, sock: socket.socket, _address: tuple[str, int]) -> None:
         with self._connection_lock:
@@ -151,11 +179,14 @@ class ManagementEndpoint:
         except Exception as exc:
             logger.exception("MCP connection loop error: %s", exc)
         finally:
+            should_fail = False
             with self._connection_lock:
                 if self._sock is sock:
                     self._sock = None
                     self._backend_connected.clear()
-            self._fail_waiters("Management Backend disconnected")
+                    should_fail = True
+            if should_fail:
+                self._fail_waiters("Management Backend disconnected")
 
     def _handle_request(self, request: McpEnvelope) -> None:
         if request.message_type == "MGMT_HELLO":
@@ -199,6 +230,40 @@ class ManagementEndpoint:
 
     def _serve_command(self, request: McpEnvelope) -> None:
         payload = request.payload.to_dict()
+        command_id = str(payload.get("command_id"))
+
+        with self._command_lock:
+            if command_id in self._command_results:
+                cached_result = self._command_results[command_id]
+                canonical = CommandResult.from_dict(cached_result)
+                response = self._envelope(
+                    "COMMAND_RESULT", canonical.to_dict(), correlation_id=request.message_id
+                )
+                with contextlib.suppress(Exception):
+                    self._write(response)
+                return
+
+            if command_id in self._in_flight_commands:
+                future = self._in_flight_commands[command_id]
+                in_flight = None
+            else:
+                future = None
+                in_flight = concurrent.futures.Future()
+                self._in_flight_commands[command_id] = in_flight
+
+        if future is not None:
+            try:
+                result = future.result(timeout=self._request_timeout)
+                canonical = CommandResult.from_dict(result)
+                response = self._envelope(
+                    "COMMAND_RESULT", canonical.to_dict(), correlation_id=request.message_id
+                )
+            except Exception as exc:
+                response = self._error_response(request.message_id, "COMMAND_FAILED", str(exc))
+            with contextlib.suppress(Exception):
+                self._write(response)
+            return
+
         try:
             if self._command_handler is None:
                 result = {
@@ -213,11 +278,23 @@ class ManagementEndpoint:
             else:
                 result = self._command_handler(request.message_type, payload)
             canonical = CommandResult.from_dict(result)
+            with self._command_lock:
+                self._command_results[command_id] = canonical.to_dict()
+                if len(self._command_results) > self._max_cached_commands:
+                    self._command_results.popitem(last=False)
+            if in_flight is not None:
+                in_flight.set_result(canonical.to_dict())
             response = self._envelope(
                 "COMMAND_RESULT", canonical.to_dict(), correlation_id=request.message_id
             )
         except Exception as exc:
+            if in_flight is not None:
+                in_flight.set_exception(exc)
             response = self._error_response(request.message_id, "COMMAND_FAILED", str(exc))
+        finally:
+            with self._command_lock:
+                self._in_flight_commands.pop(command_id, None)
+
         with contextlib.suppress(Exception):
             self._write(response)
 
@@ -264,3 +341,9 @@ class ManagementEndpoint:
         for waiter in waiters:
             if not waiter.done():
                 waiter.set_exception(TransportError(message))
+        with self._command_lock:
+            in_flight = list(self._in_flight_commands.values())
+            self._in_flight_commands.clear()
+        for fut in in_flight:
+            if not fut.done():
+                fut.set_exception(TransportError(message))

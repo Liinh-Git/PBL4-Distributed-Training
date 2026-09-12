@@ -135,3 +135,93 @@ def test_real_mcp_bidirectional_correlation_and_reconnect() -> None:
         client.disconnect()
     finally:
         endpoint.stop()
+
+
+def test_mcp_congestion_send_timeout_disconnects() -> None:
+    import socket
+
+    from pbl4.management_protocol.codec import McpCodec
+    from pbl4.management_protocol.messages import McpEnvelope
+    from pbl4.transport.framed_socket import recv_exact, send_all
+
+    def snapshot() -> dict[str, object]:
+        return {
+            "runtime_instance_id": "runtime-congestion-test",
+            "active_job_id": None,
+            "active_attempt_id": None,
+            "attempt_state": None,
+            "training_strategy": None,
+            "checkpoint_policy": None,
+            "epoch": None,
+            "current_operation_id": None,
+            "current_batch_ordinal": None,
+            "model_version": None,
+            "workers": [],
+            "strategy_state": {},
+            "checkpoint_state": None,
+            "latest_checkpoint_id": None,
+            "recovery_cursor": {},
+            "dataset_build_id": None,
+            "dataset_manifest_hash": None,
+            "last_runtime_event_seq": 0,
+            "management_event_gap_count": 0,
+            "captured_at": datetime.now(UTC).isoformat(),
+        }
+
+    endpoint = ManagementEndpoint(
+        "127.0.0.1",
+        0,
+        runtime_instance_id="runtime-congestion-test",
+        snapshot_provider=snapshot,
+        send_timeout=0.2,
+    )
+    endpoint.start()
+    try:
+        host, port_number = endpoint.bound_address or ("", 0)
+        client_sock = socket.create_connection((host, port_number))
+        client_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        hello = McpEnvelope(
+            message_type="MGMT_HELLO",
+            message_id="hello-1",
+            correlation_id=None,
+            sent_at=datetime.now(UTC).isoformat(),
+            runtime_instance_id="backend",
+            payload={"backend_instance_id": "backend-1", "supported_protocol_versions": [1]},
+        )
+        McpCodec.write_message(client_sock, send_all, hello)
+        ack = McpCodec.read_message(client_sock, recv_exact)
+        assert ack.message_type == "MGMT_HELLO_ACK"
+        assert endpoint.backend_connected
+
+        disconnected = False
+        for i in range(10000):
+            ok = endpoint.send_runtime_event(
+                {
+                    "attempt_id": "attempt-1",
+                    "job_id": "job-1",
+                    "runtime_event_seq": i + 1,
+                    "event_type": "congestion.event",
+                    "event_schema_version": 1,
+                    "occurred_at": datetime.now(UTC).isoformat(),
+                    "source_component": "runtime",
+                    "severity": "INFO",
+                    "details": {"payload": "X" * 32768},
+                }
+            )
+            if not ok:
+                disconnected = True
+                break
+
+        assert disconnected, "send_runtime_event should fail when congestion timeout triggers"
+        assert not endpoint.backend_connected, "ManagementEndpoint should mark backend disconnected"
+
+        client_sock.close()
+
+        new_client = RealMcpClientPort(host, port_number, timeout=2.0)
+        assert new_client.connect()
+        state = new_client.request_state()
+        assert state["runtime_instance_id"] == "runtime-congestion-test"
+        assert endpoint.backend_connected
+        new_client.disconnect()
+    finally:
+        endpoint.stop()

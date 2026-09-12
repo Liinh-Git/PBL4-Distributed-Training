@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import struct
 import threading
@@ -770,6 +771,398 @@ class RuntimeSeamTest(unittest.TestCase):
         validator.bind(7, 0)
         self.assertEqual(validator.close(), (7, 0))
         self.assertEqual(validator.phase, ConnectionPhase.CLOSED)
+
+    def test_last_seen_updated_on_heartbeat_and_any_valid_dtp_message(self) -> None:
+        import socket
+
+        from pbl4.protocol.messages import build_control_frame
+        from pbl4.runtime.heartbeat import HeartbeatMonitor
+        from pbl4.runtime.parameter_server import ParameterServer, _Connection
+        from pbl4.runtime.worker_registry import SessionState, WorkerRegistry
+
+        registry = WorkerRegistry("attempt-liveness", 1)
+        server = ParameterServer(
+            "127.0.0.1",
+            0,
+            attempt_id="attempt-liveness",
+            job_id="job-liveness",
+            expected_workers=1,
+            manifest=manifest(),
+            registry=registry,
+        )
+        registry.register(10, time.monotonic(), 0)
+        registry.transition(0, 10, SessionState.REGISTERING, time.monotonic())
+        registry.transition(0, 10, SessionState.PROVISIONING, time.monotonic())
+
+        validator = ConnectionProtocolValidator(inbound_peer=PeerRole.WORKER)
+        validator.bind(10, 0)
+
+        server_sock, client_sock = socket.socketpair()
+        try:
+            initial_time = time.monotonic() - 10.0
+            conn = _Connection(
+                sock=server_sock,
+                session_id=10,
+                worker_id=0,
+                validator=validator,
+                assembler=TensorTransferAssembler(
+                    manifest(), max_model_bytes=12, max_tensor_chunk_bytes=8
+                ),
+                sender=LogicalTransferSender(lambda s, f: None),
+                last_seen=initial_time,
+            )
+            server._connections[0] = conn
+
+            # Test server query method
+            self.assertEqual(server.last_seen(0), initial_time)
+            with self.assertRaises(ValueError):
+                server.last_seen(99)
+
+            # Start _read_bound in a background daemon thread with clean suppression
+            def run_reader() -> None:
+                with contextlib.suppress(Exception):
+                    server._read_bound(conn)
+
+            read_thread = threading.Thread(target=run_reader, daemon=True)
+            read_thread.start()
+
+            # Send SHARD_READY frame -> triggers _read_bound -> updates last_seen & heartbeat
+            ready_msg = ShardReady.from_dict(payloads()[3][1])
+            frame1 = build_control_frame(ready_msg, session_id=10, worker_id=0)
+            frame1.write_to(client_sock, lambda s, b: s.sendall(b))
+
+            # Wait briefly for server thread to process frame
+            deadline = time.monotonic() + 2.0
+            while server.last_seen(0) == initial_time and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            t1 = server.last_seen(0)
+            self.assertGreater(t1, initial_time)
+            self.assertEqual(registry.snapshot()[0].state, SessionState.SHARD_READY)
+            self.assertEqual(registry.snapshot()[0].last_heartbeat_at, t1)
+
+            # Send HEARTBEAT frame -> triggers _read_bound -> updates last_seen & registry.heartbeat
+            time.sleep(0.02)
+            hb = Heartbeat.from_dict(
+                {
+                    "attempt_id": "attempt-liveness",
+                    "worker_state": "SHARD_READY",
+                    "local_model_version": 0,
+                    "last_completed_operation_id": None,
+                    "recovery_cursor": {"epoch": 0},
+                    "monotonic_timestamp_ms": 200.0,
+                }
+            )
+            frame2 = build_control_frame(hb, session_id=10, worker_id=0)
+            frame2.write_to(client_sock, lambda s, b: s.sendall(b))
+
+            deadline = time.monotonic() + 2.0
+            while server.last_seen(0) == t1 and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            t2 = server.last_seen(0)
+            self.assertGreater(t2, t1)
+            self.assertEqual(registry.snapshot()[0].last_heartbeat_at, t2)
+
+            # Verify HeartbeatMonitor does not expire active session
+            monitor = HeartbeatMonitor(registry, timeout_seconds=15.0)
+            self.assertEqual(monitor.expired(t2 + 5.0), ())
+        finally:
+            server_sock.close()
+            client_sock.close()
+
+    def test_runtime_handles_message_scope_error_without_disconnecting(self) -> None:
+        import socket
+
+        from pbl4.protocol.messages import build_control_frame
+        from pbl4.runtime.parameter_server import ParameterServer, _Connection
+        from pbl4.runtime.worker_registry import SessionState, WorkerRegistry
+
+        received_errors: list[Error] = []
+        registry = WorkerRegistry("attempt-err-msg", 1)
+        server = ParameterServer(
+            "127.0.0.1",
+            0,
+            attempt_id="attempt-err-msg",
+            job_id="job-err-msg",
+            expected_workers=1,
+            manifest=manifest(),
+            registry=registry,
+            error_handler=lambda w, s, err: received_errors.append(err),
+        )
+        registry.register(20, time.monotonic(), 0)
+        registry.transition(0, 20, SessionState.REGISTERING, time.monotonic())
+        registry.transition(0, 20, SessionState.PROVISIONING, time.monotonic())
+        registry.transition(0, 20, SessionState.SHARD_READY, time.monotonic())
+
+        validator = ConnectionProtocolValidator(inbound_peer=PeerRole.WORKER)
+        validator.bind(20, 0)
+        validator.set_phase(ConnectionPhase.SHARD_READY)
+
+        server_sock, client_sock = socket.socketpair()
+        try:
+            initial_time = time.monotonic() - 5.0
+            conn = _Connection(
+                sock=server_sock,
+                session_id=20,
+                worker_id=0,
+                validator=validator,
+                assembler=TensorTransferAssembler(
+                    manifest(), max_model_bytes=12, max_tensor_chunk_bytes=8
+                ),
+                sender=LogicalTransferSender(lambda s, f: None),
+                last_seen=initial_time,
+            )
+            server._connections[0] = conn
+
+            def run_reader() -> None:
+                with contextlib.suppress(Exception):
+                    server._read_bound(conn)
+
+            read_thread = threading.Thread(target=run_reader, daemon=True)
+            read_thread.start()
+
+            # Send non-fatal MESSAGE scope ERROR
+            warn_err = Error.from_dict(
+                {
+                    "error_code": "FRAME_IGNORED",
+                    "scope": "MESSAGE",
+                    "severity": "WARNING",
+                    "message": "Ignored duplicate chunk",
+                    "retryable": True,
+                }
+            )
+            frame = build_control_frame(warn_err, session_id=20, worker_id=0)
+            frame.write_to(client_sock, lambda s, b: s.sendall(b))
+
+            deadline = time.monotonic() + 2.0
+            while not received_errors and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            self.assertEqual(len(received_errors), 1)
+            self.assertEqual(received_errors[0].error_code, "FRAME_IGNORED")
+            # Session should NOT be failed, connection still alive
+            self.assertEqual(registry.snapshot()[0].state, SessionState.SHARD_READY)
+            self.assertEqual(conn.validator.phase, ConnectionPhase.SHARD_READY)
+            self.assertIn(0, server._connections)
+            self.assertGreater(server.last_seen(0), initial_time)
+        finally:
+            server_sock.close()
+            client_sock.close()
+
+    def test_runtime_handles_session_and_attempt_scope_fatal_errors(self) -> None:
+        import socket
+
+        from pbl4.protocol.messages import build_control_frame
+        from pbl4.runtime.parameter_server import ParameterServer, _Connection
+        from pbl4.runtime.worker_registry import SessionState, WorkerRegistry
+
+        received_errors: list[Error] = []
+        registry = WorkerRegistry("attempt-err-fatal", 1)
+        server = ParameterServer(
+            "127.0.0.1",
+            0,
+            attempt_id="attempt-err-fatal",
+            job_id="job-err-fatal",
+            expected_workers=1,
+            manifest=manifest(),
+            registry=registry,
+            error_handler=lambda w, s, err: received_errors.append(err),
+        )
+        registry.register(30, time.monotonic(), 0)
+        registry.transition(0, 30, SessionState.REGISTERING, time.monotonic())
+        registry.transition(0, 30, SessionState.PROVISIONING, time.monotonic())
+        registry.transition(0, 30, SessionState.SHARD_READY, time.monotonic())
+
+        validator = ConnectionProtocolValidator(inbound_peer=PeerRole.WORKER)
+        validator.bind(30, 0)
+        validator.set_phase(ConnectionPhase.SHARD_READY)
+
+        server_sock, client_sock = socket.socketpair()
+        try:
+            conn = _Connection(
+                sock=server_sock,
+                session_id=30,
+                worker_id=0,
+                validator=validator,
+                assembler=TensorTransferAssembler(
+                    manifest(), max_model_bytes=12, max_tensor_chunk_bytes=8
+                ),
+                sender=LogicalTransferSender(lambda s, f: None),
+                last_seen=time.monotonic(),
+            )
+            server._connections[0] = conn
+
+            reader_error: list[Exception] = []
+
+            def run_reader() -> None:
+                try:
+                    server._read_bound(conn)
+                except Exception as exc:
+                    reader_error.append(exc)
+
+            read_thread = threading.Thread(target=run_reader, daemon=True)
+            read_thread.start()
+
+            # Send fatal SESSION scope ERROR
+            fatal_err = Error.from_dict(
+                {
+                    "error_code": "CUDA_OOM",
+                    "scope": "SESSION",
+                    "severity": "ERROR",
+                    "message": "Out of GPU memory",
+                    "retryable": False,
+                }
+            )
+            frame = build_control_frame(fatal_err, session_id=30, worker_id=0)
+            frame.write_to(client_sock, lambda s, b: s.sendall(b))
+
+            read_thread.join(timeout=2.0)
+            self.assertEqual(len(received_errors), 1)
+            self.assertEqual(received_errors[0].error_code, "CUDA_OOM")
+            self.assertTrue(reader_error)
+            self.assertIsInstance(reader_error[0], ProtocolError)
+            self.assertIn("Fatal worker error", str(reader_error[0]))
+
+            # Worker session MUST be transitioned to FAILED with failure_code
+            session = registry.snapshot()[0]
+            self.assertEqual(session.state, SessionState.FAILED)
+            self.assertEqual(session.failure_code, "CUDA_OOM")
+            self.assertEqual(conn.validator.phase, ConnectionPhase.CLOSED)
+        finally:
+            server_sock.close()
+            client_sock.close()
+
+    def test_worker_client_handles_fatal_error_from_server(self) -> None:
+        import socket
+
+        from pbl4.protocol.codec import DTPFrame
+        from pbl4.protocol.messages import DtpControlMessage, build_control_frame
+        from pbl4.transport.framed_socket import recv_exact
+        from pbl4.worker.worker_client import WorkerClient
+
+        server_sock, client_sock = socket.socketpair()
+        received_messages: list[DtpControlMessage] = []
+        try:
+            client = WorkerClient(
+                "127.0.0.1",
+                0,
+                node_label="worker-err-test",
+                manifest=manifest(),
+                message_handler=lambda msg, op: received_messages.append(msg),
+            )
+            # Bind fake transport and connection
+            client._transport._sock = client_sock
+            client.session_id = 40
+            client.worker_id = 0
+            client.attempt_id = "attempt-worker-err"
+            client.job_id = "job-worker-err"
+            client.expected_workers = 1
+            client.max_tensor_chunk_bytes = 1024
+            client._validator.bind(40, 0)
+            client._closing.clear()
+            client._reader = threading.Thread(target=client._read_loop, daemon=True)
+            client._reader.start()
+
+            # Test client.send_error
+            client.send_error(
+                Error.from_dict(
+                    {
+                        "error_code": "LOCAL_CRASH",
+                        "scope": "SESSION",
+                        "severity": "CRITICAL",
+                        "message": "Process shutting down",
+                        "retryable": False,
+                    }
+                )
+            )
+            echo_frame = DTPFrame.read_from(
+                server_sock,
+                recv_exact,
+                bound_identity=(40, 0),
+            )
+            self.assertEqual(echo_frame.header.message_type, 0x00FF)
+            decoded = decode_control_message(echo_frame.header.message_type, echo_frame.payload)
+            self.assertEqual(decoded.error_code, "LOCAL_CRASH")
+
+            # Server sends fatal ERROR to worker
+            fatal_err = Error.from_dict(
+                {
+                    "error_code": "ATTEMPT_ABORTED",
+                    "scope": "ATTEMPT",
+                    "severity": "CRITICAL",
+                    "message": "Attempt aborted by runtime",
+                    "retryable": False,
+                }
+            )
+            frame = build_control_frame(fatal_err, session_id=40, worker_id=0)
+            frame.write_to(server_sock, lambda s, b: s.sendall(b))
+
+            client._reader.join(timeout=2.0)
+            self.assertEqual(len(received_messages), 1)
+            self.assertEqual(received_messages[0].error_code, "ATTEMPT_ABORTED")
+            self.assertTrue(client._closing.is_set())
+            self.assertEqual(client._validator.phase, ConnectionPhase.CLOSED)
+        finally:
+            server_sock.close()
+            client_sock.close()
+
+    def test_parameter_server_send_error(self) -> None:
+        import socket
+
+        from pbl4.protocol.codec import DTPFrame
+        from pbl4.runtime.parameter_server import ParameterServer, _Connection
+        from pbl4.runtime.worker_registry import WorkerRegistry
+        from pbl4.transport.framed_socket import recv_exact
+
+        server_sock, client_sock = socket.socketpair()
+        try:
+            registry = WorkerRegistry("attempt-send-err", 1)
+            server = ParameterServer(
+                "127.0.0.1",
+                0,
+                attempt_id="attempt-send-err",
+                job_id="job-send-err",
+                expected_workers=1,
+                manifest=manifest(),
+                registry=registry,
+            )
+            validator = ConnectionProtocolValidator(inbound_peer=PeerRole.WORKER)
+            validator.bind(50, 0)
+            conn = _Connection(
+                sock=server_sock,
+                session_id=50,
+                worker_id=0,
+                validator=validator,
+                assembler=TensorTransferAssembler(
+                    manifest(), max_model_bytes=12, max_tensor_chunk_bytes=8
+                ),
+                sender=LogicalTransferSender(
+                    lambda s, f: f.write_to(s, lambda sk, b: sk.sendall(b))
+                ),
+                last_seen=time.monotonic(),
+            )
+            server._connections[0] = conn
+
+            err = Error.from_dict(
+                {
+                    "error_code": "MANIFEST_MISMATCH",
+                    "scope": "SESSION",
+                    "severity": "ERROR",
+                    "message": "Manifest checksum mismatch",
+                    "retryable": False,
+                }
+            )
+            server.send_error(0, err)
+
+            rec = DTPFrame.read_from(client_sock, recv_exact, bound_identity=(50, 0))
+            self.assertEqual(rec.header.message_type, 0x00FF)
+            msg = decode_control_message(rec.header.message_type, rec.payload)
+            self.assertEqual(msg.error_code, "MANIFEST_MISMATCH")
+            self.assertEqual(msg.scope, "SESSION")
+        finally:
+            server_sock.close()
+            client_sock.close()
 
 
 if __name__ == "__main__":
