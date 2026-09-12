@@ -38,6 +38,8 @@ class BackendSettings(BaseSettings):
     runtime_management_port: int | None = Field(default=None, alias="RUNTIME_MANAGEMENT_PORT")
 
     # ─── Dataset Manager ──────────────────────────────────────────────────────
+    dataset_manager_url: str | None = Field(default=None, alias="DATASET_MANAGER_URL")
+    # Legacy fallback configuration
     dataset_manager_host: str = Field(default="127.0.0.1", alias="DATASET_MANAGER_HOST")
     dataset_manager_port: int | None = Field(default=None, alias="DATASET_MANAGER_PORT")
 
@@ -83,6 +85,13 @@ class BackendSettings(BaseSettings):
 
     @property
     def dataset_manager_base_url(self) -> str | None:
+        """Resolve external Dataset Manager URL.
+
+        Canonical authority: DATASET_MANAGER_URL.
+        Legacy fallback: http://{DATASET_MANAGER_HOST}:{DATASET_MANAGER_PORT}.
+        """
+        if self.dataset_manager_url:
+            return self.dataset_manager_url.rstrip("/")
         if self.dataset_manager_port is None:
             return None
         return f"http://{self.dataset_manager_host}:{self.dataset_manager_port}"

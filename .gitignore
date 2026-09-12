@@ -21,6 +21,7 @@ ENV/
 .coverage
 htmlcov/
 .pytest_cache/
+.pytest-*/
 .mypy_cache/
 .ruff_cache/
 
@@ -50,6 +51,7 @@ checkpoints/
 dataset_store/
 worker_cache/
 /logs/
+artifacts/e2e/
 
 # ─── Local PostgreSQL data ────────────────────────────────
 pgdata/

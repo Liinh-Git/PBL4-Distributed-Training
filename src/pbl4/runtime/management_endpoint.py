@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
+import logging
 import socket
 import threading
 from collections import OrderedDict
@@ -26,6 +27,8 @@ from pbl4.management_protocol.messages import (
 )
 from pbl4.transport.framed_socket import recv_exact, send_all
 from pbl4.transport.tcp_server import TcpServer
+
+logger = logging.getLogger(__name__)
 
 SnapshotProvider = Callable[[], dict[str, object]]
 CommandHandler = Callable[[str, dict[str, object]], dict[str, object]]
@@ -171,8 +174,10 @@ class ManagementEndpoint:
                         waiter.set_result(envelope)
                         continue
                 self._handle_request(envelope)
-        except Exception:
-            pass
+        except TransportError:
+            logger.info("Management client disconnected")
+        except Exception as exc:
+            logger.exception("MCP connection loop error: %s", exc)
         finally:
             should_fail = False
             with self._connection_lock:

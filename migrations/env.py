@@ -53,10 +53,17 @@ def get_canonical_database_url() -> str:
     Normalizes postgresql:// or postgres:// prefix to postgresql+psycopg://
     to ensure SQLAlchemy connects via the installed psycopg (v3) driver.
     """
-    raw_url = os.getenv("DATABASE_URL")
+    raw_url = config.get_main_option("sqlalchemy.url")
     if not raw_url:
-        # Fall back to alembic.ini if provided
-        raw_url = config.get_main_option("sqlalchemy.url")
+        raw_url = os.getenv("DATABASE_URL")
+    if not raw_url:
+        try:
+            from dotenv import load_dotenv
+
+            load_dotenv()
+            raw_url = os.getenv("DATABASE_URL")
+        except ImportError:
+            pass
 
     if not raw_url:
         raise RuntimeError(

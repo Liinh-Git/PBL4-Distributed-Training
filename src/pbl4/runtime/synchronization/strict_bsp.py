@@ -178,10 +178,14 @@ class StrictBSP(SynchronizationPolicy):
     def snapshot(self) -> dict[str, object]:
         with self._lock:
             return {
+                "type": "strict_bsp",
                 "current_step_id": self._operation.step_id if self._operation else None,
                 "expected_workers": self.context.expected_workers,
-                "accepted_workers": tuple(sorted(self._contributions)),
-                "parameter_applied_workers": tuple(sorted(self._acks.arrived)),
+                "expected_contribution_count": self.context.expected_workers,
+                "accepted_workers": sorted(self._contributions),
+                "accepted_contribution_count": len(self._contributions),
+                "parameter_applied_workers": sorted(self._acks.arrived),
+                "parameter_applied_count": len(self._acks.arrived),
                 "synchronization_complete": (
                     not self._failed and not self._closed and self._acks.complete
                 ),

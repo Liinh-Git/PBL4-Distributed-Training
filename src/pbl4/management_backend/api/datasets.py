@@ -301,6 +301,8 @@ def list_builds(
 def get_build(dataset_build_id: str):
     with db.get_connection() as conn:
         row = dataset_service.get_build(conn, dataset_build_id)
+    if row["state"] not in {"READY", "FAILED", "DEPRECATED", "DELETED"}:
+        row = dataset_service.refresh_build_from_dataset_manager(db, dataset_build_id)
     return ItemResponse(data=_build_row_to_detail(row))
 
 

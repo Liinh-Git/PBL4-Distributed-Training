@@ -510,6 +510,8 @@ def get_attempt_snapshot(conn: psycopg.Connection, attempt_id: str) -> dict:
             if key in gateway_snapshot and gateway_snapshot[key] is not None:
                 target_key = "state" if key == "attempt_state" else key
                 snapshot[target_key] = gateway_snapshot[key]
+    if not snapshot.get("strategy_state"):
+        snapshot["strategy_state"] = None
     return snapshot
 
 
@@ -692,6 +694,16 @@ def get_join_spec(conn: psycopg.Connection, attempt_id: str) -> dict | None:
 # ─── 2-Phase Idempotent Command Execution ────────────────────────────────────
 
 
+def _extract_command_payload(cmd_row: dict[str, Any]) -> dict[str, Any]:
+    payload = cmd_row.get("request") or cmd_row.get("request_jsonb") or {}
+    if isinstance(payload, str):
+        try:
+            return json.loads(payload)
+        except Exception:
+            return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def execute_start_job(
     db_module: Any,
     job_id: str,
@@ -743,17 +755,15 @@ def execute_start_job(
             cmd_row = command_repository.get_command(conn, command_id)
             attempt_row = attempt_repository.get_attempt(conn, attempt_id)
             if cmd_row and attempt_row:
-                dispatch_payload = cmd_row.get("request") or {}
-                if isinstance(dispatch_payload, str):
-                    dispatch_payload = json.loads(dispatch_payload)
+                dispatch_payload = _extract_command_payload(cmd_row)
             else:
                 attempt_row, cmd_row = start_job(conn, job_id, note=note)
-                dispatch_payload = cmd_row["request"]
+                dispatch_payload = _extract_command_payload(cmd_row)
                 command_id = str(cmd_row["command_id"])
                 attempt_id = str(attempt_row["attempt_id"])
         else:
             attempt_row, cmd_row = start_job(conn, job_id, note=note)
-            dispatch_payload = cmd_row["request"]
+            dispatch_payload = _extract_command_payload(cmd_row)
             command_id = str(cmd_row["command_id"])
             attempt_id = str(attempt_row["attempt_id"])
 
@@ -855,17 +865,15 @@ def execute_retry_job(
             cmd_row = command_repository.get_command(conn, command_id)
             attempt_row = attempt_repository.get_attempt(conn, attempt_id)
             if cmd_row and attempt_row:
-                dispatch_payload = cmd_row.get("request") or {}
-                if isinstance(dispatch_payload, str):
-                    dispatch_payload = json.loads(dispatch_payload)
+                dispatch_payload = _extract_command_payload(cmd_row)
             else:
                 attempt_row, cmd_row = retry_job(conn, job_id)
-                dispatch_payload = cmd_row["request"]
+                dispatch_payload = _extract_command_payload(cmd_row)
                 command_id = str(cmd_row["command_id"])
                 attempt_id = str(attempt_row["attempt_id"])
         else:
             attempt_row, cmd_row = retry_job(conn, job_id)
-            dispatch_payload = cmd_row["request"]
+            dispatch_payload = _extract_command_payload(cmd_row)
             command_id = str(cmd_row["command_id"])
             attempt_id = str(attempt_row["attempt_id"])
 
@@ -968,17 +976,15 @@ def execute_resume_job(
             cmd_row = command_repository.get_command(conn, command_id)
             attempt_row = attempt_repository.get_attempt(conn, attempt_id)
             if cmd_row and attempt_row:
-                dispatch_payload = cmd_row.get("request") or {}
-                if isinstance(dispatch_payload, str):
-                    dispatch_payload = json.loads(dispatch_payload)
+                dispatch_payload = _extract_command_payload(cmd_row)
             else:
                 attempt_row, cmd_row = resume_job(conn, job_id, checkpoint_id)
-                dispatch_payload = cmd_row["request"]
+                dispatch_payload = _extract_command_payload(cmd_row)
                 command_id = str(cmd_row["command_id"])
                 attempt_id = str(attempt_row["attempt_id"])
         else:
             attempt_row, cmd_row = resume_job(conn, job_id, checkpoint_id)
-            dispatch_payload = cmd_row["request"]
+            dispatch_payload = _extract_command_payload(cmd_row)
             command_id = str(cmd_row["command_id"])
             attempt_id = str(attempt_row["attempt_id"])
 
@@ -1085,7 +1091,7 @@ def execute_abort_attempt(
             command_type="ABORT_ATTEMPT",
             command_id=command_id,
             target_id=attempt_id,
-            payload=cmd_row["request"],
+            payload=_extract_command_payload(cmd_row),
             timeout=5.0,
         )
     except RuntimeUnavailableError:

@@ -177,7 +177,7 @@ def get_attempt(attempt_id: str):
                 observed_at=snap.get("observed_at"),
                 runtime_event_seq=snap.get("runtime_event_seq"),
             ),
-            strategy_state=snap.get("strategy_state"),
+            strategy_state=snap.get("strategy_state") or None,
             failure=failure,
             links=AttemptLinks(
                 job=f"/api/v1/jobs/{row['job_id']}",

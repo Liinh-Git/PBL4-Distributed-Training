@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from pbl4.management_backend.schemas.common import StrictWriteModel
 
@@ -91,6 +91,13 @@ class AttemptDetail(BaseModel):
     started_at: datetime | None = None
     ended_at: datetime | None = None
 
+    @field_validator("strategy_state", mode="before")
+    @classmethod
+    def _normalize_strategy_state(cls, v: object) -> object:
+        if not v:
+            return None
+        return v
+
 
 class AbortAttemptRequest(StrictWriteModel):
     reason: str | None = None
@@ -159,6 +166,13 @@ class AttemptSnapshot(BaseModel):
     stale: bool = True
     observed_at: datetime | None = None
     runtime_event_seq: int | None = None
+
+    @field_validator("strategy_state", mode="before")
+    @classmethod
+    def _normalize_strategy_state(cls, v: object) -> object:
+        if not v:
+            return None
+        return v
 
 
 # ─── Join Spec ───────────────────────────────────────────────────────────────

@@ -1,8 +1,5 @@
 """Worker-local assigned-batch, cache, version, application, and ACK tests."""
 
-import json
-from dataclasses import replace
-
 import numpy as np
 import pytest
 import torch
@@ -11,63 +8,36 @@ from torch.nn import functional as functional
 from pbl4.adapter.base import TensorBundle
 from pbl4.adapter.models.small_cnn import SmallCNN
 from pbl4.adapter.pytorch_adapter import PyTorchAdapter
-from pbl4.dataset_manager.config import DatasetBuildConfig
-from pbl4.dataset_manager.preprocessing import Preprocessor
-from pbl4.dataset_manager.storage import DatasetStorage
 from pbl4.worker.shard_cache import ShardCache, ShardCacheKey
 from pbl4.worker.training_loop import StepAssignment, TrainingLoop
 from pbl4.worker.worker_state import WorkerSessionState, WorkerState
-
-
-def dataset_config(**changes) -> DatasetBuildConfig:
-    base = DatasetBuildConfig(
-        1,
-        "build-worker-test",
-        "cifar10",
-        "CIFAR-10",
-        "CNN_IMAGE_CLASSIFICATION_V1",
-        "image_classification",
-        (3, 2, 2),
-        "float32",
-        10,
-        {
-            "channel_order": "NCHW",
-            "scale": "uint8_to_unit",
-            "mean": [0.5, 0.5, 0.5],
-            "std": [0.5, 0.5, 0.5],
-        },
-        2,
-        2,
-        "seeded_permutation_round_robin",
-        42,
-    )
-    return replace(base, **changes)
+from tests.fixtures.synthetic_dataset import create_synthetic_dataset_artifacts
 
 
 def publish_cache(tmp_path):
-    raw_x = np.arange(8 * 12, dtype=np.uint8).reshape(8, 3, 2, 2)
-    raw_y = np.arange(8, dtype=np.int64)
-    samples = Preprocessor((3, 2, 2), 10, (0.5,) * 3, (0.5,) * 3).transform(raw_x, raw_y)
-    published = DatasetStorage(tmp_path / "dataset").materialize(dataset_config(), samples)
-    root_bytes = published.manifest_path.read_bytes()
-    root = json.loads(root_bytes)
-    reference = root["shards"][0]
-    shard_path = published.directory / reference["relative_shard_manifest_path"]
-    shard_bytes = shard_path.read_bytes()
-    shard = json.loads(shard_bytes)
-    batch_bytes = {
-        entry["relative_filename"]: (published.directory / entry["relative_filename"]).read_bytes()
-        for entry in shard["batches"]
-    }
-    key = ShardCacheKey(published.dataset_build_id, published.dataset_manifest_hash, shard_id=0)
+    data = create_synthetic_dataset_artifacts(
+        tmp_path / "dataset",
+        dataset_build_id="build-worker-test",
+        shard_count=2,
+        batches_per_shard=2,
+        batch_size=2,
+        input_shape=(3, 2, 2),
+    )
+    key = ShardCacheKey(data.dataset_build_id, data.dataset_manifest_hash, shard_id=0)
     cache = ShardCache(tmp_path / "cache")
+    shard_batches = data.shard_batch_bytes[0]
     return (
         cache,
-        cache.publish(key, root_bytes, shard_bytes, batch_bytes),
+        cache.publish(
+            key,
+            data.root_manifest_bytes,
+            data.shard_manifest_bytes[0],
+            shard_batches,
+        ),
         (
-            root_bytes,
-            shard_bytes,
-            batch_bytes,
+            data.root_manifest_bytes,
+            data.shard_manifest_bytes[0],
+            shard_batches,
         ),
     )
 

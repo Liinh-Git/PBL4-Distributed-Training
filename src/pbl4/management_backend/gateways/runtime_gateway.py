@@ -377,6 +377,9 @@ class RuntimeGateway:
                     heartbeat = worker.get("last_heartbeat_at")
                     if isinstance(heartbeat, str):
                         heartbeat = datetime.fromisoformat(heartbeat.replace("Z", "+00:00"))
+                    connected_at = worker.get("connected_at")
+                    if isinstance(connected_at, str):
+                        connected_at = datetime.fromisoformat(connected_at.replace("Z", "+00:00"))
                     updated = worker_session_repository.update_snapshot_projection(
                         conn,
                         session_id=session_id,
@@ -387,9 +390,26 @@ class RuntimeGateway:
                         last_heartbeat_at=heartbeat,
                     )
                     if updated is None:
-                        logger.info(
-                            "Snapshot referenced unknown DTP session %s; preserving DB authority",
-                            session_id,
+                        protocol_version = worker.get("protocol_version")
+                        if type(protocol_version) is not int or not isinstance(
+                            connected_at, datetime
+                        ):
+                            logger.warning(
+                                "Worker snapshot lacks Runtime-owned session metadata; "
+                                "cannot create projection for session %s",
+                                session_id,
+                            )
+                            continue
+                        worker_session_repository.upsert_session(
+                            conn,
+                            session_id=session_id,
+                            attempt_id=attempt_id,
+                            worker_id=worker["worker_id"],
+                            node_label=worker["node_label"],
+                            protocol_version=protocol_version,
+                            state=worker["state"],
+                            connected_at=connected_at,
+                            last_heartbeat_at=heartbeat,
                         )
         except Exception as exc:
             logger.warning("Could not reconcile STATE_SNAPSHOT into PostgreSQL: %s", exc)
@@ -521,6 +541,8 @@ class RuntimeGateway:
                     source_component=source_component,
                     payload=event_payload,
                 )
+                if ingest_result.inserted:
+                    self._project_runtime_event(conn, payload)
             if ingest_result.inserted and attempt_id is not None:
                 with db.get_connection() as conn:
                     self.record_event_seq(attempt_id, seq, conn)
@@ -534,7 +556,121 @@ class RuntimeGateway:
                     payload=event_payload,
                 )
         except Exception as exc:
-            logger.debug("Failed to ingest runtime event: %s", exc)
+            logger.exception("Failed to ingest runtime event: %s", exc)
+
+    @staticmethod
+    def _project_runtime_event(conn: Any, payload: dict[str, Any]) -> None:
+        """Project established Runtime events without putting DB on the training path."""
+        from pbl4.management_backend.repositories import (
+            attempt_repository,
+            checkpoint_repository,
+            step_repository,
+        )
+
+        attempt_id = payload["attempt_id"]
+        event_type = payload["event_type"]
+        details = payload["details"]
+        occurred_at = datetime.fromisoformat(str(payload["occurred_at"]).replace("Z", "+00:00"))
+        if event_type == "attempt.state_changed":
+            state = details.get("state")
+            if isinstance(state, str):
+                attempt_repository.update_attempt_state(
+                    conn,
+                    attempt_id,
+                    state,
+                    started_at=occurred_at if state == "RUNNING" else None,
+                    ended_at=occurred_at if state in {"COMPLETED", "FAILED", "ABORTED"} else None,
+                )
+            return
+        if event_type == "step.started":
+            step_id = int(details["step_id"])
+            step_repository.create_step(
+                conn,
+                attempt_id=attempt_id,
+                step_id=step_id,
+                operation_id=int(details["operation_id"]),
+                training_strategy=str(details["training_strategy"]),
+                epoch=int(details["epoch"]),
+                batch_ordinal=int(details["batch_ordinal"]),
+                input_model_version=int(details["input_model_version"]),
+                started_at=occurred_at,
+            )
+            step_repository.update_step(conn, attempt_id, step_id, state="COLLECTING_GRADIENTS")
+            return
+        if event_type == "model.updated":
+            step_id = int(details["step_id"])
+            for item in details.get("contributions", []):
+                step_repository.upsert_worker_step(
+                    conn,
+                    attempt_id=attempt_id,
+                    step_id=step_id,
+                    worker_id=int(item["worker_id"]),
+                    session_id=int(item["session_id"]),
+                    shard_id=int(item["shard_id"]),
+                    batch_id=int(item["batch_id"]),
+                    sample_count=int(item["sample_count"]),
+                )
+            step_repository.update_step(
+                conn,
+                attempt_id,
+                step_id,
+                state="WAITING_PARAMETER_APPLIED",
+                output_model_version=int(details["output_model_version"]),
+                total_sample_count=int(details["total_sample_count"]),
+                update_completed_at=occurred_at,
+            )
+            return
+        if event_type == "checkpoint.started":
+            cursor = details["recovery_cursor"]
+            checkpoint_repository.create_checkpoint(
+                conn,
+                checkpoint_id=str(details["checkpoint_id"]),
+                created_by_attempt_id=attempt_id,
+                source_operation_id=int(details["source_operation_id"]),
+                source_step_id=int(details["source_step_id"]),
+                model_version=int(details["model_version"]),
+                recovery_cursor_jsonb=cursor,
+                epoch=int(cursor["epoch"]),
+                next_batch_ordinal=int(cursor["next_batch_ordinal"]),
+                contract_hash=str(details["contract_hash"]),
+                dataset_build_id=str(details["dataset_build_id"]),
+                dataset_manifest_hash=str(details["dataset_manifest_hash"]),
+                parameter_manifest_hash=str(details["parameter_manifest_hash"]),
+                checkpoint_policy=str(details["checkpoint_policy"]),
+                checkpoint_policy_version=int(details["checkpoint_policy_version"]),
+                created_at=datetime.fromisoformat(
+                    str(details["created_at"]).replace("Z", "+00:00")
+                ),
+            )
+            step_repository.update_step(
+                conn,
+                attempt_id,
+                int(details["source_step_id"]),
+                state="CHECKPOINTING",
+                synchronization_completed_at=occurred_at,
+            )
+            return
+        if event_type == "checkpoint.saved":
+            checkpoint_repository.complete_checkpoint(
+                conn,
+                str(details["checkpoint_id"]),
+                model_path=str(details["model_path"]),
+                metadata_path=str(details["metadata_path"]),
+                model_sha256=str(details["model_sha256"]),
+                metadata_sha256=str(details["metadata_sha256"]),
+                completed_at=datetime.fromisoformat(
+                    str(details["checkpoint_completed_at"]).replace("Z", "+00:00")
+                ),
+            )
+            step_repository.update_step(
+                conn,
+                attempt_id,
+                int(details["source_step_id"]),
+                state="COMMITTED",
+                committed_at=datetime.fromisoformat(
+                    str(details["committed_at"]).replace("Z", "+00:00")
+                ),
+            )
 
     # ─── Outbound Bounded Command Dispatch ────────────────────────────────────
 
