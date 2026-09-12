@@ -1,55 +1,69 @@
-import { api } from './client';
-import type {
-  DatasetItem,
-  DatasetBuildListItem,
-  ListResponse,
-} from '../domain/types';
+/**
+ * Datasets API Service
+ *
+ * Source of Truth: API_contract.md (4.0, 5.0, 6.0)
+ */
 
-export const datasetsApi = {
-  list: (params?: { task_type?: string; limit?: number; cursor?: string }) => {
-    const qs = new URLSearchParams();
-    if (params?.task_type) qs.set('task_type', params.task_type);
-    if (params?.limit) qs.set('limit', String(params.limit));
-    if (params?.cursor) qs.set('cursor', params.cursor);
-    return api.get<ListResponse<DatasetItem>>(`/datasets?${qs}`);
-  },
+import { apiClient, ApiClient, RequestOptions } from './client';
+import {
+  ApiResponse,
+  DatasetDetailData,
+  DatasetItemData,
+  DatasetSourceV1,
+  PaginatedResponse,
+} from '../types/api';
 
-  get: (datasetId: string) => api.getItem<DatasetItem>(`/datasets/${datasetId}`),
+export interface ListDatasetsParams {
+  task_type?: string;
+  q?: string;
+  cursor?: string | null;
+  limit?: number;
+}
 
-  create: (body: { name: string; task_type: 'image_classification'; source_type: 'builtin'; source_reference: 'cifar10' }, idempotencyKey: string) =>
-    api.postItem<DatasetItem>('/datasets', body, { idempotencyKey }),
+export class DatasetsService {
+  constructor(private readonly client: ApiClient = apiClient) {}
 
-  builds: (params?: { dataset_id?: string; state?: string; limit?: number; cursor?: string }) => {
-    const qs = new URLSearchParams();
-    if (params?.dataset_id) qs.set('dataset_id', params.dataset_id);
-    if (params?.state) qs.set('state', params.state);
-    if (params?.limit) qs.set('limit', String(params.limit));
-    if (params?.cursor) qs.set('cursor', params.cursor);
-    return api.get<ListResponse<DatasetBuildListItem>>(`/dataset-builds?${qs}`);
-  },
+  /**
+   * 4.0 POST /api/v1/datasets — Create a logical dataset source
+   */
+  async createDataset(
+    data: DatasetSourceV1,
+    options?: RequestOptions
+  ): Promise<ApiResponse<DatasetDetailData>> {
+    return this.client.post<ApiResponse<DatasetDetailData>, DatasetSourceV1>(
+      '/api/v1/datasets',
+      data,
+      options
+    );
+  }
 
-  getBuild: (buildId: string) => api.getItem<DatasetBuildListItem>(`/dataset-builds/${buildId}`),
+  /**
+   * 5.0 GET /api/v1/datasets — List catalog datasets with cursor pagination
+   */
+  async listDatasets(
+    params?: ListDatasetsParams,
+    options?: RequestOptions
+  ): Promise<PaginatedResponse<DatasetItemData>> {
+    return this.client.getPaginated<DatasetItemData>('/api/v1/datasets', {
+      ...options,
+      params: {
+        task_type: params?.task_type,
+        q: params?.q,
+        cursor: params?.cursor,
+        limit: params?.limit,
+      },
+    });
+  }
 
-  createBuild: (
-    body: {
-      dataset_id: string;
-      profile: string;
-      batch_size?: number;
-      partition_seed?: number;
-      preprocessing?: Record<string, unknown>;
-    },
-    idempotencyKey: string,
-  ) => api.postItem<DatasetBuildListItem>('/dataset-builds', body, { idempotencyKey }),
+  /**
+   * 6.0 GET /api/v1/datasets/{dataset_id} — Get dataset details and build counts
+   */
+  async getDataset(
+    datasetId: string,
+    options?: RequestOptions
+  ): Promise<ApiResponse<DatasetDetailData>> {
+    return this.client.get<DatasetDetailData>(`/api/v1/datasets/${encodeURIComponent(datasetId)}`, options);
+  }
+}
 
-  rebuildBuild: (
-    buildId: string,
-    idempotencyKey: string,
-    body?: { batch_size?: number; partition_seed?: number; preprocessing?: Record<string, unknown> },
-  ) => api.postItem(`/dataset-builds/${buildId}/rebuild`, body, { idempotencyKey }),
-
-  deprecateBuild: (buildId: string, idempotencyKey: string, reason?: string) =>
-    api.postItem(`/dataset-builds/${buildId}/deprecate`, reason ? { reason } : undefined, { idempotencyKey }),
-
-  deleteBuild: (buildId: string, idempotencyKey: string, reason?: string) =>
-    api.postItem(`/dataset-builds/${buildId}/delete`, reason ? { reason } : undefined, { idempotencyKey }),
-};
+export const datasetsService = new DatasetsService();
