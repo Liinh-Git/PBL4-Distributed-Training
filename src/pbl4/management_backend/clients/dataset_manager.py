@@ -148,7 +148,7 @@ class DatasetManagerClient:
     def __init__(
         self,
         base_url: str | None = None,
-        timeout: float = 5.0,
+        timeout: float = 30.0,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/") if base_url else None
@@ -440,7 +440,11 @@ def get_client() -> DatasetManagerClient:
     return _client
 
 
-def init_client(base_url: str | None) -> DatasetManagerClient:
+def init_client(
+    base_url: str | None,
+    timeout: float = 30.0,
+    transport: httpx.BaseTransport | None = None,
+) -> DatasetManagerClient:
     global _client
-    _client = DatasetManagerClient(base_url=base_url)
+    _client = DatasetManagerClient(base_url=base_url, timeout=timeout, transport=transport)
     return _client

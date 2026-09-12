@@ -88,7 +88,10 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Initialize Dataset Manager client
     from pbl4.management_backend.clients.dataset_manager import init_client
 
-    init_client(settings.dataset_manager_base_url)
+    init_client(
+        base_url=settings.dataset_manager_base_url,
+        timeout=settings.dataset_manager_timeout_seconds,
+    )
 
     logger.info("Management Backend started on %s:%d", settings.backend_host, settings.backend_port)
     yield
