@@ -243,6 +243,36 @@ class MessageSchemaTest(unittest.TestCase):
                     decode_control_message(cls.MESSAGE_TYPE, message.to_bytes()), message
                 )
 
+    def test_error_is_fatal_semantics(self) -> None:
+        def make_error(scope: str, severity: str) -> Error:
+            return Error.from_dict(
+                {
+                    "error_code": "TEST_ERR",
+                    "scope": scope,
+                    "severity": severity,
+                    "message": "test message",
+                    "retryable": False,
+                }
+            )
+
+        # MESSAGE scope errors are non-fatal regardless of severity
+        self.assertFalse(make_error("MESSAGE", "INFO").is_fatal)
+        self.assertFalse(make_error("MESSAGE", "WARNING").is_fatal)
+        self.assertFalse(make_error("MESSAGE", "ERROR").is_fatal)
+        self.assertFalse(make_error("MESSAGE", "CRITICAL").is_fatal)
+
+        # SESSION scope errors: non-fatal for INFO/WARNING, fatal for ERROR/CRITICAL
+        self.assertFalse(make_error("SESSION", "INFO").is_fatal)
+        self.assertFalse(make_error("SESSION", "WARNING").is_fatal)
+        self.assertTrue(make_error("SESSION", "ERROR").is_fatal)
+        self.assertTrue(make_error("SESSION", "CRITICAL").is_fatal)
+
+        # ATTEMPT scope errors: non-fatal for INFO/WARNING, fatal for ERROR/CRITICAL
+        self.assertFalse(make_error("ATTEMPT", "INFO").is_fatal)
+        self.assertFalse(make_error("ATTEMPT", "WARNING").is_fatal)
+        self.assertTrue(make_error("ATTEMPT", "ERROR").is_fatal)
+        self.assertTrue(make_error("ATTEMPT", "CRITICAL").is_fatal)
+
     def test_every_control_message_rejects_missing_wrong_and_unknown_fields(self) -> None:
         for cls, data in payloads():
             first = next(iter(data))
@@ -946,6 +976,54 @@ class RuntimeSeamTest(unittest.TestCase):
             self.assertEqual(conn.validator.phase, ConnectionPhase.SHARD_READY)
             self.assertIn(0, server._connections)
             self.assertGreater(server.last_seen(0), initial_time)
+
+            # Send non-fatal MESSAGE scope with ERROR severity
+            msg_err = Error.from_dict(
+                {
+                    "error_code": "CORRUPT_PAYLOAD",
+                    "scope": "MESSAGE",
+                    "severity": "ERROR",
+                    "message": "Corrupt payload dropped",
+                    "retryable": True,
+                }
+            )
+            frame2 = build_control_frame(msg_err, session_id=20, worker_id=0)
+            frame2.write_to(client_sock, lambda s, b: s.sendall(b))
+
+            deadline = time.monotonic() + 2.0
+            while len(received_errors) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            self.assertEqual(len(received_errors), 2)
+            self.assertEqual(received_errors[1].error_code, "CORRUPT_PAYLOAD")
+            # Session must remain SHARD_READY, not failed
+            self.assertEqual(registry.snapshot()[0].state, SessionState.SHARD_READY)
+            self.assertEqual(conn.validator.phase, ConnectionPhase.SHARD_READY)
+            self.assertIn(0, server._connections)
+
+            # Send non-fatal SESSION scope with WARNING severity
+            sess_warn = Error.from_dict(
+                {
+                    "error_code": "HEARTBEAT_DELAY",
+                    "scope": "SESSION",
+                    "severity": "WARNING",
+                    "message": "Heartbeat slightly delayed",
+                    "retryable": True,
+                }
+            )
+            frame3 = build_control_frame(sess_warn, session_id=20, worker_id=0)
+            frame3.write_to(client_sock, lambda s, b: s.sendall(b))
+
+            deadline = time.monotonic() + 2.0
+            while len(received_errors) < 3 and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            self.assertEqual(len(received_errors), 3)
+            self.assertEqual(received_errors[2].error_code, "HEARTBEAT_DELAY")
+            # Session must remain SHARD_READY, not failed
+            self.assertEqual(registry.snapshot()[0].state, SessionState.SHARD_READY)
+            self.assertEqual(conn.validator.phase, ConnectionPhase.SHARD_READY)
+            self.assertIn(0, server._connections)
         finally:
             server_sock.close()
             client_sock.close()
@@ -1085,6 +1163,48 @@ class RuntimeSeamTest(unittest.TestCase):
             decoded = decode_control_message(echo_frame.header.message_type, echo_frame.payload)
             self.assertEqual(decoded.error_code, "LOCAL_CRASH")
 
+            # Server sends non-fatal MESSAGE scope ERROR to worker
+            non_fatal_msg = Error.from_dict(
+                {
+                    "error_code": "STALE_STEP_METRIC",
+                    "scope": "MESSAGE",
+                    "severity": "ERROR",
+                    "message": "Metric frame dropped",
+                    "retryable": True,
+                }
+            )
+            frame_nf = build_control_frame(non_fatal_msg, session_id=40, worker_id=0)
+            frame_nf.write_to(server_sock, lambda s, b: s.sendall(b))
+
+            deadline = time.monotonic() + 2.0
+            while not received_messages and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            self.assertEqual(len(received_messages), 1)
+            self.assertEqual(received_messages[0].error_code, "STALE_STEP_METRIC")
+            self.assertFalse(client._closing.is_set())
+
+            # Server sends non-fatal SESSION scope WARNING to worker
+            non_fatal_sess = Error.from_dict(
+                {
+                    "error_code": "RESOURCE_PRESSURE",
+                    "scope": "SESSION",
+                    "severity": "WARNING",
+                    "message": "Runtime under memory pressure",
+                    "retryable": True,
+                }
+            )
+            frame_nf2 = build_control_frame(non_fatal_sess, session_id=40, worker_id=0)
+            frame_nf2.write_to(server_sock, lambda s, b: s.sendall(b))
+
+            deadline = time.monotonic() + 2.0
+            while len(received_messages) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            self.assertEqual(len(received_messages), 2)
+            self.assertEqual(received_messages[1].error_code, "RESOURCE_PRESSURE")
+            self.assertFalse(client._closing.is_set())
+
             # Server sends fatal ERROR to worker
             fatal_err = Error.from_dict(
                 {
@@ -1099,8 +1219,8 @@ class RuntimeSeamTest(unittest.TestCase):
             frame.write_to(server_sock, lambda s, b: s.sendall(b))
 
             client._reader.join(timeout=2.0)
-            self.assertEqual(len(received_messages), 1)
-            self.assertEqual(received_messages[0].error_code, "ATTEMPT_ABORTED")
+            self.assertEqual(len(received_messages), 3)
+            self.assertEqual(received_messages[2].error_code, "ATTEMPT_ABORTED")
             self.assertTrue(client._closing.is_set())
             self.assertEqual(client._validator.phase, ConnectionPhase.CLOSED)
         finally:

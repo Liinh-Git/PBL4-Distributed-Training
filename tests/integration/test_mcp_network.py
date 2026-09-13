@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from datetime import UTC, datetime
 
 from pbl4.management_backend.gateways.mcp_port import RealMcpClientPort
@@ -191,6 +192,9 @@ def test_mcp_congestion_send_timeout_disconnects() -> None:
         McpCodec.write_message(client_sock, send_all, hello)
         ack = McpCodec.read_message(client_sock, recv_exact)
         assert ack.message_type == "MGMT_HELLO_ACK"
+        deadline = time.monotonic() + 1.0
+        while not endpoint.backend_connected and time.monotonic() < deadline:
+            time.sleep(0.01)
         assert endpoint.backend_connected
 
         disconnected = False
@@ -224,4 +228,136 @@ def test_mcp_congestion_send_timeout_disconnects() -> None:
         assert endpoint.backend_connected
         new_client.disconnect()
     finally:
+        endpoint.stop()
+
+
+def test_real_mcp_disconnect_reconnect_command_idempotency() -> None:
+    handler_called = 0
+    handler_started = threading.Event()
+    allow_finish = threading.Event()
+
+    def snapshot() -> dict[str, object]:
+        return {
+            "runtime_instance_id": "runtime-idemp-test",
+            "active_job_id": None,
+            "active_attempt_id": None,
+            "attempt_state": None,
+            "training_strategy": None,
+            "checkpoint_policy": None,
+            "epoch": None,
+            "current_operation_id": None,
+            "current_batch_ordinal": None,
+            "model_version": None,
+            "workers": [],
+            "strategy_state": {},
+            "checkpoint_state": None,
+            "latest_checkpoint_id": None,
+            "recovery_cursor": {},
+            "dataset_build_id": None,
+            "dataset_manifest_hash": None,
+            "last_runtime_event_seq": 0,
+            "management_event_gap_count": 0,
+            "captured_at": datetime.now(UTC).isoformat(),
+        }
+
+    def slow_command_handler(kind: str, payload: dict[str, object]) -> dict[str, object]:
+        nonlocal handler_called
+        handler_called += 1
+        handler_started.set()
+        allow_finish.wait(timeout=5.0)
+        return {
+            "command_id": payload["command_id"],
+            "target_type": "ATTEMPT",
+            "target_id": payload["attempt_id"],
+            "status": "ACCEPTED",
+            "result_code": "COMMAND_ACCEPTED",
+            "message": "Original execution completed",
+            "attempt_id": payload["attempt_id"],
+        }
+
+    endpoint = ManagementEndpoint(
+        "127.0.0.1",
+        0,
+        runtime_instance_id="runtime-idemp-test",
+        snapshot_provider=snapshot,
+        command_handler=slow_command_handler,
+    )
+    endpoint.start()
+    try:
+        host, port_number = endpoint.bound_address or ("", 0)
+
+        # 1. Backend connects and sends command A
+        client1 = RealMcpClientPort(host, port_number, timeout=2.0)
+        assert client1.connect()
+
+        start_payload = StartAttempt.from_dict(
+            {
+                "command_id": "cmd-real-reconnect",
+                "job_id": "job-1",
+                "attempt_id": "attempt-1",
+                "execution_mode": "FRESH",
+                "resolved_contract": {},
+                "contract_hash": "contract-1",
+                "resume_from_checkpoint_id": None,
+                "requested_at": datetime.now(UTC).isoformat(),
+            }
+        ).to_dict()
+
+        assert client1.send_command(
+            "START_ATTEMPT", "cmd-real-reconnect", "attempt-1", start_payload
+        )
+
+        # 2. Runtime starts slow command handler
+        assert handler_started.wait(timeout=2.0)
+        assert handler_called == 1
+
+        # 3. MCP socket disconnects while handler is running
+        client1.disconnect()
+
+        # 4. Backend reconnects
+        client2 = RealMcpClientPort(host, port_number, timeout=2.0)
+        assert client2.connect()
+
+        results_received: list[dict] = []
+        result_event = threading.Event()
+
+        def inbound2(kind: str, payload: dict) -> None:
+            if kind == "COMMAND_RESULT":
+                results_received.append(payload)
+                result_event.set()
+
+        client2.set_message_handler(inbound2)
+
+        # 5. Backend retries command A while original execution is still in-flight
+        assert client2.send_command(
+            "START_ATTEMPT", "cmd-real-reconnect", "attempt-1", start_payload
+        )
+
+        # 6. Allow original execution to complete
+        allow_finish.set()
+
+        # 7. Backend receives COMMAND_RESULT of original execution
+        assert result_event.wait(timeout=3.0)
+        assert len(results_received) == 1
+        assert results_received[0]["command_id"] == "cmd-real-reconnect"
+        assert results_received[0]["status"] == "ACCEPTED"
+        assert results_received[0]["message"] == "Original execution completed"
+
+        # 8. Handler was called exactly once!
+        assert handler_called == 1
+
+        # 9. Additional retry returns cached result without re-execution
+        result_event.clear()
+        results_received.clear()
+        assert client2.send_command(
+            "START_ATTEMPT", "cmd-real-reconnect", "attempt-1", start_payload
+        )
+        assert result_event.wait(timeout=2.0)
+        assert len(results_received) == 1
+        assert results_received[0]["message"] == "Original execution completed"
+        assert handler_called == 1
+
+        client2.disconnect()
+    finally:
+        allow_finish.set()
         endpoint.stop()

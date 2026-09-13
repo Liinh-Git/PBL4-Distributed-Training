@@ -62,6 +62,8 @@ def recv_exact(sock: socket.socket, n: int) -> bytes:
             ) from exc
         except ConnectionError as exc:
             raise TransportError(f"Connection error while reading: {exc}") from exc
+        except OSError as exc:
+            raise TransportError(f"Socket error while reading: {exc}") from exc
         if not chunk:
             raise TransportError(
                 f"Peer closed the connection after {len(chunks)} of {n} expected bytes"
@@ -88,8 +90,10 @@ def send_all(sock: socket.socket, data: bytes, timeout: float | None = None) -> 
                 raise TransportError(f"Timed out after sending {sent} of {total} bytes")
             try:
                 ready_w = select.select([], [sock], [], max(0.0, remaining))[1]
-            except OSError as exc:
+            except ConnectionError as exc:
                 raise TransportError(f"Connection error while waiting to send: {exc}") from exc
+            except OSError as exc:
+                raise TransportError(f"Socket error while waiting to send: {exc}") from exc
             if not ready_w:
                 raise TransportError(f"Timed out after sending {sent} of {total} bytes")
         try:
@@ -98,6 +102,8 @@ def send_all(sock: socket.socket, data: bytes, timeout: float | None = None) -> 
             raise TransportError(f"Timed out after sending {sent} of {total} bytes") from exc
         except ConnectionError as exc:
             raise TransportError(f"Connection error while sending: {exc}") from exc
+        except OSError as exc:
+            raise TransportError(f"Socket error while sending: {exc}") from exc
         if sent_now <= 0:
             raise TransportError(f"Socket reported an empty send after {sent} of {total} bytes")
         sent += sent_now

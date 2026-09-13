@@ -355,10 +355,7 @@ class WorkerClient:
                 elif isinstance(message, Error):
                     if self._message_handler is not None:
                         self._message_handler(message, frame.header.operation_id)
-                    if message.scope in {"SESSION", "ATTEMPT"} or message.severity in {
-                        "ERROR",
-                        "CRITICAL",
-                    }:
+                    if message.is_fatal:
                         self._closing.set()
                         self._validator.set_phase(ConnectionPhase.CLOSED)
                         raise TransportError(

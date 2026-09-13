@@ -341,10 +341,7 @@ class ParameterServer:
                 assert isinstance(message, Error)
                 if self._error_handler is not None:
                     self._error_handler(connection.worker_id, connection.session_id, message)
-                if message.scope in {"SESSION", "ATTEMPT"} or message.severity in {
-                    "ERROR",
-                    "CRITICAL",
-                }:
+                if message.is_fatal:
                     now = time.monotonic()
                     with contextlib.suppress(ValueError):
                         self.registry.transition(
