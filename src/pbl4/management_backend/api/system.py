@@ -6,6 +6,7 @@ GET /api/v1/system/capabilities
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 from fastapi import APIRouter
@@ -20,6 +21,8 @@ from pbl4.management_backend.schemas.runtime import (
     HealthResponse,
 )
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(tags=["System"])
 
 
@@ -33,7 +36,11 @@ def health() -> ItemResponse[HealthResponse]:
     db_ok = db.check_health()
     gateway = get_gateway()
     dm_client = get_dm_client()
-    dm_status = dm_client.check_health() if hasattr(dm_client, "check_health") else "unknown"
+    try:
+        dm_status = dm_client.check_health() if hasattr(dm_client, "check_health") else "unknown"
+    except Exception as exc:
+        logger.warning("Dataset Manager health probe failed with unexpected error: %s", exc)
+        dm_status = "unreachable"
 
     return ItemResponse(
         data=HealthResponse(
