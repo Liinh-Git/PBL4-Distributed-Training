@@ -59,6 +59,13 @@ def test_capabilities_ok(client):
     assert data["api_version"] == "v1"
     assert "strict_bsp" in data["supported_training_strategies"]
     assert data["runtime_connected"] is False
+    assert data["supported_models"] == [
+        {
+            "model_id": "resnet18_groupnorm",
+            "display_name": "ResNet-18 (GroupNorm)",
+            "task_type": "image_classification",
+        }
+    ]
 
 
 def test_runtime_snapshot_ok(client):

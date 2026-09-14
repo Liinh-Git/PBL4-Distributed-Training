@@ -53,6 +53,7 @@ from pbl4.management_backend.schemas.runtime import (
     FeatureFlags,
     HealthResponse,
     RuntimeSnapshot,
+    SupportedModel,
 )
 from pbl4.management_backend.schemas.step import StepDetail, StepListItem
 
@@ -103,6 +104,7 @@ __all__ = [
     "StartAttemptResponse",
     "StepDetail",
     "StepListItem",
+    "SupportedModel",
     "WorkerDetail",
     "WorkerSessionItem",
 ]
