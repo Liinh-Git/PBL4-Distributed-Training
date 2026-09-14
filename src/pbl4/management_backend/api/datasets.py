@@ -83,7 +83,7 @@ def _build_row_to_detail(row: dict) -> DatasetBuildDetail:
 
 @router.post(
     "/api/v1/datasets",
-    response_model=ItemResponse[DatasetDetail],
+    response_model=ItemResponse[DatasetItem],
     status_code=status.HTTP_201_CREATED,
     summary="Create a dataset source",
 )
@@ -118,11 +118,7 @@ def create_dataset(
             cached_body = cached_record.get("response_body_jsonb") or {}
             if isinstance(cached_body, str):
                 cached_body = json.loads(cached_body)
-            d_id = cached_body.get("dataset_id")
-            if d_id:
-                detail = dataset_service.get_dataset(conn, d_id)
-                return ItemResponse(data=DatasetDetail(**detail))
-            return ItemResponse(data=DatasetDetail(**cached_body))
+            return ItemResponse(data=DatasetItem(**cached_body))
 
         row = dataset_service.create_dataset(
             conn,
@@ -131,25 +127,23 @@ def create_dataset(
             source_type=body.source_type,
             source_reference=body.source_reference,
         )
-        detail = dataset_service.get_dataset(conn, row["dataset_id"])
-        res_detail = DatasetDetail(
-            dataset_id=detail["dataset_id"],
-            name=detail["name"],
-            task_type=detail["task_type"],
-            source_type=detail["source_type"],
-            source_reference=detail["source_reference"],
-            created_at=detail["created_at"],
-            build_counts=detail["build_counts"],
+        res_item = DatasetItem(
+            dataset_id=row["dataset_id"],
+            name=row["name"],
+            task_type=row["task_type"],
+            source_type=row["source_type"],
+            source_reference=row["source_reference"],
+            created_at=row["created_at"],
         )
         idempotency.complete_record(
             conn,
             endpoint_semantic_scope="DATASET_CREATE",
             idempotency_key=idempotency_key,
             response_status_code=201,
-            response_body=res_detail.model_dump(mode="json"),
+            response_body=res_item.model_dump(mode="json"),
             resource_id=row["dataset_id"],
         )
-        return ItemResponse(data=res_detail)
+        return ItemResponse(data=res_item)
 
 
 @router.get(

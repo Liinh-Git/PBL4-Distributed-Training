@@ -679,7 +679,7 @@ def get_join_spec(conn: psycopg.Connection, attempt_id: str) -> dict | None:
 
     return {
         "ps_host": settings.runtime_host,
-        "ps_port": settings.runtime_dtp_port,
+        "ps_port": int(getattr(settings, "runtime_dtp_port", getattr(settings, "runtime_port", 9000))),
         "job_id": attempt["job_id"],
         "attempt_id": attempt_id,
         "contract_hash": attempt["contract_hash"],
