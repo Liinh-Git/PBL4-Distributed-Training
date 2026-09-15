@@ -27,6 +27,7 @@ LIFECYCLE INVARIANTS:
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import uuid
@@ -91,6 +92,54 @@ DatasetBuildInUseError = DatasetBuildReferenceError
 
 class DatasetManifestVerificationError(Exception):
     pass
+
+
+class InvalidCursorError(ValueError):
+    """Raised when pagination cursor is malformed or invalid."""
+
+    pass
+
+
+def encode_cursor(created_at: datetime, resource_id: str) -> str:
+    """Encode pagination state into an opaque URL-safe base64 string.
+
+    Canonical contract format: base64-encoded JSON {"created_at": "...", "id": "..."}
+    """
+    payload = {
+        "created_at": created_at.isoformat(),
+        "id": resource_id,
+    }
+    raw_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw_bytes).decode("ascii").rstrip("=")
+
+
+def decode_cursor(cursor_str: str) -> tuple[datetime, str]:
+    """Decode and validate an opaque base64 JSON pagination cursor.
+
+    Raises InvalidCursorError if decoding fails or fields are invalid.
+    """
+    if not cursor_str or not isinstance(cursor_str, str):
+        raise InvalidCursorError("Pagination cursor cannot be empty.")
+
+    try:
+        padded = cursor_str + "=" * (-len(cursor_str) % 4)
+        raw_json = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+        data = json.loads(raw_json)
+        if not isinstance(data, dict):
+            raise InvalidCursorError("Pagination cursor payload must be a JSON object.")
+        if "created_at" not in data or "id" not in data:
+            raise InvalidCursorError("Pagination cursor must contain 'created_at' and 'id'.")
+
+        ts_str = str(data["created_at"]).replace(" ", "+")
+        dt = datetime.fromisoformat(ts_str)
+        resource_id = str(data["id"]).strip()
+        if not resource_id:
+            raise InvalidCursorError("Pagination cursor 'id' cannot be empty.")
+        return dt, resource_id
+    except Exception as exc:
+        if isinstance(exc, InvalidCursorError):
+            raise
+        raise InvalidCursorError(f"Invalid pagination cursor: {exc}") from exc
 
 
 def _new_dataset_id() -> str:
@@ -161,8 +210,17 @@ def list_datasets(
     limit: int = 50,
     cursor: str | None = None,
 ) -> list[dict]:
+    cursor_dt: datetime | None = None
+    cursor_id: str | None = None
+    if cursor:
+        cursor_dt, cursor_id = decode_cursor(cursor)
     return dataset_repository.list_datasets(
-        conn, task_type=task_type, q=q, limit=limit, cursor=cursor
+        conn,
+        task_type=task_type,
+        q=q,
+        limit=limit,
+        cursor_dt=cursor_dt,
+        cursor_id=cursor_id,
     )
 
 

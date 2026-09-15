@@ -157,9 +157,18 @@ def list_datasets(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     cursor: Annotated[str | None, Query()] = None,
 ):
-    with db.get_connection() as conn:
-        rows = dataset_service.list_datasets(
-            conn, task_type=task_type, q=q, limit=limit + 1, cursor=cursor
+    try:
+        with db.get_connection() as conn:
+            rows = dataset_service.list_datasets(
+                conn, task_type=task_type, q=q, limit=limit + 1, cursor=cursor
+            )
+    except dataset_service.InvalidCursorError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "INVALID_CURSOR",
+                "message": str(exc),
+            },
         )
     has_more = len(rows) > limit
     items = [
@@ -176,7 +185,7 @@ def list_datasets(
     next_cursor = None
     if has_more:
         last = rows[limit - 1]
-        next_cursor = f"{last['created_at'].isoformat()}|{last['dataset_id']}"
+        next_cursor = dataset_service.encode_cursor(last["created_at"], last["dataset_id"])
     return ListResponse(data=items, page=PageInfo(next_cursor=next_cursor))
 
 

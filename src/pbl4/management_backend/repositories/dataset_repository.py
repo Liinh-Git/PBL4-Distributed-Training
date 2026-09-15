@@ -53,7 +53,8 @@ def list_datasets(
     task_type: str | None = None,
     q: str | None = None,
     limit: int = 50,
-    cursor: str | None = None,
+    cursor_dt: datetime | None = None,
+    cursor_id: str | None = None,
 ) -> list[dict]:
     """List datasets with optional filters and cursor pagination.
 
@@ -71,13 +72,9 @@ def list_datasets(
         like = f"%{q}%"
         params.extend([like, like])
 
-    if cursor:
-        try:
-            ts_str, did = cursor.split("|", 1)
-            conditions.append("(created_at, dataset_id) < (%s::timestamptz, %s)")
-            params.extend([ts_str, did])
-        except ValueError:
-            pass
+    if cursor_dt is not None and cursor_id is not None:
+        conditions.append("(created_at, dataset_id) < (%s, %s)")
+        params.extend([cursor_dt, cursor_id])
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(limit)
