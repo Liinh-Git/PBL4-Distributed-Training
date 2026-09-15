@@ -23,10 +23,10 @@ from __future__ import annotations
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Header, HTTPException, Query, status
+from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 
 from pbl4.management_backend import db
-from pbl4.management_backend.schemas.common import ItemResponse, ListResponse, PageInfo
+from pbl4.management_backend.schemas.common import ItemResponse, ListResponse, Meta, PageInfo
 from pbl4.management_backend.schemas.dataset import (
     BuildCommandResponse,
     BuildReference,
@@ -41,6 +41,7 @@ from pbl4.management_backend.schemas.dataset import (
     DatasetDetail,
     DatasetItem,
     ManifestSummary,
+    RebuildCommandResponse,
 )
 from pbl4.management_backend.services import dataset_service, idempotency
 
@@ -330,12 +331,13 @@ def get_build(dataset_build_id: str):
 
 @router.post(
     "/api/v1/dataset-builds/{dataset_build_id}/rebuild",
-    response_model=ItemResponse[BuildCommandResponse],
+    response_model=ItemResponse[RebuildCommandResponse],
     status_code=status.HTTP_202_ACCEPTED,
     summary="Rebuild a dataset build",
 )
 def rebuild_build(
     dataset_build_id: str,
+    request: Request,
     body: DatasetBuildRebuildRequest | None = None,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ):
@@ -353,21 +355,25 @@ def rebuild_build(
         dataset_build_id,
         batch_size=req.batch_size,
         partition_seed=req.partition_seed,
-        preprocessing=req.preprocessing.model_dump() if req.preprocessing else None,
+        preprocessing=(
+            req.preprocessing.model_dump(exclude_none=True) if req.preprocessing else None
+        ),
         idempotency_key=idempotency_key,
     )
+    req_id = getattr(request.state, "request_id", None) or request.headers.get("X-Request-ID")
+    meta = Meta(request_id=req_id) if req_id else Meta()
     return ItemResponse(
-        data=BuildCommandResponse(
+        data=RebuildCommandResponse(
             command_id=str(cmd_row["command_id"]),
             command_type=cmd_row.get("command_type", "REBUILD_DATASET_BUILD"),
             command_state=cmd_row["state"],
             target_type=cmd_row.get("target_type", "DATASET_BUILD"),
             target_id=str(cmd_row.get("target_id") or new_build["dataset_build_id"]),
-            dataset_build_id=new_build["dataset_build_id"],
             dataset_build_state=new_build["state"],
             source_dataset_build_id=dataset_build_id,
             new_dataset_build_id=new_build["dataset_build_id"],
-        )
+        ),
+        meta=meta,
     )
 
 

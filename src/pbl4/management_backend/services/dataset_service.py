@@ -564,11 +564,26 @@ def execute_rebuild_build(
         if isinstance(src_input_shape, str):
             src_input_shape = json.loads(src_input_shape)
 
-        merged_preprocessing = {**src_preprocessing, **(preprocessing or {})}
+        override_preprocessing = preprocessing or {}
+        merged_preprocessing = dict(src_preprocessing)
+        for k, v in override_preprocessing.items():
+            if v is not None:
+                merged_preprocessing[k] = v
+
         new_batch_size = batch_size or source["batch_size"]
         new_seed = partition_seed if partition_seed is not None else source["partition_seed"]
-        input_shape = merged_preprocessing.get("input_shape", src_input_shape)
-        normalization = merged_preprocessing.get("normalization", {})
+        override_input_shape = override_preprocessing.get("input_shape")
+        input_shape = override_input_shape if override_input_shape is not None else src_input_shape
+        override_norm = override_preprocessing.get("normalization")
+        normalization = (
+            override_norm
+            if override_norm is not None
+            else src_preprocessing.get("normalization", {})
+        )
+        if input_shape is not None:
+            merged_preprocessing["input_shape"] = input_shape
+        if normalization:
+            merged_preprocessing["normalization"] = normalization
 
         if action == "RESUME" and cached_record and cached_record.get("command_id"):
             command_id = str(cached_record["command_id"])
@@ -683,7 +698,7 @@ def execute_rebuild_build(
                 dataset_id=source["dataset_id"],
                 profile=source["profile"],
                 batch_size=new_batch_size,
-                shard_count=3,
+                shard_count=dm_resp.get("shard_count") or source["shard_count"],
                 partition_seed=new_seed,
                 sample_count=None,
                 input_shape_json=input_shape,

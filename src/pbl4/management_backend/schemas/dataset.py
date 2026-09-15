@@ -149,3 +149,14 @@ class BuildCommandResponse(BaseModel):
     dataset_build_state: str
     source_dataset_build_id: str | None = None
     new_dataset_build_id: str | None = None
+
+
+class RebuildCommandResponse(BaseModel):
+    command_id: str
+    command_type: str
+    command_state: str
+    target_type: str
+    target_id: str
+    dataset_build_state: str
+    source_dataset_build_id: str
+    new_dataset_build_id: str
