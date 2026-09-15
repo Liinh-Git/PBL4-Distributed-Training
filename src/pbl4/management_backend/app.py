@@ -20,6 +20,8 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+import psycopg
+import psycopg_pool
 
 from pbl4.management_backend.clients.dataset_manager import (
     DatasetManagerBusinessError,
@@ -322,6 +324,24 @@ def create_app() -> FastAPI:
             str(exc),
             request,
             command_id=exc.command_id,
+        )
+
+    @app.exception_handler(psycopg.OperationalError)
+    @app.exception_handler(psycopg_pool.PoolTimeout)
+    async def database_operational_error_handler(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
+        logger.error(
+            "Database operational error processing %s: %s",
+            request.url.path,
+            exc,
+            exc_info=True,
+        )
+        return _error_response(
+            503,
+            "DATABASE_UNAVAILABLE",
+            "Database is currently unavailable. Please retry later.",
+            request,
         )
 
     @app.exception_handler(JobFrozenError)

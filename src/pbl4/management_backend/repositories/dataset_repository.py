@@ -9,6 +9,8 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 
+from pbl4.management_backend.repositories.dataset_build_repository import DATASET_BUILD_STATES
+
 logger = logging.getLogger(__name__)
 
 
@@ -93,21 +95,6 @@ def list_datasets(
 
 def get_build_counts_for_dataset(conn: psycopg.Connection, dataset_id: str) -> dict:
     """Return a count per state for all dataset builds of the given dataset."""
-    all_states = [
-        "CREATED",
-        "QUEUED",
-        "IMPORTING",
-        "VALIDATING",
-        "PREPROCESSING",
-        "MATERIALIZING",
-        "VERIFYING",
-        "REGISTERING",
-        "READY",
-        "FAILED",
-        "DEPRECATED",
-        "DELETING",
-        "DELETED",
-    ]
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -119,8 +106,15 @@ def get_build_counts_for_dataset(conn: psycopg.Connection, dataset_id: str) -> d
         )
         rows = cur.fetchall()
 
-    counts = {s: 0 for s in all_states}
+    counts = {s: 0 for s in DATASET_BUILD_STATES}
     for state, cnt in rows:
         if state in counts:
             counts[state] = int(cnt)
+        else:
+            logger.warning(
+                "Unrecognized dataset build state '%s' (count=%s) for dataset '%s'",
+                state,
+                cnt,
+                dataset_id,
+            )
     return counts

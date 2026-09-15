@@ -12,7 +12,7 @@ from psycopg.rows import dict_row
 
 logger = logging.getLogger(__name__)
 
-DATASET_BUILD_STATES = {
+DATASET_BUILD_STATES: tuple[str, ...] = (
     "CREATED",
     "QUEUED",
     "IMPORTING",
@@ -26,7 +26,7 @@ DATASET_BUILD_STATES = {
     "DEPRECATED",
     "DELETING",
     "DELETED",
-}
+)
 
 # States from which a build is "selectable" for a new job
 SELECTABLE_STATES = {"READY"}
