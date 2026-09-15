@@ -111,7 +111,8 @@ def list_builds(
     state: str | None = None,
     profile: str | None = None,
     limit: int = 50,
-    cursor: str | None = None,
+    cursor_dt: datetime | None = None,
+    cursor_id: str | None = None,
 ) -> list[dict]:
     conditions = []
     params: list[Any] = []
@@ -126,13 +127,9 @@ def list_builds(
         conditions.append("profile = %s")
         params.append(profile)
 
-    if cursor:
-        try:
-            ts_str, bid = cursor.split("|", 1)
-            conditions.append("(created_at, dataset_build_id) < (%s::timestamptz, %s)")
-            params.extend([ts_str, bid])
-        except ValueError:
-            pass
+    if cursor_dt is not None and cursor_id is not None:
+        conditions.append("(created_at, dataset_build_id) < (%s, %s)")
+        params.extend([cursor_dt, cursor_id])
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(limit)

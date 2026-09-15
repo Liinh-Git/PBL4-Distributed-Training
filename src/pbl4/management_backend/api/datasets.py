@@ -169,7 +169,7 @@ def list_datasets(
                 "code": "INVALID_CURSOR",
                 "message": str(exc),
             },
-        )
+        ) from exc
     has_more = len(rows) > limit
     items = [
         DatasetItem(
@@ -265,15 +265,24 @@ def list_builds(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     cursor: Annotated[str | None, Query()] = None,
 ):
-    with db.get_connection() as conn:
-        rows = dataset_service.list_builds(
-            conn,
-            dataset_id=dataset_id,
-            state=state,
-            profile=profile,
-            limit=limit + 1,
-            cursor=cursor,
-        )
+    try:
+        with db.get_connection() as conn:
+            rows = dataset_service.list_builds(
+                conn,
+                dataset_id=dataset_id,
+                state=state,
+                profile=profile,
+                limit=limit + 1,
+                cursor=cursor,
+            )
+    except dataset_service.InvalidCursorError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "INVALID_CURSOR",
+                "message": str(exc),
+            },
+        ) from exc
     has_more = len(rows) > limit
     items = [
         DatasetBuildListItem(
@@ -292,7 +301,7 @@ def list_builds(
     next_cursor = None
     if has_more:
         last = rows[limit - 1]
-        next_cursor = f"{last['created_at'].isoformat()}|{last['dataset_build_id']}"
+        next_cursor = dataset_service.encode_cursor(last["created_at"], last["dataset_build_id"])
     return ListResponse(data=items, page=PageInfo(next_cursor=next_cursor))
 
 

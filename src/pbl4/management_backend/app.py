@@ -16,12 +16,12 @@ from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
+import psycopg
+import psycopg_pool
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-import psycopg
-import psycopg_pool
 
 from pbl4.management_backend.clients.dataset_manager import (
     DatasetManagerBusinessError,
@@ -328,9 +328,7 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(psycopg.OperationalError)
     @app.exception_handler(psycopg_pool.PoolTimeout)
-    async def database_operational_error_handler(
-        request: Request, exc: Exception
-    ) -> JSONResponse:
+    async def database_operational_error_handler(request: Request, exc: Exception) -> JSONResponse:
         logger.error(
             "Database operational error processing %s: %s",
             request.url.path,
@@ -342,6 +340,17 @@ def create_app() -> FastAPI:
             "DATABASE_UNAVAILABLE",
             "Database is currently unavailable. Please retry later.",
             request,
+        )
+
+    @app.exception_handler(psycopg.DataError)
+    async def database_data_error_handler(request: Request, exc: psycopg.DataError) -> JSONResponse:
+        logger.warning("Database data error processing %s: %s", request.url.path, exc)
+        return _error_response(
+            400,
+            "BAD_REQUEST",
+            "Invalid input data format encountered during database operation.",
+            request,
+            details={"db_error": str(exc)},
         )
 
     @app.exception_handler(JobFrozenError)
