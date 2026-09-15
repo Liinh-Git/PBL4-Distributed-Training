@@ -248,6 +248,11 @@ def get_build(conn: psycopg.Connection, dataset_build_id: str) -> dict:
     return row
 
 
+def get_build_references(conn: psycopg.Connection, dataset_build_id: str) -> list[dict]:
+    """Return job/checkpoint references for a given build."""
+    return dataset_build_repository.get_references(conn, dataset_build_id)
+
+
 def list_builds(
     conn: psycopg.Connection,
     *,
@@ -1149,15 +1154,28 @@ def refresh_build_from_dataset_manager(db_module: Any, dataset_build_id: str) ->
         if current is None:
             raise DatasetBuildNotFoundError(f"Dataset build '{dataset_build_id}' not found.")
         if current["state"] in {"READY", "FAILED", "DEPRECATED", "DELETED"}:
-            return current
-        updated = dataset_build_repository.update_build_state(
-            conn,
-            dataset_build_id,
-            state,
-            sample_count=dm_status.get("sample_count"),
-            shard_count=dm_status.get("shard_count"),
-        )
-    return updated or current
+            base_row = current
+        else:
+            updated = dataset_build_repository.update_build_state(
+                conn,
+                dataset_build_id,
+                state,
+                sample_count=dm_status.get("sample_count"),
+                shard_count=dm_status.get("shard_count"),
+            )
+            base_row = updated or current
+
+    result = dict(base_row)
+    stage = dm_status.get("current_stage") or dm_status.get("stage")
+    progress = dm_status.get("progress")
+    if stage is not None:
+        result["current_stage"] = stage
+    if progress is not None:
+        result["progress"] = progress
+    error_msg = dm_status.get("error") or dm_status.get("error_message") or dm_status.get("message")
+    if error_msg is not None:
+        result["error"] = error_msg
+    return result
 
 
 # ─── Backward compatibility wrappers for direct connection callers ───────────

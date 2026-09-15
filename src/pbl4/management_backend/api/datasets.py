@@ -29,6 +29,7 @@ from pbl4.management_backend import db
 from pbl4.management_backend.schemas.common import ItemResponse, ListResponse, PageInfo
 from pbl4.management_backend.schemas.dataset import (
     BuildCommandResponse,
+    BuildReference,
     DatasetBuildCreateRequest,
     DatasetBuildDeleteRequest,
     DatasetBuildDeprecateRequest,
@@ -47,7 +48,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Datasets"])
 
 
-def _build_row_to_detail(row: dict) -> DatasetBuildDetail:
+def _build_row_to_detail(
+    row: dict,
+    references: list[dict] | list[BuildReference] | None = None,
+) -> DatasetBuildDetail:
     manifest_uri = row.get("manifest_uri") or ""
     hash_val = row.get("dataset_manifest_hash") or ""
     artifact_url = row.get("artifact_base_url") or ""
@@ -60,6 +64,10 @@ def _build_row_to_detail(row: dict) -> DatasetBuildDetail:
         if hash_val
         else None
     )
+    ref_list = [
+        r if isinstance(r, BuildReference) else BuildReference(**r)
+        for r in (references if references is not None else row.get("references") or [])
+    ]
     return DatasetBuildDetail(
         dataset_build_id=row["dataset_build_id"],
         dataset_id=row["dataset_id"],
@@ -72,7 +80,8 @@ def _build_row_to_detail(row: dict) -> DatasetBuildDetail:
         partition_seed=row["partition_seed"],
         sample_count=row["sample_count"],
         manifest_summary=manifest_summary,
-        references=[],
+        references=ref_list,
+        error=row.get("error") or row.get("error_message"),
         created_at=row["created_at"],
         ready_at=row.get("ready_at"),
     )
@@ -313,9 +322,10 @@ def list_builds(
 def get_build(dataset_build_id: str):
     with db.get_connection() as conn:
         row = dataset_service.get_build(conn, dataset_build_id)
+        references = dataset_service.get_build_references(conn, dataset_build_id)
     if row["state"] not in {"READY", "FAILED", "DEPRECATED", "DELETED"}:
         row = dataset_service.refresh_build_from_dataset_manager(db, dataset_build_id)
-    return ItemResponse(data=_build_row_to_detail(row))
+    return ItemResponse(data=_build_row_to_detail(row, references=references))
 
 
 @router.post(
