@@ -416,7 +416,14 @@ def create_app() -> FastAPI:
     async def build_reference_handler(
         request: Request, exc: DatasetBuildReferenceError
     ) -> JSONResponse:
-        return _error_response(409, "DATASET_BUILD_IN_USE", str(exc), request)
+        details = {"references": exc.references} if exc.references else None
+        return _error_response(
+            409,
+            "DATASET_BUILD_IN_USE",
+            str(exc),
+            request,
+            details=details,
+        )
 
     @app.exception_handler(IdempotencyConflictError)
     async def idempotency_conflict_handler(

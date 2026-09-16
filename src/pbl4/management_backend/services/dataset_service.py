@@ -86,6 +86,14 @@ class DatasetBuildStateError(Exception):
 class DatasetBuildReferenceError(Exception):
     code = "DATASET_BUILD_IN_USE"
 
+    def __init__(
+        self,
+        msg: str,
+        references: list[dict[str, Any]] | None = None,
+    ) -> None:
+        super().__init__(msg)
+        self.references = references or []
+
 
 DatasetBuildInUseError = DatasetBuildReferenceError
 
@@ -905,7 +913,8 @@ def execute_delete_build(
         if refs:
             raise DatasetBuildReferenceError(
                 f"Build '{dataset_build_id}' is referenced by {len(refs)} "
-                f"resource(s) (jobs/checkpoints): {refs}."
+                f"resource(s) (jobs/checkpoints).",
+                references=refs,
             )
 
         if action == "RESUME" and cached_record and cached_record.get("command_id"):
