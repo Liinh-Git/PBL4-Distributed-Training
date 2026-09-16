@@ -64,3 +64,6 @@ postgres-data/
 *.tmp
 *.bak
 *.log
+
+# ─── Reports / Local ─────────────────────────────────────
+report.md

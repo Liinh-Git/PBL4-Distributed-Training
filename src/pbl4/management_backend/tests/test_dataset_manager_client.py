@@ -373,3 +373,206 @@ def test_public_dm_409_is_not_503():
     body = json.loads(resp.body)
     assert body["error"]["code"] == "SOURCE_NOT_REACQUIRABLE"
     assert body["error"]["code"] != "DATASET_MANAGER_UNAVAILABLE"
+
+
+# ─── Configurable Timeout & Idempotency Tests ────────────────────────────────
+
+
+def test_backend_settings_dataset_manager_timeout():
+    """BackendSettings has default dataset_manager_timeout_seconds configured."""
+    from pbl4.management_backend.config import BackendSettings
+
+    settings = BackendSettings()
+    assert settings.dataset_manager_timeout_seconds == 30.0
+
+
+def test_init_client_wires_timeout_from_settings():
+    """init_client receives timeout from settings and configures DatasetManagerClient."""
+    from pbl4.management_backend.clients.dataset_manager import get_client, init_client
+
+    client = init_client(base_url="http://127.0.0.1:9200", timeout=45.0)
+    assert client._timeout == 45.0
+    assert get_client()._timeout == 45.0
+    assert client.available is True
+
+
+def test_create_build_slow_dataset_manager_within_configured_timeout():
+    """create_build succeeds with slow Dataset Manager within configured timeout."""
+    import time
+    from pbl4.management_backend.clients.dataset_manager import DatasetManagerClient
+
+    def slow_handler(request: httpx.Request) -> httpx.Response:
+        time.sleep(0.05)
+        return httpx.Response(
+            202,
+            json={"request_id": "req-slow", "data": {"dataset_build_id": "build-slow", "state": "CREATED"}, "error": None},
+        )
+
+    client = DatasetManagerClient(
+        base_url="http://mock-dm:8001",
+        timeout=30.0,
+        transport=httpx.MockTransport(slow_handler),
+    )
+    result = client.create_build(
+        command_id="cmd-slow",
+        idempotency_key="key-slow",
+        source={"type": "cifar10_download", "dataset_name": "cifar10"},
+        profile="CNN_IMAGE_CLASSIFICATION_V1",
+        input_shape=[3, 32, 32],
+        normalization={"mean": [0.5, 0.5, 0.5], "std": [0.5, 0.5, 0.5]},
+        batch_size=128,
+        partition_seed=42,
+    )
+    assert result["dataset_build_id"] == "build-slow"
+    assert result["state"] == "CREATED"
+
+
+def test_create_build_timeout_enforcement_raises_unavailable():
+    """create_build truthful failure when transport times out."""
+    from pbl4.management_backend.clients.dataset_manager import (
+        DatasetManagerClient,
+        DatasetManagerUnavailableError,
+    )
+
+    def timeout_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("The read operation timed out")
+
+    client = DatasetManagerClient(
+        base_url="http://mock-dm:8001",
+        timeout=30.0,
+        transport=httpx.MockTransport(timeout_handler),
+    )
+    with pytest.raises(DatasetManagerUnavailableError, match="timed out"):
+        client.create_build(
+            command_id="cmd-to",
+            idempotency_key="key-to",
+            source={"type": "cifar10_download", "dataset_name": "cifar10"},
+            profile="CNN_IMAGE_CLASSIFICATION_V1",
+            input_shape=[3, 32, 32],
+            normalization={"mean": [0.5, 0.5, 0.5], "std": [0.5, 0.5, 0.5]},
+            batch_size=128,
+            partition_seed=42,
+        )
+
+
+def test_idempotency_timeout_and_retry_flow_preserves_command_and_single_build(monkeypatch):
+    """Verify canonical 2-phase idempotency: timeout keeps command PENDING; retry reuses command_id."""
+    from pbl4.management_backend.clients.dataset_manager import (
+        DatasetManagerUnavailableError,
+    )
+    import pbl4.management_backend.services.dataset_service as ds_mod
+
+    created_commands = []
+    updated_command_states = []
+    completed_idempotencies = []
+    dispatched_failures = []
+    persisted_builds = []
+
+    # Mock repositories
+    fake_conn = object()
+
+    class FakeDB:
+        @staticmethod
+        def transaction():
+            from contextlib import nullcontext
+            return nullcontext(fake_conn)
+
+    # Idempotency state
+    idemp_state = {"action": "NEW", "cached_record": None}
+
+    def mock_acquire(*args, **kwargs):
+        return idemp_state["cached_record"], idemp_state["action"]
+
+    def mock_dispatch_failure(conn, endpoint_semantic_scope, idempotency_key, command_id):
+        dispatched_failures.append({"idempotency_key": idempotency_key, "command_id": command_id})
+        # After dispatch failure, next attempt will RESUME
+        idemp_state["action"] = "RESUME"
+        idemp_state["cached_record"] = {"command_id": command_id, "status": "DISPATCH_FAILED"}
+
+    def mock_complete(conn, **kwargs):
+        completed_idempotencies.append(kwargs)
+
+    def mock_get_dataset(conn, dataset_id):
+        return {"source_type": "builtin", "source_reference": "cifar10"}
+
+    def mock_create_command(conn, command_id, **kwargs):
+        created_commands.append({"command_id": command_id, **kwargs})
+        return {"command_id": command_id, "state": "PENDING"}
+
+    def mock_get_command(conn, command_id):
+        return {"command_id": command_id, "state": "PENDING"}
+
+    def mock_update_command_state(conn, command_id, new_state, **kwargs):
+        updated_command_states.append({"command_id": command_id, "state": new_state, **kwargs})
+        return {"command_id": command_id, "state": new_state}
+
+    def mock_create_build(conn, dataset_build_id, **kwargs):
+        persisted_builds.append({"dataset_build_id": dataset_build_id, **kwargs})
+        return {"dataset_build_id": dataset_build_id}
+
+    def mock_get_build(conn, dataset_build_id):
+        for b in persisted_builds:
+            if b["dataset_build_id"] == dataset_build_id:
+                return b
+        return None
+
+    monkeypatch.setattr(ds_mod.idempotency, "acquire_or_get_record", mock_acquire)
+    monkeypatch.setattr(ds_mod.idempotency, "record_dispatch_failure", mock_dispatch_failure)
+    monkeypatch.setattr(ds_mod.idempotency, "complete_record", mock_complete)
+    monkeypatch.setattr(ds_mod.dataset_repository, "get_dataset", mock_get_dataset)
+    monkeypatch.setattr(ds_mod.command_repository, "create_command", mock_create_command)
+    monkeypatch.setattr(ds_mod.command_repository, "get_command", mock_get_command)
+    monkeypatch.setattr(ds_mod.command_repository, "update_command_state", mock_update_command_state)
+    monkeypatch.setattr(ds_mod.dataset_build_repository, "create_build", mock_create_build)
+    monkeypatch.setattr(ds_mod.dataset_build_repository, "get_build", mock_get_build)
+
+    call_count = 0
+
+    def mock_dm_create_build(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise DatasetManagerUnavailableError("The read operation timed out")
+        return {"dataset_build_id": "build-authoritative-999", "state": "CREATED"}
+
+    mock_client = MagicMock()
+    mock_client.create_build.side_effect = mock_dm_create_build
+    monkeypatch.setattr(ds_mod, "get_client", lambda: mock_client)
+
+    # 1. First attempt: times out
+    with pytest.raises(DatasetManagerUnavailableError, match="timed out"):
+        ds_mod.execute_create_build(
+            FakeDB,
+            dataset_id="ds_test",
+            profile="CNN_IMAGE_CLASSIFICATION_V1",
+            batch_size=256,
+            partition_seed=2026,
+            idempotency_key="idemp-canonical-1",
+        )
+
+    assert len(created_commands) == 1
+    first_cmd_id = created_commands[0]["command_id"]
+    assert len(dispatched_failures) == 1
+    assert dispatched_failures[0]["command_id"] == first_cmd_id
+    assert len(persisted_builds) == 0  # No build created yet
+
+    # 2. Second attempt: same idempotency key and same body
+    build_row, cmd_row = ds_mod.execute_create_build(
+        FakeDB,
+        dataset_id="ds_test",
+        profile="CNN_IMAGE_CLASSIFICATION_V1",
+        batch_size=256,
+        partition_seed=2026,
+        idempotency_key="idemp-canonical-1",
+    )
+
+    # Must reuse the same command_id!
+    assert len(created_commands) == 1  # No new command created
+    assert len(persisted_builds) == 1  # Exactly ONE build created
+    assert persisted_builds[0]["dataset_build_id"] == "build-authoritative-999"
+    assert updated_command_states[0]["target_id"] == "build-authoritative-999"
+    assert completed_idempotencies[0]["command_id"] == first_cmd_id
+    assert len(updated_command_states) == 1
+    assert updated_command_states[0]["command_id"] == first_cmd_id
+    assert updated_command_states[0]["state"] == "ACCEPTED"
+    assert len(completed_idempotencies) == 1

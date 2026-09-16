@@ -7,6 +7,7 @@ import contextlib
 import logging
 import socket
 import threading
+from collections import OrderedDict
 from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -14,11 +15,13 @@ from uuid import uuid4
 from pbl4.common.errors import ProtocolError, TransportError
 from pbl4.management_protocol.codec import McpCodec
 from pbl4.management_protocol.messages import (
+    PAYLOAD_TYPES,
     CommandResult,
     CorrelationTracker,
     DatasetBuildResolved,
     McpEnvelope,
     McpError,
+    McpPayload,
     MgmtHelloAck,
     ResolveDatasetBuild,
     RuntimeEvent,
@@ -30,7 +33,7 @@ from pbl4.transport.tcp_server import TcpServer
 logger = logging.getLogger(__name__)
 
 SnapshotProvider = Callable[[], dict[str, object]]
-CommandHandler = Callable[[str, dict[str, object]], dict[str, object]]
+CommandHandler = Callable[[str, dict[str, object]], dict[str, object] | CommandResult | McpPayload]
 
 
 def _inactive_snapshot(runtime_instance_id: str) -> dict[str, object]:
@@ -70,6 +73,7 @@ class ManagementEndpoint:
         snapshot_provider: SnapshotProvider | None = None,
         command_handler: CommandHandler | None = None,
         request_timeout: float = 5.0,
+        send_timeout: float | None = None,
     ) -> None:
         self.runtime_instance_id = runtime_instance_id or f"runtime-{uuid4()}"
         self._boot_time = datetime.now(UTC).isoformat()
@@ -78,6 +82,7 @@ class ManagementEndpoint:
         )
         self._command_handler = command_handler
         self._request_timeout = request_timeout
+        self.send_timeout = send_timeout if send_timeout is not None else request_timeout
         self._server = TcpServer(host, port, self._serve_connection)
         self._connection_lock = threading.Lock()
         self._send_lock = threading.Lock()
@@ -86,6 +91,10 @@ class ManagementEndpoint:
         self._backend_connected = threading.Event()
         self._tracker = CorrelationTracker()
         self._waiters: dict[str, concurrent.futures.Future[McpEnvelope]] = {}
+        self._command_lock = threading.Lock()
+        self._command_results: OrderedDict[str, dict[str, object]] = OrderedDict()
+        self._in_flight_commands: dict[str, concurrent.futures.Future[dict[str, object]]] = {}
+        self._max_cached_commands = 1024
 
     @property
     def bound_address(self) -> tuple[str, int] | None:
@@ -99,9 +108,22 @@ class ManagementEndpoint:
         self._server.start()
 
     def stop(self) -> None:
-        self._backend_connected.clear()
+        self._disconnect_socket(reason="MCP endpoint stopped")
         self._server.stop()
-        self._fail_waiters("MCP endpoint stopped")
+
+    def _disconnect_socket(self, sock: socket.socket | None = None, reason: str = "") -> None:
+        with self._connection_lock:
+            target = self._sock
+            if sock is not None and target is not sock:
+                return
+            self._sock = None
+            self._backend_connected.clear()
+        if target is not None:
+            with contextlib.suppress(OSError):
+                target.shutdown(socket.SHUT_RDWR)
+            with contextlib.suppress(OSError):
+                target.close()
+        self._fail_waiters(reason or "Management Backend disconnected")
 
     def _envelope(
         self,
@@ -119,13 +141,27 @@ class ManagementEndpoint:
             payload=payload,
         )
 
-    def _write(self, envelope: McpEnvelope) -> None:
+    def _write_to_socket(self, sock: socket.socket, envelope: McpEnvelope) -> None:
+        with self._send_lock:
+            try:
+                McpCodec.write_message(
+                    sock,
+                    lambda s, d: send_all(s, d, timeout=self.send_timeout),
+                    envelope,
+                )
+            except TransportError as exc:
+                self._disconnect_socket(sock, f"Write error: {exc}")
+                raise
+
+    def _write(self, envelope: McpEnvelope, expected_sock: socket.socket | None = None) -> None:
         with self._connection_lock:
             sock = self._sock
         if sock is None:
             raise TransportError("Management Backend is disconnected")
-        with self._send_lock:
-            McpCodec.write_message(sock, send_all, envelope)
+        if expected_sock is not None and sock is not expected_sock:
+            raise TransportError("Target socket is no longer the active connection")
+        target = expected_sock if expected_sock is not None else sock
+        self._write_to_socket(target, envelope)
 
     def _serve_connection(self, sock: socket.socket, _address: tuple[str, int]) -> None:
         with self._connection_lock:
@@ -145,19 +181,22 @@ class ManagementEndpoint:
                     if waiter is not None and not waiter.done():
                         waiter.set_result(envelope)
                         continue
-                self._handle_request(envelope)
+                self._handle_request(envelope, sock)
         except TransportError:
             logger.info("Management client disconnected")
         except Exception as exc:
             logger.exception("MCP connection loop error: %s", exc)
         finally:
+            should_fail = False
             with self._connection_lock:
                 if self._sock is sock:
                     self._sock = None
                     self._backend_connected.clear()
-            self._fail_waiters("Management Backend disconnected")
+                    should_fail = True
+            if should_fail:
+                self._fail_waiters("Management Backend disconnected")
 
-    def _handle_request(self, request: McpEnvelope) -> None:
+    def _handle_request(self, request: McpEnvelope, sock: socket.socket | None = None) -> None:
         if request.message_type == "MGMT_HELLO":
             snapshot = StateSnapshot.from_dict(self._snapshot_provider()).to_dict()
             ack = MgmtHelloAck.from_dict(
@@ -173,7 +212,8 @@ class ManagementEndpoint:
                 }
             )
             self._write(
-                self._envelope("MGMT_HELLO_ACK", ack.to_dict(), correlation_id=request.message_id)
+                self._envelope("MGMT_HELLO_ACK", ack.to_dict(), correlation_id=request.message_id),
+                expected_sock=sock,
             )
             self._backend_connected.set()
             return
@@ -184,42 +224,157 @@ class ManagementEndpoint:
             self._write(
                 self._envelope(
                     "STATE_SNAPSHOT", snapshot.to_dict(), correlation_id=request.message_id
-                )
+                ),
+                expected_sock=sock,
             )
             return
         if request.message_type in {"START_ATTEMPT", "ABORT_ATTEMPT", "REQUEST_CHECKPOINT"}:
             threading.Thread(
                 target=self._serve_command,
-                args=(request,),
+                args=(request, sock),
                 name="pbl4-mcp-command",
                 daemon=True,
             ).start()
             return
         raise ProtocolError(f"Unsupported Backend request {request.message_type}")
 
-    def _serve_command(self, request: McpEnvelope) -> None:
-        payload = request.payload.to_dict()
-        try:
-            if self._command_handler is None:
-                result = {
-                    "command_id": payload["command_id"],
-                    "target_type": "ATTEMPT",
-                    "target_id": payload["attempt_id"],
-                    "status": "REJECTED",
-                    "result_code": "RUNTIME_NOT_COMPOSED",
-                    "message": "Runtime command handler is not configured.",
-                    "attempt_id": payload["attempt_id"],
-                }
+    def _serve_command(self, request: McpEnvelope, sock: socket.socket | None = None) -> None:
+        request_sock = sock
+
+        def safe_write_response(resp: McpEnvelope) -> None:
+            if request_sock is not None:
+                with self._connection_lock:
+                    if self._sock is not request_sock:
+                        return
+                with contextlib.suppress(Exception):
+                    self._write_to_socket(request_sock, resp)
             else:
-                result = self._command_handler(request.message_type, payload)
-            canonical = CommandResult.from_dict(result)
+                with contextlib.suppress(Exception):
+                    self._write(resp)
+
+        payload_cls = PAYLOAD_TYPES.get(request.message_type)
+        if payload_cls is None:
+            response = self._error_response(
+                request.message_id,
+                "UNSUPPORTED_COMMAND",
+                f"Unsupported command {request.message_type}",
+            )
+            safe_write_response(response)
+            return
+
+        try:
+            if isinstance(request.payload, payload_cls):
+                canonical_payload = request.payload
+            elif isinstance(request.payload, McpPayload):
+                canonical_payload = payload_cls.from_dict(request.payload.to_dict())
+            elif isinstance(request.payload, dict):
+                canonical_payload = payload_cls.from_dict(request.payload)
+            else:
+                raise ProtocolError("MCP command payload must be a dict or McpPayload")
+        except Exception as exc:
+            response = self._error_response(
+                request.message_id, "MALFORMED_COMMAND_PAYLOAD", str(exc)
+            )
+            safe_write_response(response)
+            return
+
+        command_id = getattr(canonical_payload, "command_id", None)
+        if not isinstance(command_id, str) or not command_id:
+            response = self._error_response(
+                request.message_id, "INVALID_COMMAND_ID", "command_id is missing or empty"
+            )
+            safe_write_response(response)
+            return
+
+        payload_dict = canonical_payload.to_dict()
+        attempt_id = str(payload_dict.get("attempt_id") or "")
+        target_id = attempt_id
+
+        with self._command_lock:
+            if command_id in self._command_results:
+                cached_result = self._command_results[command_id]
+                canonical = CommandResult.from_dict(cached_result)
+                response = self._envelope(
+                    "COMMAND_RESULT", canonical.to_dict(), correlation_id=request.message_id
+                )
+                safe_write_response(response)
+                return
+
+            if command_id in self._in_flight_commands:
+                future = self._in_flight_commands[command_id]
+                in_flight = None
+            else:
+                future = None
+                in_flight = concurrent.futures.Future()
+                self._in_flight_commands[command_id] = in_flight
+
+        if future is not None:
+            try:
+                result = future.result()
+                canonical = CommandResult.from_dict(result)
+            except Exception as exc:
+                failed_result = {
+                    "command_id": command_id,
+                    "target_type": "ATTEMPT",
+                    "target_id": target_id,
+                    "status": "FAILED",
+                    "result_code": "COMMAND_FAILED",
+                    "message": str(exc) or type(exc).__name__,
+                    "attempt_id": attempt_id,
+                }
+                canonical = CommandResult.from_dict(failed_result)
             response = self._envelope(
                 "COMMAND_RESULT", canonical.to_dict(), correlation_id=request.message_id
             )
+            safe_write_response(response)
+            return
+
+        try:
+            if self._command_handler is None:
+                result = {
+                    "command_id": command_id,
+                    "target_type": "ATTEMPT",
+                    "target_id": target_id,
+                    "status": "REJECTED",
+                    "result_code": "RUNTIME_NOT_COMPOSED",
+                    "message": "Runtime command handler is not configured.",
+                    "attempt_id": attempt_id,
+                }
+            else:
+                result = self._command_handler(request.message_type, payload_dict)
+            if isinstance(result, CommandResult):
+                canonical = result
+            elif isinstance(result, McpPayload):
+                canonical = CommandResult.from_dict(result.to_dict())
+            else:
+                canonical = CommandResult.from_dict(result)
         except Exception as exc:
-            response = self._error_response(request.message_id, "COMMAND_FAILED", str(exc))
-        with contextlib.suppress(Exception):
-            self._write(response)
+            logger.exception("Command execution error for %s: %s", command_id, exc)
+            failed_result = {
+                "command_id": command_id,
+                "target_type": "ATTEMPT",
+                "target_id": target_id,
+                "status": "FAILED",
+                "result_code": "COMMAND_FAILED",
+                "message": str(exc) or type(exc).__name__,
+                "attempt_id": attempt_id,
+            }
+            canonical = CommandResult.from_dict(failed_result)
+        finally:
+            with self._command_lock:
+                if "canonical" in locals():
+                    self._command_results[command_id] = canonical.to_dict()
+                    if len(self._command_results) > self._max_cached_commands:
+                        self._command_results.popitem(last=False)
+                self._in_flight_commands.pop(command_id, None)
+
+        if in_flight is not None and not in_flight.done():
+            in_flight.set_result(canonical.to_dict())
+
+        response = self._envelope(
+            "COMMAND_RESULT", canonical.to_dict(), correlation_id=request.message_id
+        )
+        safe_write_response(response)
 
     def _error_response(self, correlation_id: str, code: str, message: str) -> McpEnvelope:
         payload = McpError.from_dict(

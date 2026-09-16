@@ -42,6 +42,7 @@ class BackendSettings(BaseSettings):
     # Legacy fallback configuration
     dataset_manager_host: str = Field(default="127.0.0.1", alias="DATASET_MANAGER_HOST")
     dataset_manager_port: int | None = Field(default=None, alias="DATASET_MANAGER_PORT")
+    dataset_manager_timeout_seconds: float = Field(default=30.0, gt=0)
 
     # ─── Training Cluster Defaults ────────────────────────────────────────────
     expected_workers: int = Field(default=3, alias="EXPECTED_WORKERS")

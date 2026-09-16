@@ -235,6 +235,22 @@ class RuntimeGateway:
                 self._attempt_snapshots[attempt_id]["stale"] = True
         logger.info("Runtime disconnected; snapshot marked stale, attempt preserved.")
 
+    def reset_runtime_context(self) -> None:
+        """Clear in-memory snapshots, cursors, and abort pending waiters on instance change."""
+        self._attempt_snapshots.clear()
+        self._attempt_cursors.clear()
+        self._cached_snapshot = self._empty_snapshot()
+        for cmd_id, future in list(self._pending_results.items()):
+            if not future.done():
+                future.set_exception(
+                    RuntimeUnavailableError(
+                        f"Runtime restarted with new instance ID; command {cmd_id} aborted",
+                        command_id=cmd_id,
+                    )
+                )
+        self._pending_results.clear()
+        logger.info("Runtime context and cursors reset due to runtime instance change.")
+
     # ─── Inbound Management Message Dispatcher ────────────────────────────────
 
     def _handle_inbound_message(self, msg_type: str, payload: dict[str, Any]) -> None:
@@ -265,8 +281,21 @@ class RuntimeGateway:
     def handle_hello_ack(self, payload: dict[str, Any]) -> None:
         """MGMT_HELLO_ACK -> ALWAYS request GET_STATE."""
         logger.info("Received MGMT_HELLO_ACK: %s", payload)
-        if "runtime_instance_id" in payload:
-            self._runtime_instance_id = payload["runtime_instance_id"]
+        new_instance_id = payload.get("runtime_instance_id")
+        if (
+            self._runtime_instance_id is not None
+            and new_instance_id is not None
+            and self._runtime_instance_id != new_instance_id
+        ):
+            logger.warning(
+                "Runtime instance changed from %s to %s; clearing old attempt contexts",
+                self._runtime_instance_id,
+                new_instance_id,
+            )
+            self.reset_runtime_context()
+
+        if new_instance_id is not None:
+            self._runtime_instance_id = new_instance_id
         # Always request authoritative runtime state immediately
         state = self._port.request_state()
         if state:
