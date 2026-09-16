@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Activity,
@@ -16,49 +16,140 @@ import {
   Briefcase,
   ChevronRight,
   Plus,
+  RefreshCw,
 } from 'lucide-react';
-import { useApp } from '../context/AppContext';
 import { AttemptStateBadge, Badge } from '../components/common/Badge';
 import { formatDiagnosticEvent, EventIconType } from '../utils/eventFormatter';
 import { EventDetailDrawer } from '../components/drawers/EventDetailDrawer';
 import { DiagnosticEvent } from '../types';
-import { jobsService } from '../api';
+import {
+  jobsService,
+  datasetsService,
+  datasetBuildsService,
+  checkpointsService,
+  eventsService,
+  attemptsService,
+  systemService,
+} from '../api';
+import { AttemptListItemData, HealthData } from '../types/api';
+
+interface ResourceState<T> {
+  loading: boolean;
+  error: boolean;
+  data: T | null;
+}
 
 export const OverviewPage: React.FC = () => {
-  const {
-    currentAttempt,
-    workers,
-    events,
-    jobs,
-    datasets,
-    datasetBuilds,
-    checkpoints,
-    isRuntimeStale,
-  } = useApp();
-
-  const [realJobCount, setRealJobCount] = useState<number | null>(null);
-
-  React.useEffect(() => {
-    jobsService.listJobs({ limit: 100 })
-      .then(res => setRealJobCount(res.data?.length ?? 0))
-      .catch(() => {});
-  }, []);
+  const [jobsState, setJobsState] = useState<ResourceState<number>>({ loading: true, error: false, data: null });
+  const [datasetsState, setDatasetsState] = useState<ResourceState<number>>({ loading: true, error: false, data: null });
+  const [buildsState, setBuildsState] = useState<ResourceState<number>>({ loading: true, error: false, data: null });
+  const [checkpointsState, setCheckpointsState] = useState<ResourceState<number>>({ loading: true, error: false, data: null });
+  const [runningAttempt, setRunningAttempt] = useState<ResourceState<AttemptListItemData>>({ loading: true, error: false, data: null });
+  const [eventsState, setEventsState] = useState<ResourceState<DiagnosticEvent[]>>({ loading: true, error: false, data: [] });
+  const [healthState, setHealthState] = useState<ResourceState<HealthData>>({ loading: true, error: false, data: null });
 
   const [inspectEvent, setInspectEvent] = useState<DiagnosticEvent | null>(null);
 
+  const fetchOverviewData = async () => {
+    setJobsState(prev => ({ ...prev, loading: true, error: false }));
+    setDatasetsState(prev => ({ ...prev, loading: true, error: false }));
+    setBuildsState(prev => ({ ...prev, loading: true, error: false }));
+    setCheckpointsState(prev => ({ ...prev, loading: true, error: false }));
+    setRunningAttempt(prev => ({ ...prev, loading: true, error: false }));
+    setEventsState(prev => ({ ...prev, loading: true, error: false }));
+    setHealthState(prev => ({ ...prev, loading: true, error: false }));
 
-  const progressPercent = Math.min(
-    100,
-    Math.round(
-      ((currentAttempt.epoch - 1) * currentAttempt.totalBatches +
-        currentAttempt.currentBatch) /
-        (currentAttempt.totalEpochs * currentAttempt.totalBatches) *
-        100
-    )
-  );
+    const [
+      jobsRes,
+      datasetsRes,
+      buildsRes,
+      checkpointsRes,
+      attemptsRes,
+      eventsRes,
+      healthRes,
+    ] = await Promise.allSettled([
+      jobsService.listJobs({ limit: 100 }),
+      datasetsService.listDatasets({ limit: 100 }),
+      datasetBuildsService.listBuilds({ limit: 100 }),
+      checkpointsService.listCheckpoints({ limit: 100 }),
+      attemptsService.listAttempts({ state: 'RUNNING', limit: 1 }),
+      eventsService.listEvents({ limit: 5 }),
+      systemService.getHealth(),
+    ]);
 
-  const isHealthy = !isRuntimeStale && currentAttempt.activeWorkers === currentAttempt.expectedWorkers;
-  const isTrainingActive = currentAttempt.state === 'RUNNING';
+    // Jobs
+    if (jobsRes.status === 'fulfilled') {
+      setJobsState({ loading: false, error: false, data: jobsRes.value.data?.length ?? 0 });
+    } else {
+      setJobsState({ loading: false, error: true, data: null });
+    }
+
+    // Datasets
+    if (datasetsRes.status === 'fulfilled') {
+      setDatasetsState({ loading: false, error: false, data: datasetsRes.value.data?.length ?? 0 });
+    } else {
+      setDatasetsState({ loading: false, error: true, data: null });
+    }
+
+    // Builds
+    if (buildsRes.status === 'fulfilled') {
+      setBuildsState({ loading: false, error: false, data: buildsRes.value.data?.length ?? 0 });
+    } else {
+      setBuildsState({ loading: false, error: true, data: null });
+    }
+
+    // Checkpoints
+    if (checkpointsRes.status === 'fulfilled') {
+      setCheckpointsState({ loading: false, error: false, data: checkpointsRes.value.data?.length ?? 0 });
+    } else {
+      setCheckpointsState({ loading: false, error: true, data: null });
+    }
+
+    // Running attempt
+    if (attemptsRes.status === 'fulfilled') {
+      const active = attemptsRes.value.data && attemptsRes.value.data.length > 0 ? attemptsRes.value.data[0] : null;
+      setRunningAttempt({ loading: false, error: false, data: active });
+    } else {
+      setRunningAttempt({ loading: false, error: true, data: null });
+    }
+
+    // Events
+    if (eventsRes.status === 'fulfilled') {
+      const rawEvents = eventsRes.value.data || [];
+      const mappedEvents: DiagnosticEvent[] = rawEvents.map((evt, idx) => ({
+        id: evt.event_id,
+        time: evt.occurred_at ? new Date(evt.occurred_at).toLocaleTimeString() : 'now',
+        scope: evt.scope?.type || 'SYSTEM',
+        event: evt.event_type,
+        severity: (evt.severity?.toUpperCase() || 'INFO') as any,
+        runtimeSeq: idx + 1,
+        source: evt.scope?.id || 'system',
+        attemptId: evt.scope?.id || '',
+        payload: { summary: evt.summary || evt.event_type },
+        technicalCorrelationId: evt.event_id,
+      }));
+      setEventsState({ loading: false, error: false, data: mappedEvents });
+    } else {
+      setEventsState({ loading: false, error: true, data: [] });
+    }
+
+    // Health
+    if (healthRes.status === 'fulfilled') {
+      setHealthState({ loading: false, error: false, data: healthRes.value.data });
+    } else {
+      setHealthState({ loading: false, error: true, data: null });
+    }
+  };
+
+  useEffect(() => {
+    fetchOverviewData();
+  }, []);
+
+  const isHealthy =
+    !healthState.error &&
+    (healthState.data?.status === 'ok' || (healthState.data?.status as unknown as string) === 'healthy');
+
+  const isTrainingActive = runningAttempt.data !== null && runningAttempt.data.state === 'RUNNING';
 
   const renderStatusIcon = (type: EventIconType) => {
     switch (type) {
@@ -90,7 +181,7 @@ export const OverviewPage: React.FC = () => {
         <div className="flex items-center gap-2">
           {isTrainingActive && (
             <Link
-              to="/live"
+              to={`/live?attemptId=${runningAttempt.data?.attempt_id}`}
               className="px-3 py-1.5 rounded text-xs font-normal text-[#a1a1a8] hover:text-[#f3f3f4] bg-[#171719] hover:bg-[#202024] border border-white/[0.07] transition-colors"
             >
               Live training
@@ -109,16 +200,27 @@ export const OverviewPage: React.FC = () => {
       {/* Cluster Health Summary Row */}
       <div className="flex items-center justify-between py-2.5 px-3 bg-[#121214] rounded border border-white/[0.07] text-xs">
         <div className="flex items-center gap-2">
-          <span className={`w-2 h-2 rounded-full ${isHealthy ? 'bg-emerald-400' : 'bg-amber-400'}`} />
-          <span className="text-[#f3f3f4] font-medium">
-            {isHealthy ? 'Cluster operational' : 'Cluster attention needed'}
-          </span>
-          <span className="text-[#73737c]">·</span>
-          <span className="text-[#a1a1a8]">
-            {isHealthy
-              ? 'All workers connected and synchronized under Strict BSP'
-              : 'One or more workers delayed or waiting'}
-          </span>
+          {healthState.loading ? (
+            <>
+              <RefreshCw className="w-3.5 h-3.5 text-blue-400 animate-spin" />
+              <span className="text-[#a1a1a8]">Checking cluster connectivity...</span>
+            </>
+          ) : (
+            <>
+              <span className={`w-2 h-2 rounded-full ${isHealthy ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+              <span className="text-[#f3f3f4] font-medium">
+                {isHealthy ? 'Cluster operational' : 'Cluster attention needed'}
+              </span>
+              <span className="text-[#73737c]">·</span>
+              <span className="text-[#a1a1a8]">
+                {isHealthy
+                  ? 'All services connected and responsive'
+                  : healthState.error
+                  ? 'Coordinator API unreachable'
+                  : 'Degraded subsystems detected'}
+              </span>
+            </>
+          )}
         </div>
         <Link to="/system" className="text-[#73737c] hover:text-[#f3f3f4] transition-colors text-xs">
           System details →
@@ -190,16 +292,13 @@ export const OverviewPage: React.FC = () => {
           <div className="flex items-center justify-between border-b border-white/[0.07] pb-2">
             <div className="flex items-center gap-3">
               <h2 className="text-sm font-semibold text-[#f3f3f4]">
-                {currentAttempt.jobName || 'ResNet18 CIFAR-10'}
+                {runningAttempt.data?.attempt_id}
               </h2>
-              <AttemptStateBadge state={currentAttempt.state} />
-              <span className="text-xs text-[#73737c]">
-                v{currentAttempt.modelVersion.replace('v', '') || '3264'}
-              </span>
+              <AttemptStateBadge state={runningAttempt.data?.state || 'RUNNING'} />
             </div>
 
             <Link
-              to="/live"
+              to={`/live?attemptId=${runningAttempt.data?.attempt_id}`}
               className="text-xs text-blue-400 hover:text-blue-300 font-normal inline-flex items-center gap-1 transition-colors"
             >
               <span>Open live view</span>
@@ -207,61 +306,33 @@ export const OverviewPage: React.FC = () => {
             </Link>
           </div>
 
-          {/* Progress Bar */}
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-[#73737c]">
-                Epoch {currentAttempt.epoch} of {currentAttempt.totalEpochs} · Batch {currentAttempt.currentBatch} of {currentAttempt.totalBatches}
-              </span>
-              <span className="text-[#f3f3f4] font-medium">{progressPercent}%</span>
-            </div>
-            <div className="w-full bg-[#171719] rounded-full h-1.5 overflow-hidden">
-              <div
-                className="bg-blue-600 h-full rounded-full transition-all duration-300"
-                style={{ width: `${progressPercent}%` }}
-              />
-            </div>
-          </div>
-
-          {/* Metrics Row (Flat, clean, no inner cards) */}
+          {/* Quick Attempt Info */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-6 pt-2">
             <div>
-              <div className="text-xs text-[#73737c]">Current Epoch</div>
-              <div className="text-base font-semibold text-[#f3f3f4] mt-0.5">
-                {currentAttempt.epoch} <span className="text-xs text-[#73737c] font-normal">/ {currentAttempt.totalEpochs}</span>
-              </div>
-              <div className="text-xs text-[#a1a1a8] mt-0.5">
-                Batch {currentAttempt.currentBatch} of {currentAttempt.totalBatches}
+              <div className="text-xs text-[#73737c]">Attempt ID</div>
+              <div className="text-xs font-mono font-semibold text-[#f3f3f4] mt-0.5 truncate">
+                {runningAttempt.data?.attempt_id}
               </div>
             </div>
 
             <div>
-              <div className="text-xs text-[#73737c]">Workers</div>
-              <div className="text-base font-semibold text-[#f3f3f4] mt-0.5">
-                {currentAttempt.activeWorkers} of {currentAttempt.expectedWorkers} Active
-              </div>
-              <div className="text-xs text-[#a1a1a8] mt-0.5">
-                Synchronized
+              <div className="text-xs text-[#73737c]">Job ID</div>
+              <div className="text-xs font-mono font-semibold text-[#f3f3f4] mt-0.5 truncate">
+                {runningAttempt.data?.job_id}
               </div>
             </div>
 
             <div>
-              <div className="text-xs text-[#73737c]">Synchronization</div>
-              <div className="text-base font-semibold text-[#f3f3f4] mt-0.5">
-                Strict BSP
-              </div>
-              <div className="text-xs text-[#a1a1a8] mt-0.5">
-                Barrier deterministic
+              <div className="text-xs text-[#73737c]">Execution Mode</div>
+              <div className="text-xs font-semibold text-[#f3f3f4] mt-0.5">
+                {runningAttempt.data?.execution_mode || 'FRESH'}
               </div>
             </div>
 
             <div>
-              <div className="text-xs text-[#73737c]">Elapsed Time</div>
-              <div className="text-base font-semibold text-[#f3f3f4] mt-0.5">
-                {currentAttempt.elapsedFormatted}
-              </div>
+              <div className="text-xs text-[#73737c]">Started At</div>
               <div className="text-xs text-[#a1a1a8] mt-0.5">
-                Checkpointing active
+                {runningAttempt.data?.started_at ? new Date(runningAttempt.data.started_at).toLocaleTimeString() : 'Recently'}
               </div>
             </div>
           </div>
@@ -281,7 +352,9 @@ export const OverviewPage: React.FC = () => {
           >
             <div>
               <div className="text-xs text-[#73737c]">Training Jobs</div>
-              <div className="text-sm font-semibold text-[#f3f3f4] mt-0.5">{realJobCount !== null ? `${realJobCount} registered` : `${(jobs || []).length} registered`}</div>
+              <div className="text-sm font-semibold text-[#f3f3f4] mt-0.5">
+                {jobsState.loading ? 'Loading...' : jobsState.error ? 'Unavailable' : `${jobsState.data} registered`}
+              </div>
             </div>
 
             <ChevronRight className="w-4 h-4 text-[#73737c] group-hover:text-[#f3f3f4] transition-colors" />
@@ -293,7 +366,13 @@ export const OverviewPage: React.FC = () => {
           >
             <div>
               <div className="text-xs text-[#73737c]">Datasets</div>
-              <div className="text-sm font-semibold text-[#f3f3f4] mt-0.5">{(datasets || []).length} datasets · {(datasetBuilds || []).length} builds</div>
+              <div className="text-sm font-semibold text-[#f3f3f4] mt-0.5">
+                {datasetsState.loading || buildsState.loading
+                  ? 'Loading...'
+                  : datasetsState.error && buildsState.error
+                  ? 'Unavailable'
+                  : `${datasetsState.data ?? 0} datasets · ${buildsState.data ?? 0} builds`}
+              </div>
             </div>
             <ChevronRight className="w-4 h-4 text-[#73737c] group-hover:text-[#f3f3f4] transition-colors" />
           </Link>
@@ -304,7 +383,9 @@ export const OverviewPage: React.FC = () => {
           >
             <div>
               <div className="text-xs text-[#73737c]">Checkpoints</div>
-              <div className="text-sm font-semibold text-[#f3f3f4] mt-0.5">{(checkpoints || []).length} saved snapshots</div>
+              <div className="text-sm font-semibold text-[#f3f3f4] mt-0.5">
+                {checkpointsState.loading ? 'Loading...' : checkpointsState.error ? 'Unavailable' : `${checkpointsState.data} saved snapshots`}
+              </div>
             </div>
             <ChevronRight className="w-4 h-4 text-[#73737c] group-hover:text-[#f3f3f4] transition-colors" />
           </Link>
@@ -315,7 +396,9 @@ export const OverviewPage: React.FC = () => {
           >
             <div>
               <div className="text-xs text-[#73737c]">Cluster Nodes</div>
-              <div className="text-sm font-semibold text-[#f3f3f4] mt-0.5">{(workers || []).length} worker nodes</div>
+              <div className="text-sm font-semibold text-[#f3f3f4] mt-0.5">
+                {healthState.loading ? 'Checking...' : healthState.error ? 'Unavailable' : isHealthy ? 'Operational' : 'Attention needed'}
+              </div>
             </div>
             <ChevronRight className="w-4 h-4 text-[#73737c] group-hover:text-[#f3f3f4] transition-colors" />
           </Link>
@@ -331,39 +414,53 @@ export const OverviewPage: React.FC = () => {
             </h2>
           </div>
           <Link
-            to="/live"
+            to="/events"
             className="text-xs text-blue-400 hover:text-blue-300 font-normal inline-flex items-center gap-1 transition-colors"
           >
-            <span>Live stream</span>
+            <span>All events</span>
             <ChevronRight className="w-3.5 h-3.5" />
           </Link>
         </div>
 
-        <div className="divide-y divide-white/[0.05]">
-          {(events || []).slice(0, 5).map((evt, idx) => {
-            const formatted = formatDiagnosticEvent(evt);
-            const displayTime = evt.time && evt.time.length > 8 ? evt.time.slice(0, 8) : evt.time;
+        {eventsState.loading ? (
+          <div className="py-6 text-center text-xs text-[#73737c]">
+            Loading audit activity...
+          </div>
+        ) : eventsState.error ? (
+          <div className="py-4 text-center text-xs text-[#73737c]">
+            Audit events unavailable from backend.
+          </div>
+        ) : (eventsState.data || []).length === 0 ? (
+          <div className="py-6 text-center text-xs text-[#73737c]">
+            No recent platform activity recorded.
+          </div>
+        ) : (
+          <div className="divide-y divide-white/[0.05]">
+            {(eventsState.data || []).slice(0, 5).map((evt, idx) => {
+              const formatted = formatDiagnosticEvent(evt);
+              const displayTime = evt.time && evt.time.length > 8 ? evt.time.slice(0, 8) : evt.time;
 
-            return (
-              <div
-                key={`${evt.id}-${evt.runtimeSeq ?? idx}`}
-                onClick={() => setInspectEvent(evt)}
-                className="py-2 flex items-center justify-between text-xs hover:bg-white/[0.02] cursor-pointer transition-colors px-1"
-              >
-                <div className="flex items-center gap-2.5 min-w-0">
-                  {renderStatusIcon(formatted.iconType)}
-                  <span className="text-[#f3f3f4] font-normal truncate">
-                    {formatted.humanText}
-                  </span>
-                </div>
+              return (
+                <div
+                  key={`${evt.id}-${evt.runtimeSeq ?? idx}`}
+                  onClick={() => setInspectEvent(evt)}
+                  className="py-2 flex items-center justify-between text-xs hover:bg-white/[0.02] cursor-pointer transition-colors px-1"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    {renderStatusIcon(formatted.iconType)}
+                    <span className="text-[#f3f3f4] font-normal truncate">
+                      {formatted.humanText}
+                    </span>
+                  </div>
 
-                <div className="text-[#73737c] text-xs shrink-0 pl-3">
-                  {displayTime}
+                  <div className="text-[#73737c] text-xs shrink-0 pl-3">
+                    {displayTime}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Event Inspect Drawer */}

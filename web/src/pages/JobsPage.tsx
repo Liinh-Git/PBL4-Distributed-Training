@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import {
   Plus,
   Play,
+  Pencil,
   Copy,
   Archive,
   Search,
@@ -31,8 +32,9 @@ export const JobsPage: React.FC = () => {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [cursorHistory, setCursorHistory] = useState<(string | null)[]>([]);
 
-  // Confirmation Modal
+  // Confirmation Modals
   const [jobToArchive, setJobToArchive] = useState<JobListItemData | null>(null);
+  const [jobToStart, setJobToStart] = useState<JobListItemData | null>(null);
 
   const fetchJobs = useCallback(async (cursor?: string | null) => {
     try {
@@ -289,17 +291,33 @@ export const JobsPage: React.FC = () => {
 
                     <td className="py-2.5 px-3.5 text-right">
                       <div className="flex items-center justify-end gap-1">
-                        {job.state === 'READY' && (
+                        {(job.state === 'READY' || job.state === 'DRAFT') && (
                           <button
                             type="button"
                             disabled={actionLoading === `launch_${job.job_id}`}
-                            onClick={() => handleLaunch(job.job_id)}
+                            onClick={() => {
+                              if (job.state === 'DRAFT') {
+                                setJobToStart(job);
+                              } else {
+                                handleLaunch(job.job_id);
+                              }
+                            }}
                             className="inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded bg-[#171719] hover:bg-[#202024] text-[#f3f3f4] border border-white/[0.07] transition-colors disabled:opacity-50"
-                            title="Launch Training Run"
+                            title={job.state === 'DRAFT' ? "Start Training (freeze draft to READY)" : "Launch Training Run"}
                           >
                             <Play className="w-3 h-3 text-[#73737c]" />
                             <span>{actionLoading === `launch_${job.job_id}` ? 'Starting...' : 'Run'}</span>
                           </button>
+                        )}
+
+                        {job.state === 'DRAFT' && (
+                          <Link
+                            to={`/jobs/${job.job_id}/edit`}
+                            className="p-1 rounded text-[#73737c] hover:text-[#f3f3f4] hover:bg-white/[0.05] transition-colors inline-flex items-center justify-center"
+                            title="Edit Draft Job"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </Link>
                         )}
 
                         <button
@@ -358,16 +376,40 @@ export const JobsPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Confirmation Modal */}
+      {/* Start DRAFT Job Confirmation Modal */}
+      <ConfirmationModal
+        isOpen={!!jobToStart}
+        onClose={() => setJobToStart(null)}
+        onConfirm={async () => {
+          if (!jobToStart) return;
+          const targetId = jobToStart.job_id;
+          setJobToStart(null);
+          await handleLaunch(targetId);
+        }}
+        title="Start Training Run?"
+        confirmLabel="Start Training"
+        message={
+          <div className="space-y-2 text-xs text-[#a1a1a8]">
+            <p>
+              Job <strong className="text-[#f3f3f4]">{jobToStart?.display_name}</strong> is currently in <span className="font-mono text-[#f3f3f4]">DRAFT</span>.
+            </p>
+            <p>
+              Starting the job will validate and freeze its configuration into <span className="font-mono text-[#f3f3f4]">READY</span> state and launch a training attempt. Once frozen, training settings cannot be edited directly.
+            </p>
+          </div>
+        }
+      />
+
+      {/* Archive Confirmation Modal */}
       <ConfirmationModal
         isOpen={!!jobToArchive}
         onClose={() => setJobToArchive(null)}
         onConfirm={handleArchiveConfirm}
         title="Archive Training Job"
         message={
-          <div className="space-y-2 text-xs text-[#B4B4BA]">
+          <div className="space-y-2 text-xs text-[#a1a1a8]">
             <p>
-              Are you sure you want to archive job <strong className="text-[#F5F5F5]">{jobToArchive?.display_name}</strong>?
+              Are you sure you want to archive job <strong className="text-[#f3f3f4]">{jobToArchive?.display_name}</strong>?
             </p>
             <p>
               The job specification will be hidden from new executions. Historical attempts and checkpoints will remain securely accessible.

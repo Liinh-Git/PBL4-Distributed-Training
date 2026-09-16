@@ -34,16 +34,16 @@ export const CopyableId: React.FC<CopyableIdProps> = ({
 
   return (
     <span
-      className={`inline-flex items-center gap-1.5 font-mono text-xs text-slate-300 group hover:text-slate-100 ${className}`}
+      className={`inline-flex items-center gap-1.5 font-mono text-xs text-[#a1a1a8] group hover:text-[#f3f3f4] ${className}`}
       title={title || safeVal}
     >
-      {prefix && <span className="text-slate-500 select-none">{prefix}</span>}
+      {prefix && <span className="text-[#73737c] select-none">{prefix}</span>}
       <span className="tracking-tight select-all">{displayText}</span>
       {safeVal && (
         <button
           type="button"
           onClick={handleCopy}
-          className="p-1 rounded text-slate-500 hover:text-slate-200 hover:bg-slate-800 transition-colors focus:outline-hidden"
+          className="p-1 rounded text-[#73737c] hover:text-[#f3f3f4] hover:bg-[#171719] transition-colors focus:outline-hidden"
           title={copied ? 'Copied to clipboard!' : `Copy full value: ${safeVal}`}
           aria-label="Copy identifier"
         >

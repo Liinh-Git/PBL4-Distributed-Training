@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard,
@@ -8,11 +8,27 @@ import {
   Save,
   Server,
 } from 'lucide-react';
-import { StatusDot } from '../common/Badge';
-import { useApp } from '../../context/AppContext';
+import { attemptsService } from '../../api';
 
 export const Sidebar: React.FC = () => {
-  const { currentAttempt } = useApp();
+  const [hasRunningAttempt, setHasRunningAttempt] = useState<boolean>(false);
+
+  useEffect(() => {
+    let isMounted = true;
+    attemptsService.listAttempts({ state: 'RUNNING', limit: 1 })
+      .then(res => {
+        if (isMounted && res.data && res.data.length > 0) {
+          setHasRunningAttempt(true);
+        }
+      })
+      .catch(() => {
+        // Degraded or network failure: leave as false
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const navGroups = [
     {
@@ -32,7 +48,7 @@ export const Sidebar: React.FC = () => {
           name: 'Live Training',
           path: '/live',
           icon: Activity,
-          activeIndicator: currentAttempt.state === 'RUNNING',
+          activeIndicator: hasRunningAttempt,
         },
         {
           name: 'Jobs',

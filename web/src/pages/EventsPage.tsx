@@ -21,7 +21,7 @@ import { eventsService } from '../api';
 import { EventListItemData, EventSeverity, ScopeType } from '../types/api';
 
 export const EventsPage: React.FC = () => {
-  const { setSelectedEvent, currentAttempt } = useApp();
+  const { setSelectedEvent } = useApp();
 
   const [apiEvents, setApiEvents] = useState<EventListItemData[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -259,7 +259,7 @@ export const EventsPage: React.FC = () => {
           <div className="flex items-center gap-1.5 mt-0.5">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
             <span className="text-xs text-[#a1a1a8]">
-              {currentAttempt.state === 'RUNNING' ? 'Active' : 'Idle'}
+              {apiEvents.length > 0 ? 'Connected' : 'Idle'}
             </span>
           </div>
         </div>

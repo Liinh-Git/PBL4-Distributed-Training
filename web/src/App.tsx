@@ -25,9 +25,11 @@ export default function App() {
             <Route index element={<OverviewPage />} />
             <Route path="live" element={<LiveTrainingPage />} />
             <Route path="training/new" element={<NewTrainingFlowPage />} />
+            <Route path="training/:jobId/edit" element={<NewTrainingFlowPage />} />
             <Route path="jobs" element={<JobsPage />} />
             <Route path="jobs/new" element={<NewTrainingFlowPage />} />
             <Route path="jobs/:jobId" element={<JobDetailPage />} />
+            <Route path="jobs/:jobId/edit" element={<NewTrainingFlowPage />} />
             <Route path="datasets" element={<DatasetsPage />} />
             <Route path="datasets/:datasetId" element={<DatasetDetailPage />} />
             <Route path="datasets/:datasetId/builds/:buildId" element={<DatasetBuildDetailPage />} />

@@ -21,7 +21,6 @@ export const AppLayout: React.FC = () => {
     setSelectedCheckpoint,
     rawContractModalJob,
     setRawContractModalJob,
-    resumeFromCheckpoint,
   } = useApp();
 
   return (
@@ -57,7 +56,6 @@ export const AppLayout: React.FC = () => {
       <CheckpointDetailDrawer
         checkpoint={selectedCheckpoint}
         onClose={() => setSelectedCheckpoint(null)}
-        onResume={resumeFromCheckpoint}
       />
       <RawContractDrawer
         job={rawContractModalJob}

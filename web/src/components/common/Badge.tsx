@@ -39,14 +39,14 @@ export const Badge: React.FC<BadgeProps> = ({
   const variantMap: Record<string, string> = {
     default: 'bg-[#171719] text-[#a1a1a8] border border-white/[0.07]',
     neutral: 'bg-[#171719] text-[#a1a1a8] border border-white/[0.07]',
-    success: 'bg-emerald-950/20 text-emerald-400 border border-emerald-800/30',
-    green: 'bg-emerald-950/20 text-emerald-400 border border-emerald-800/30',
-    warning: 'bg-amber-950/20 text-amber-400 border border-amber-800/30',
-    amber: 'bg-amber-950/20 text-amber-400 border border-amber-800/30',
-    danger: 'bg-rose-950/20 text-rose-400 border border-rose-800/30',
-    red: 'bg-rose-950/20 text-rose-400 border border-rose-800/30',
-    info: 'bg-blue-950/20 text-blue-400 border border-blue-800/30',
-    blue: 'bg-blue-950/20 text-blue-400 border border-blue-800/30',
+    success: 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20',
+    green: 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20',
+    warning: 'bg-amber-500/10 text-amber-400 border border-amber-500/20',
+    amber: 'bg-amber-500/10 text-amber-400 border border-amber-500/20',
+    danger: 'bg-rose-500/10 text-rose-400 border border-rose-500/20',
+    red: 'bg-rose-500/10 text-rose-400 border border-rose-500/20',
+    info: 'bg-blue-500/10 text-blue-400 border border-blue-500/20',
+    blue: 'bg-blue-500/10 text-blue-400 border border-blue-500/20',
     purple: 'bg-[#171719] text-[#a1a1a8] border border-white/[0.07]',
   };
 

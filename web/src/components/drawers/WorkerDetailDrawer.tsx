@@ -29,18 +29,18 @@ export const WorkerDetailDrawer: React.FC<WorkerDetailDrawerProps> = ({
       subtitle={`Session: ${worker.sessionId}`}
       widthClass="max-w-xl"
     >
-      <div className="space-y-6">
+      <div className="space-y-6 font-sans">
         {/* Session State Banner */}
         <div className="p-4 bg-[#171719] rounded-lg border border-white/[0.04] flex items-center justify-between text-xs">
           <div>
-            <div className="text-[#777780]">Current Session State</div>
+            <div className="text-[#73737c]">Current Session State</div>
             <div className="mt-1.5">
               <WorkerStateBadge state={worker.state} />
             </div>
           </div>
           <div className="text-right">
-            <div className="text-[#777780]">Assigned Compute Node</div>
-            <div className="text-xs font-semibold text-[#F5F5F5] mt-1.5">
+            <div className="text-[#73737c]">Assigned Compute Node</div>
+            <div className="text-xs font-semibold text-[#f3f3f4] mt-1.5">
               {worker.nodeLabel}
             </div>
           </div>
@@ -48,30 +48,32 @@ export const WorkerDetailDrawer: React.FC<WorkerDetailDrawerProps> = ({
 
         {/* Primary Identity & Protocol */}
         <div className="space-y-3">
-          <h3 className="text-xs font-semibold text-[#F5F5F5]">
-            Identity & Protocol
+          <h3 className="text-xs font-semibold text-[#f3f3f4]">
+            Identity &amp; Protocol
           </h3>
           <div className="divide-y divide-white/[0.04] text-xs bg-[#171719] rounded-lg border border-white/[0.04] p-3">
             <div className="py-2 flex items-center justify-between">
-              <span className="text-[#777780]">Worker ID</span>
-              <span className="text-[#F5F5F5] font-semibold">{worker.workerId}</span>
+              <span className="text-[#73737c]">Worker ID</span>
+              <span className="text-[#f3f3f4] font-semibold">{worker.workerId}</span>
             </div>
             <div className="py-2 flex items-center justify-between">
-              <span className="text-[#777780]">Session ID</span>
+              <span className="text-[#73737c]">Session ID</span>
               <CopyableId value={worker.sessionId} truncateLength={22} />
             </div>
             <div className="py-2 flex items-center justify-between">
-              <span className="text-[#777780]">Protocol Version</span>
+              <span className="text-[#73737c]">Protocol Version</span>
               <span className="text-blue-400 font-mono">{worker.protocolVersion}</span>
             </div>
             <div className="py-2 flex items-center justify-between">
-              <span className="text-[#777780]">Connected Timestamp</span>
-              <span className="text-[#B4B4BA]">{worker.connectedAt}</span>
+              <span className="text-[#73737c]">Connected Timestamp</span>
+              <span className="text-[#a1a1a8]">{worker.connectedAt}</span>
             </div>
             <div className="py-2 flex items-center justify-between">
-              <span className="text-[#777780]">Last Heartbeat</span>
+              <span className="text-[#73737c]">Last Heartbeat</span>
               <span className="text-emerald-400 font-mono">
-                {(worker.lastHeartbeatMs / 1000).toFixed(1)}s ago ({worker.lastHeartbeatMs} ms)
+                {worker.lastHeartbeatMs !== undefined
+                  ? `${(worker.lastHeartbeatMs / 1000).toFixed(1)}s ago (${worker.lastHeartbeatMs} ms)`
+                  : '—'}
               </span>
             </div>
           </div>
@@ -79,19 +81,19 @@ export const WorkerDetailDrawer: React.FC<WorkerDetailDrawerProps> = ({
 
         {/* Shard & Model Alignment */}
         <div className="space-y-3">
-          <h3 className="text-xs font-semibold text-[#F5F5F5]">
-            Partition & Model Version Alignment
+          <h3 className="text-xs font-semibold text-[#f3f3f4]">
+            Partition &amp; Model Version Alignment
           </h3>
           <div className="divide-y divide-white/[0.04] text-xs bg-[#171719] rounded-lg border border-white/[0.04] p-3">
             <div className="py-2 flex items-center justify-between">
-              <span className="text-[#777780]">Assigned Shard Partition</span>
+              <span className="text-[#73737c]">Assigned Shard Partition</span>
               <span className="text-blue-400 font-mono font-medium">
                 {worker.shardId || worker.assignedShard || 'Unassigned'}
               </span>
             </div>
             <div className="py-2 flex items-center justify-between">
-              <span className="text-[#777780]">Local Parameter Version</span>
-              <span className="text-[#F5F5F5] font-mono font-medium">
+              <span className="text-[#73737c]">Local Parameter Version</span>
+              <span className="text-[#f3f3f4] font-mono font-medium">
                 {worker.localModelVersion || worker.currentModelVersion ? `v${worker.localModelVersion || worker.currentModelVersion}` : '—'}
               </span>
             </div>
@@ -100,20 +102,20 @@ export const WorkerDetailDrawer: React.FC<WorkerDetailDrawerProps> = ({
 
         {/* Health & Failure Code */}
         <div className="space-y-3">
-          <h3 className="text-xs font-semibold text-[#F5F5F5]">
-            Session Health & Diagnostics
+          <h3 className="text-xs font-semibold text-[#f3f3f4]">
+            Session Health &amp; Diagnostics
           </h3>
           <div className="divide-y divide-white/[0.04] text-xs bg-[#171719] rounded-lg border border-white/[0.04] p-3">
             <div className="py-2 flex items-center justify-between">
-              <span className="text-[#777780]">Historical Sessions</span>
-              <span className="text-[#B4B4BA]">
+              <span className="text-[#73737c]">Historical Sessions</span>
+              <span className="text-[#a1a1a8]">
                 {(worker.previousSessions || worker.historicalSessions || []).length > 0
                   ? (worker.previousSessions || worker.historicalSessions)!.join(', ')
                   : 'None (Initial active session)'}
               </span>
             </div>
             <div className="py-2 flex items-center justify-between">
-              <span className="text-[#777780]">Status Condition</span>
+              <span className="text-[#73737c]">Status Condition</span>
               <span>
                 {worker.failureCode ? (
                   <span className="text-rose-400 font-mono font-semibold">{worker.failureCode}</span>

@@ -117,7 +117,7 @@ export const DatasetBuildDetailPage: React.FC = () => {
         action={
           <Link
             to="/datasets"
-            className="px-4 py-2 rounded-md bg-[#171719] hover:bg-[#1D1D20] text-[#F5F5F5] text-xs font-medium border border-white/[0.08]"
+            className="px-3 py-1.5 rounded bg-[#171719] hover:bg-[#202024] text-[#f3f3f4] text-xs font-medium border border-white/[0.07] transition-colors"
           >
             Back to Datasets
           </Link>
@@ -196,7 +196,7 @@ export const DatasetBuildDetailPage: React.FC = () => {
                   Dataset Build {build.dataset_build_id}
                 </h1>
                 <DatasetBuildStateBadge state={build.state as any} />
-                <Badge variant="purple">Strategy: {build.partition_strategy || build.profile || 'HASH'}</Badge>
+                <Badge variant="neutral">Strategy: {build.partition_strategy || build.profile || 'HASH'}</Badge>
               </div>
               <div className="flex items-center gap-3 text-xs text-[#73737c] mt-1 flex-wrap">
                 <span>

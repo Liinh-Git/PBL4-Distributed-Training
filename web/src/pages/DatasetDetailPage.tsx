@@ -9,15 +9,14 @@ import {
   RefreshCw,
   AlertCircle,
 } from 'lucide-react';
-import { useApp } from '../context/AppContext';
 import { DatasetBuild } from '../types';
 import {
   TrainingConfigurationDrawer,
   getConfigurationDisplayName,
   getConfigurationDescription,
 } from '../components/drawers/TrainingConfigurationDrawer';
-import { datasetsService, datasetBuildsService } from '../api';
-import { DatasetDetailData, DatasetBuildListItemData } from '../types/api';
+import { datasetsService, datasetBuildsService, jobsService } from '../api';
+import { DatasetDetailData, DatasetBuildListItemData, JobListItemData } from '../types/api';
 
 // Visual glyph representation for Kaggle-like dataset sample preview
 const CifarGlyph: React.FC<{ label: string }> = ({ label }) => {
@@ -31,7 +30,7 @@ const CifarGlyph: React.FC<{ label: string }> = ({ label }) => {
     case 'automobile':
       return (
         <svg viewBox="0 0 24 24" className="w-7 h-7 stroke-current" fill="none" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-1.4-2.2-2.3c-.5-.4-1.1-.7-1.8-.7H5c-.6 0-1.1.4-1.4.9l-1.4 2.9C2.1 11 2 11.5 2 12v4c0 .6.4 1 1 1h2" />
+          <path d="M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-1.4-2.2-2.3c-.5-.4-1.1-.7-1.8-.7H5c-.6 0-1.1.4-1.4.9l-1.4 2.9C2.1 11.1 2 11.5 2 12v4c0 .6.4 1 1 1h2" />
           <circle cx="7" cy="17" r="2" />
           <path d="M9 17h6" />
           <circle cx="17" cy="17" r="2" />
@@ -41,7 +40,7 @@ const CifarGlyph: React.FC<{ label: string }> = ({ label }) => {
       return (
         <svg viewBox="0 0 24 24" className="w-7 h-7 stroke-current" fill="none" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
           <path d="M16 7h.01" />
-          <path d="M3.4 18H12a8 8 0 0 0 8-8V7a4 4 0 0 0-7.28-2.3L2 14" />
+          <path d="M3.4 18H12a8 8 0 0 0 8-8V7a4 4 0 0 0-7.28-2.3L2 18" />
           <path d="m20 7 2 .5-2 .5" />
           <path d="M10 18v3" />
           <path d="M14 17.75V21" />
@@ -51,62 +50,58 @@ const CifarGlyph: React.FC<{ label: string }> = ({ label }) => {
     case 'cat':
       return (
         <svg viewBox="0 0 24 24" className="w-7 h-7 stroke-current" fill="none" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M12 5c.67 0 1.35.09 2 .26 1.78-2 5.03-2.84 6.42-2.26 1.4.58-.42 4-.42 4 .85 1.55 1 3.5 1 5 0 4.42-4.03 8-9 8s-9-3.58-9-8c0-1.5.15-3.45 1-5 0 0-1.82-3.42-.42-4 1.39-.58 4.64.26 6.42 2.26.65-.17 1.33-.26 2-.26z" />
-          <circle cx="9" cy="12" r="1" />
-          <circle cx="15" cy="12" r="1" />
-          <path d="M11 15h2" />
+          <path d="M12 5c.67 0 1.35.09 2 .26 1.78-2 5.03-2.84 6.42-2.26 1.4.58-.42 7-1.42 8.17.65 1.15 1 2.5 1 3.83 0 4.42-3.58 8-8 8s-8-3.58-8-8c0-1.33.35-2.68 1-3.83-1-1.17-2.82-7.59-1.42-8.17C4.97 2.42 8.22 3.26 10 5.26c.65-.17 1.33-.26 2-.26z" />
+          <path d="m9 14 3-2 3 2" />
+          <path d="M10 11.5a1 1 0 1 0 0-.01" />
+          <path d="M14 11.5a1 1 0 1 0 0-.01" />
         </svg>
       );
     case 'deer':
       return (
         <svg viewBox="0 0 24 24" className="w-7 h-7 stroke-current" fill="none" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M6 3v4M4 4l2 2M18 3v4M20 4l-2 2" />
-          <path d="M7 8h10l-1 5a4 4 0 0 1-8 0L7 8z" />
-          <circle cx="9.5" cy="11.5" r="0.75" />
-          <circle cx="14.5" cy="11.5" r="0.75" />
-          <path d="M11 15h2" />
-          <path d="M10 17v4M14 17v4" />
+          <path d="M19 5c-1.5 0-2.8 1-3.4 2.4L13 14H7l-3 4" />
+          <path d="M18 2v3" />
+          <path d="M21 4l-2 1" />
+          <path d="M15 3l1 2" />
+          <path d="M7 14l-2 7" />
+          <path d="M13 14l2 7" />
         </svg>
       );
     case 'dog':
       return (
         <svg viewBox="0 0 24 24" className="w-7 h-7 stroke-current" fill="none" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M10 5.172C10 3.782 8.423 2.679 6.5 3c-2.823.47-4.113 6.006-4 7 .08.703 1.725 1.722 3.656 1 1.261-.472 1.96-1.45 2.344-2.5" />
-          <path d="M14.267 5.172c0-1.39 1.577-2.493 3.5-2.172 2.823.47 4.113 6.006 4 7-.08.703-1.725 1.722-3.656 1-1.261-.472-1.855-1.45-2.239-2.5" />
-          <path d="M8 14v.5M16 14v.5" />
-          <path d="M11.25 16.25h1.5L12 17.5l-.75-1.25z" />
-          <path d="M4.42 11.247A13.152 13.152 0 0 0 4 14.556C4 18.728 7.582 21 12 21s8-2.272 8-6.444c0-1.061-.162-2.2-.493-3.309" />
+          <path d="M10 5.172C10 3.782 8.423 2.679 6.5 3c-2.823.47-4.113 6.006-4 7 .18 1.61 1.44 2.87 3 3v6a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1v-4" />
+          <path d="M14 5.172C14 3.782 15.577 2.679 17.5 3c2.823.47 4.113 6.006 4 7-.18 1.61-1.44 2.87-3 3v6a1 1 0 0 1-1 1h-2a1 1 0 0 1-1-1v-4" />
+          <circle cx="12" cy="14" r="3" />
+          <path d="M11 13h.01" />
+          <path d="M13 13h.01" />
         </svg>
       );
     case 'frog':
       return (
         <svg viewBox="0 0 24 24" className="w-7 h-7 stroke-current" fill="none" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="7" cy="7" r="3" />
-          <circle cx="17" cy="7" r="3" />
-          <circle cx="7" cy="7" r="1" />
-          <circle cx="17" cy="7" r="1" />
-          <path d="M4 11c0 4.42 3.58 8 8 8s8-3.58 8-8" />
-          <path d="M8 14c1 1 2.5 1.5 4 1.5s3-.5 4-1.5" />
-          <path d="M3 18l3-1M21 18l-3-1" />
+          <circle cx="6" cy="6" r="3" />
+          <circle cx="18" cy="6" r="3" />
+          <path d="M18 9a9 9 0 0 1-12 0" />
+          <path d="M6 9a9 9 0 0 0 0 9h12a9 9 0 0 0 0-9" />
+          <circle cx="6" cy="6" r="1" />
+          <circle cx="18" cy="6" r="1" />
         </svg>
       );
     case 'horse':
       return (
         <svg viewBox="0 0 24 24" className="w-7 h-7 stroke-current" fill="none" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M5 20v-5l3-3 2-8h4l2 4 4 1-1 3-3 1-1 7" />
-          <path d="M11 7l1-3h3" />
-          <circle cx="15" cy="8" r="0.75" />
-          <path d="M7 16h8" />
+          <path d="M22 17c-2 0-3-1.5-3-3V6c0-1.7-1.3-3-3-3h-2.5C12 3 10.5 4.5 10.5 6v2L7 12H3l-1 3 2 1h3l3 5h2l-1-4 3-2 3 4h2v-2" />
         </svg>
       );
     case 'ship':
       return (
         <svg viewBox="0 0 24 24" className="w-7 h-7 stroke-current" fill="none" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M2 21c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.5 0 2.5 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1" />
-          <path d="M19.38 20A11.6 11.6 0 0 0 21 14l-9-4-9 4c0 2.9.94 5.34 2.81 7.76" />
-          <path d="M19 13V7a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v6" />
-          <path d="M12 10V2" />
-          <path d="M12 2l5 3" />
+          <path d="M2 21c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1 .6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1" />
+          <path d="M19.38 20A11.6 11.6 0 0 0 21 14l-9-4-9 4c0 2.9.94 5.43 2.38 7" />
+          <path d="M4 14V8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v6" />
+          <path d="M12 2v4" />
+          <path d="M10 2h4" />
         </svg>
       );
     case 'truck':
@@ -126,10 +121,10 @@ const CifarGlyph: React.FC<{ label: string }> = ({ label }) => {
 export const DatasetDetailPage: React.FC = () => {
   const { datasetId } = useParams<{ datasetId: string }>();
   const navigate = useNavigate();
-  const { jobs } = useApp();
 
   const [datasetData, setDatasetData] = useState<DatasetDetailData | null>(null);
   const [buildsData, setBuildsData] = useState<DatasetBuildListItemData[]>([]);
+  const [associatedJobs, setAssociatedJobs] = useState<JobListItemData[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -148,9 +143,10 @@ export const DatasetDetailPage: React.FC = () => {
     try {
       setLoading(true);
       setError(null);
-      const [dsRes, buildsRes] = await Promise.allSettled([
+      const [dsRes, buildsRes, jobsRes] = await Promise.allSettled([
         datasetsService.getDataset(datasetId),
         datasetBuildsService.listBuilds({ dataset_id: datasetId }),
+        jobsService.listJobs({ limit: 50 }),
       ]);
 
       if (dsRes.status === 'fulfilled') {
@@ -161,6 +157,10 @@ export const DatasetDetailPage: React.FC = () => {
 
       if (buildsRes.status === 'fulfilled') {
         setBuildsData(buildsRes.value.data || []);
+      }
+
+      if (jobsRes.status === 'fulfilled') {
+        setAssociatedJobs(jobsRes.value.data || []);
       }
     } catch (err: any) {
       setError(err?.message || 'Failed to load dataset details');
@@ -202,11 +202,6 @@ export const DatasetDetailPage: React.FC = () => {
   }));
 
   const readyConfigs = configurations.filter(b => b.state === 'READY');
-
-  // Associated jobs (history)
-  const associatedJobs = (jobs || []).filter(
-    j => j.datasetId === dataset.id || j.datasetName?.includes(dataset.name)
-  );
 
   // CIFAR-10 classes for preview
   const classes = [

@@ -14,12 +14,13 @@ import { useApp } from '../context/AppContext';
 import { SubsystemHealthBadge, SeverityBadge } from '../components/common/Badge';
 import { formatDiagnosticEvent, EventIconType } from '../utils/eventFormatter';
 import { EventDetailDrawer } from '../components/drawers/EventDetailDrawer';
-import { DiagnosticEvent } from '../types';
-import { systemService, eventsService } from '../api';
-import { HealthData, CapabilitiesData, EventListItemData } from '../types/api';
+import { DiagnosticEvent, WorkerSession } from '../types';
+import { systemService, eventsService, attemptsService, workersService } from '../api';
+import { HealthData, CapabilitiesData, EventListItemData, WorkerSessionItemData } from '../types/api';
+import { config } from '../config';
 
 export const SystemPage: React.FC = () => {
-  const { currentAttempt, workers, isRuntimeStale, setSelectedWorker } = useApp();
+  const { isRuntimeStale, setSelectedWorker } = useApp();
   const [searchParams, setSearchParams] = useSearchParams();
   const activeTab = searchParams.get('tab') === 'diagnostics' ? 'diagnostics' : 'overview';
 
@@ -30,6 +31,7 @@ export const SystemPage: React.FC = () => {
   const [healthData, setHealthData] = useState<HealthData | null>(null);
   const [capabilitiesData, setCapabilitiesData] = useState<CapabilitiesData | null>(null);
   const [apiEvents, setApiEvents] = useState<EventListItemData[]>([]);
+  const [liveWorkers, setLiveWorkers] = useState<WorkerSessionItemData[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -41,10 +43,11 @@ export const SystemPage: React.FC = () => {
     try {
       setLoading(true);
       setError(null);
-      const [healthRes, capRes, evRes] = await Promise.allSettled([
+      const [healthRes, capRes, evRes, attemptRes] = await Promise.allSettled([
         systemService.getHealth(),
         systemService.getCapabilities(),
         eventsService.listEvents({ limit: 50 }),
+        attemptsService.listAttempts({ state: 'RUNNING', limit: 1 }),
       ]);
 
       if (healthRes.status === 'fulfilled') {
@@ -55,6 +58,17 @@ export const SystemPage: React.FC = () => {
       }
       if (evRes.status === 'fulfilled') {
         setApiEvents(evRes.value.data || []);
+      }
+      if (attemptRes.status === 'fulfilled' && attemptRes.value.data && attemptRes.value.data.length > 0) {
+        const activeAttemptId = attemptRes.value.data[0].attempt_id;
+        try {
+          const wRes = await workersService.listWorkers(activeAttemptId);
+          setLiveWorkers(wRes.data || []);
+        } catch {
+          setLiveWorkers([]);
+        }
+      } else {
+        setLiveWorkers([]);
       }
     } catch (err: any) {
       setError(err?.message || 'Failed to load system data');
@@ -95,7 +109,7 @@ export const SystemPage: React.FC = () => {
         name: 'Backend API',
         status: backendStatus,
         lastSeen: 'now',
-        latency: deps.backend?.latency_ms ? `${deps.backend.latency_ms} ms` : '2 ms',
+        latency: deps.backend?.latency_ms ? `${deps.backend.latency_ms} ms` : '< 2 ms',
         protocol: 'HTTP/2 REST',
       },
       {
@@ -103,7 +117,7 @@ export const SystemPage: React.FC = () => {
         name: 'Coordinator Runtime',
         status: isRuntimeStale ? ('DEGRADED' as const) : getDepStatus('runtime'),
         lastSeen: isRuntimeStale ? 'Stale' : 'now',
-        latency: deps.runtime?.latency_ms ? `${deps.runtime.latency_ms} ms` : '3 ms',
+        latency: deps.runtime?.latency_ms ? `${deps.runtime.latency_ms} ms` : '< 3 ms',
         protocol: 'WebSocket v1.2 / DTP/1',
       },
       {
@@ -111,7 +125,7 @@ export const SystemPage: React.FC = () => {
         name: 'PostgreSQL Database',
         status: getDepStatus('database'),
         lastSeen: 'now',
-        latency: deps.database?.latency_ms ? `${deps.database.latency_ms} ms` : '1 ms',
+        latency: deps.database?.latency_ms ? `${deps.database.latency_ms} ms` : '< 1 ms',
         protocol: 'PostgreSQL 16',
       },
       {
@@ -119,41 +133,68 @@ export const SystemPage: React.FC = () => {
         name: 'Dataset Manager',
         status: getDepStatus('dataset_manager'),
         lastSeen: 'now',
-        latency: deps.dataset_manager?.latency_ms ? `${deps.dataset_manager.latency_ms} ms` : '4 ms',
+        latency: deps.dataset_manager?.latency_ms ? `${deps.dataset_manager.latency_ms} ms` : '< 4 ms',
         protocol: 'POSIX / Local FS',
       },
     ];
   }, [healthData, isRuntimeStale]);
 
-  const clusterNodes = [
-    {
-      id: 'node-01',
-      nodeLabel: 'Compute Node 01',
-      workerLabel: 'Worker 0',
-      state: 'Active · Synchronized',
-      lastHeartbeat: '300ms ago',
-      internalIp: '10.240.0.11',
-      protocol: 'dtp/v1.3',
-    },
-    {
-      id: 'node-02',
-      nodeLabel: 'Compute Node 02',
-      workerLabel: 'Worker 1',
-      state: 'Active · Synchronized',
-      lastHeartbeat: '450ms ago',
-      internalIp: '10.240.0.12',
-      protocol: 'dtp/v1.3',
-    },
-    {
-      id: 'node-03',
-      nodeLabel: 'Compute Node 03',
-      workerLabel: 'Worker 2',
-      state: 'Active · Synchronized',
-      lastHeartbeat: '280ms ago',
-      internalIp: '10.240.0.13',
-      protocol: 'dtp/v1.3',
-    },
-  ];
+  const clusterNodes = useMemo(() => {
+    if (liveWorkers.length > 0) {
+      return liveWorkers.map(w => ({
+        id: `node-${w.worker_id}`,
+        nodeLabel: w.node_label || `Compute Node 0${w.worker_id + 1}`,
+        workerLabel: `Worker ${w.worker_id}`,
+        state: w.state === 'READY' ? 'Active · Synchronized' : w.state,
+        lastHeartbeat: w.last_heartbeat_at ? new Date(w.last_heartbeat_at).toLocaleTimeString() : 'connected',
+        internalIp: `10.240.0.1${w.worker_id + 1}`,
+        protocol: 'dtp/v1.0',
+        workerData: {
+          workerId: w.worker_id,
+          sessionId: w.session_id,
+          nodeLabel: w.node_label || `Node ${w.worker_id}`,
+          protocolVersion: 'dtp/v1.0',
+          connectedAt: w.connected_at || 'now',
+          state: (w.state as any) || 'READY',
+          shardId: w.shard_id,
+          localModelVersion: w.local_model_version ? String(w.local_model_version) : undefined,
+        } as WorkerSession,
+      }));
+    }
+
+    return [
+      {
+        id: 'node-01',
+        nodeLabel: 'Compute Node 01',
+        workerLabel: 'Worker 0',
+        state: isHealthy ? 'Standby · Operational' : 'Offline',
+        lastHeartbeat: isHealthy ? 'heartbeat ok' : 'unreachable',
+        internalIp: '10.240.0.11',
+        protocol: 'dtp/v1.0',
+        workerData: null,
+      },
+      {
+        id: 'node-02',
+        nodeLabel: 'Compute Node 02',
+        workerLabel: 'Worker 1',
+        state: isHealthy ? 'Standby · Operational' : 'Offline',
+        lastHeartbeat: isHealthy ? 'heartbeat ok' : 'unreachable',
+        internalIp: '10.240.0.12',
+        protocol: 'dtp/v1.0',
+        workerData: null,
+      },
+      {
+        id: 'node-03',
+        nodeLabel: 'Compute Node 03',
+        workerLabel: 'Worker 2',
+        state: isHealthy ? 'Standby · Operational' : 'Offline',
+        lastHeartbeat: isHealthy ? 'heartbeat ok' : 'unreachable',
+        internalIp: '10.240.0.13',
+        protocol: 'dtp/v1.0',
+        workerData: null,
+      },
+    ];
+  }, [liveWorkers, isHealthy]);
 
   // Convert AuditEventResponse to DiagnosticEvent format for UI
   const displayEvents: DiagnosticEvent[] = useMemo(() => {
@@ -317,32 +358,31 @@ export const SystemPage: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/[0.04]">
-                  {clusterNodes.map((node, idx) => {
-                    const liveWorker = workers[idx];
-                    return (
-                      <tr
-                        key={node.id}
-                        onClick={() => liveWorker && setSelectedWorker(liveWorker)}
-                        className="hover:bg-[#171719] cursor-pointer transition-colors group"
-                      >
-                        <td className="py-2.5 px-3.5 font-medium text-[#f3f3f4] group-hover:text-blue-400 transition-colors">
-                          <div className="flex items-center gap-2">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                            <span>{node.workerLabel}</span>
-                          </div>
-                        </td>
-                        <td className="py-2.5 px-3 text-[#a1a1a8]">
-                          {node.nodeLabel}
-                        </td>
-                        <td className="py-2.5 px-3 text-[#f3f3f4]">
-                          {node.state}
-                        </td>
-                        <td className="py-2.5 px-3.5 text-right text-[#73737c]">
-                          {node.lastHeartbeat}
-                        </td>
-                      </tr>
-                    );
-                  })}
+                  {clusterNodes.map(node => (
+                    <tr
+                      key={node.id}
+                      onClick={() => node.workerData && setSelectedWorker(node.workerData)}
+                      className={`hover:bg-[#171719] transition-colors group ${
+                        node.workerData ? 'cursor-pointer' : ''
+                      }`}
+                    >
+                      <td className="py-2.5 px-3.5 font-medium text-[#f3f3f4] group-hover:text-blue-400 transition-colors">
+                        <div className="flex items-center gap-2">
+                          <span className={`w-1.5 h-1.5 rounded-full ${node.state.includes('Active') || node.state.includes('Operational') ? 'bg-emerald-400' : 'bg-zinc-500'}`} />
+                          <span>{node.workerLabel}</span>
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-3 text-[#a1a1a8]">
+                        {node.nodeLabel}
+                      </td>
+                      <td className="py-2.5 px-3 text-[#f3f3f4]">
+                        {node.state}
+                      </td>
+                      <td className="py-2.5 px-3.5 text-right text-[#73737c]">
+                        {node.lastHeartbeat}
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
@@ -403,16 +443,20 @@ export const SystemPage: React.FC = () => {
 
                 <div className="p-2.5 rounded bg-[#171719] border border-white/[0.04] text-xs space-y-1">
                   <div className="flex items-center justify-between">
-                    <span className="text-[#73737c]">Durable Checkpoint Volume</span>
-                    <span className="font-mono text-[#a1a1a8]">/data/checkpoints/cifar10_standard</span>
+                    <span className="text-[#73737c]">Supported Strategies</span>
+                    <span className="font-mono text-[#a1a1a8]">
+                      {capabilitiesData?.supported_training_strategies?.join(', ') || 'strict_bsp'}
+                    </span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-[#73737c]">Barrier Algorithm</span>
-                    <span className="text-[#a1a1a8]">Deterministic Strict BSP v1.2</span>
+                    <span className="text-[#a1a1a8]">Deterministic Strict BSP v1.0</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-[#73737c]">Transport Socket</span>
-                    <span className="font-mono text-[#a1a1a8]">ws://coordinator:8080/v1/stream</span>
+                    <span className="font-mono text-[#a1a1a8]">
+                      {config.wsBaseUrl ? `${config.wsBaseUrl}/ws/v1/attempts` : '/ws/v1/attempts'}
+                    </span>
                   </div>
                 </div>
               </div>

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   Play,
+  Pencil,
   Copy,
   FileCode,
   Archive,
@@ -32,6 +33,7 @@ export const JobDetailPage: React.FC = () => {
   const [actionLoading, setActionLoading] = useState<string | null>(null);
 
   const [showArchiveConfirm, setShowArchiveConfirm] = useState(false);
+  const [showStartDraftConfirm, setShowStartDraftConfirm] = useState(false);
   const [showTechnicalDetails, setShowTechnicalDetails] = useState(false);
 
   const loadJobData = useCallback(async () => {
@@ -207,6 +209,16 @@ export const JobDetailPage: React.FC = () => {
 
         {/* Action hierarchy */}
         <div className="flex items-center gap-2 self-start sm:self-center">
+          {job.state === 'DRAFT' && !isRunning && (
+            <Link
+              to={`/jobs/${job.job_id}/edit`}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-normal rounded bg-[#171719] hover:bg-[#202024] text-[#f3f3f4] transition-colors border border-white/[0.07]"
+            >
+              <Pencil className="w-3.5 h-3.5 text-[#73737c]" />
+              <span>Edit Draft</span>
+            </Link>
+          )}
+
           <button
             type="button"
             disabled={actionLoading === 'clone'}
@@ -229,11 +241,17 @@ export const JobDetailPage: React.FC = () => {
             </button>
           )}
 
-          {job.state === 'READY' && !isRunning && (
+          {(job.state === 'READY' || job.state === 'DRAFT') && !isRunning && (
             <button
               type="button"
               disabled={actionLoading === 'launch'}
-              onClick={handleLaunch}
+              onClick={() => {
+                if (job.state === 'DRAFT') {
+                  setShowStartDraftConfirm(true);
+                } else {
+                  handleLaunch();
+                }
+              }}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded bg-blue-600 hover:bg-blue-500 text-white transition-colors disabled:opacity-50"
             >
               <Play className="w-3.5 h-3.5" />
@@ -455,7 +473,29 @@ export const JobDetailPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Confirmation Modal */}
+      {/* Start DRAFT Job Confirmation Modal */}
+      <ConfirmationModal
+        isOpen={showStartDraftConfirm}
+        onClose={() => setShowStartDraftConfirm(false)}
+        onConfirm={async () => {
+          setShowStartDraftConfirm(false);
+          await handleLaunch();
+        }}
+        title="Start Training Run?"
+        confirmLabel="Start Training"
+        message={
+          <div className="space-y-2 text-xs text-[#a1a1a8]">
+            <p>
+              Job <strong className="text-[#f3f3f4]">{job.display_name}</strong> is currently in <span className="font-mono text-[#f3f3f4]">DRAFT</span> state.
+            </p>
+            <p>
+              Starting the job will validate and freeze its configuration into <span className="font-mono text-[#f3f3f4]">READY</span> state and launch a training attempt. Once frozen, training settings cannot be edited directly.
+            </p>
+          </div>
+        }
+      />
+
+      {/* Archive Confirmation Modal */}
       <ConfirmationModal
         isOpen={showArchiveConfirm}
         onClose={() => setShowArchiveConfirm(false)}

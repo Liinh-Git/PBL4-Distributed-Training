@@ -21,10 +21,10 @@ const getEnvVar = (key: 'VITE_API_BASE_URL' | 'VITE_WS_BASE_URL'): string | unde
 
 const resolveApiBaseUrl = (): string => {
   const envUrl = getEnvVar('VITE_API_BASE_URL');
-  if (envUrl && typeof envUrl === 'string' && envUrl.trim() !== '') {
+  if (envUrl !== undefined && typeof envUrl === 'string') {
     return envUrl.trim().replace(/\/+$/, '');
   }
-  return 'http://localhost:8000';
+  return '';
 };
 
 const resolveWsBaseUrl = (): string => {
@@ -40,7 +40,11 @@ const resolveWsBaseUrl = (): string => {
   if (apiBase.startsWith('http://')) {
     return apiBase.replace('http://', 'ws://');
   }
-  return 'ws://localhost:8000';
+  if (typeof window !== 'undefined' && window.location) {
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${proto}//${window.location.host}`;
+  }
+  return '';
 };
 
 export const config: AppConfig = {

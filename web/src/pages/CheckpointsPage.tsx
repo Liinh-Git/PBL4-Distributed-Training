@@ -7,7 +7,6 @@ import {
   RefreshCw,
   AlertCircle,
 } from 'lucide-react';
-import { useApp } from '../context/AppContext';
 import { CheckpointStateBadge } from '../components/common/Badge';
 import { CheckpointDetailDrawer } from '../components/drawers/CheckpointDetailDrawer';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
@@ -18,7 +17,6 @@ import { CheckpointListItemData } from '../types/api';
 
 
 export const CheckpointsPage: React.FC = () => {
-  const { resumeFromCheckpoint } = useApp();
   const navigate = useNavigate();
 
   const [apiCheckpoints, setApiCheckpoints] = useState<CheckpointListItemData[]>([]);
@@ -104,7 +102,6 @@ export const CheckpointsPage: React.FC = () => {
             checkpoint_id: checkpointToResume.id,
           });
         }
-        resumeFromCheckpoint(checkpointToResume.id);
         setCheckpointToResume(null);
         navigate('/live');
       } catch (err: any) {

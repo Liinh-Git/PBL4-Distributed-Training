@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate, useSearchParams, Link } from 'react-router-dom';
+import { useNavigate, useSearchParams, useParams, Link } from 'react-router-dom';
 import {
   ArrowLeft,
   ArrowRight,
@@ -14,7 +14,6 @@ import {
   AlertTriangle,
   RefreshCw,
 } from 'lucide-react';
-import { useApp } from '../context/AppContext';
 import { datasetsService, datasetBuildsService, systemService, jobsService } from '../api';
 import {
   DatasetItemData,
@@ -25,9 +24,10 @@ import {
 } from '../types/api';
 
 export const NewTrainingFlowPage: React.FC = () => {
-  const { triggerDatasetBuild } = useApp();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const { jobId } = useParams<{ jobId?: string }>();
+  const isEditMode = Boolean(jobId);
 
   // API Catalog State
   const [apiDatasets, setApiDatasets] = useState<DatasetItemData[]>([]);
@@ -50,6 +50,7 @@ export const NewTrainingFlowPage: React.FC = () => {
   const [learningRate, setLearningRate] = useState<number>(0.01);
   const [seed, setSeed] = useState<number>(42);
   const [jobName, setJobName] = useState<string>('');
+  const [jobDescription, setJobDescription] = useState<string>('');
 
   // Created Job & Validation tracking (Server State)
   const [createdJob, setCreatedJob] = useState<JobDetailData | null>(null);
@@ -62,28 +63,56 @@ export const NewTrainingFlowPage: React.FC = () => {
     const loadFlowData = async () => {
       try {
         setLoadingData(true);
-        const [dsRes, buildsRes, capRes] = await Promise.allSettled([
+        const [dsRes, buildsRes, capRes, jobRes] = await Promise.allSettled([
           datasetsService.listDatasets({ limit: 50 }),
           datasetBuildsService.listBuilds({ limit: 100 }),
           systemService.getCapabilities(),
+          isEditMode && jobId ? jobsService.getJob(jobId) : Promise.resolve(null),
         ]);
+
+        let loadedBuilds: DatasetBuildListItemData[] = [];
+        if (buildsRes.status === 'fulfilled') {
+          loadedBuilds = buildsRes.value.data || [];
+          setApiBuilds(loadedBuilds);
+        }
 
         if (dsRes.status === 'fulfilled') {
           const ds = dsRes.value.data || [];
           setApiDatasets(ds);
-          if (!selectedDatasetId && ds.length > 0) {
+          if (!isEditMode && !selectedDatasetId && ds.length > 0) {
             setSelectedDatasetId(ds[0].dataset_id);
           }
         }
 
-        if (buildsRes.status === 'fulfilled') {
-          setApiBuilds(buildsRes.value.data || []);
-        }
-
         if (capRes.status === 'fulfilled' && capRes.value.data?.supported_models) {
           setSupportedModels(capRes.value.data.supported_models);
-          if (capRes.value.data.supported_models.length > 0) {
+          if (!isEditMode && capRes.value.data.supported_models.length > 0) {
             setSelectedModel(capRes.value.data.supported_models[0].model_id);
+          }
+        }
+
+        if (isEditMode && jobRes.status === 'fulfilled' && jobRes.value?.data) {
+          const job: JobDetailData = jobRes.value.data;
+          setCreatedJob(job);
+          setJobName(job.display_name);
+          setJobDescription(job.description || '');
+
+          if (job.requested_contract) {
+            const req = job.requested_contract;
+            setSelectedModel(req.model_id);
+            setSelectedBuildId(req.dataset_build_id);
+            setEpochs(req.epochs);
+            setLearningRate(req.learning_rate);
+            setSeed(req.training_seed);
+
+            const matchingBuild = loadedBuilds.find(b => b.dataset_build_id === req.dataset_build_id);
+            if (matchingBuild) {
+              setSelectedDatasetId(matchingBuild.dataset_id);
+            }
+          }
+
+          if (job.state !== 'DRAFT') {
+            setFormError(`Job "${job.display_name}" is in ${job.state} state. Only DRAFT jobs may be edited.`);
           }
         }
       } finally {
@@ -92,7 +121,7 @@ export const NewTrainingFlowPage: React.FC = () => {
     };
 
     loadFlowData();
-  }, []);
+  }, [isEditMode, jobId]);
 
   // Filter available builds for the chosen dataset
   const currentDataset = (apiDatasets || []).find(d => d.dataset_id === selectedDatasetId);
@@ -100,25 +129,28 @@ export const NewTrainingFlowPage: React.FC = () => {
     b => b.dataset_id === selectedDatasetId && b.state === 'READY'
   );
 
-  // Auto-select a ready build if none is selected or selection is invalid
+  // Auto-select a ready build if none is selected or selection is invalid (in Create mode)
   useEffect(() => {
-    if (readyBuilds.length > 0) {
-      if (!selectedBuildId || !readyBuilds.some(b => b.dataset_build_id === selectedBuildId)) {
-        setSelectedBuildId(readyBuilds[0].dataset_build_id);
+    if (!isEditMode) {
+      if (readyBuilds.length > 0) {
+        if (!selectedBuildId || !readyBuilds.some(b => b.dataset_build_id === selectedBuildId)) {
+          setSelectedBuildId(readyBuilds[0].dataset_build_id);
+        }
+      } else {
+        setSelectedBuildId('');
       }
-    } else {
-      setSelectedBuildId('');
     }
-  }, [selectedDatasetId, apiBuilds]);
+  }, [selectedDatasetId, apiBuilds, isEditMode]);
 
-  // Set default job name when dataset/model changes
+  // Set default job name when dataset/model changes (Create mode only)
   useEffect(() => {
-    if (currentDataset && !jobName) {
+    if (!isEditMode && currentDataset && !jobName) {
       setJobName(`${selectedModel} on ${currentDataset.name}`);
     }
-  }, [currentDataset, selectedModel]);
+  }, [currentDataset, selectedModel, isEditMode]);
 
-  const selectedBuild = readyBuilds.find(b => b.dataset_build_id === selectedBuildId);
+  const selectedBuild = readyBuilds.find(b => b.dataset_build_id === selectedBuildId) ||
+    apiBuilds.find(b => b.dataset_build_id === selectedBuildId);
 
   // Model Options: dynamic from capabilities if provided, with fallback defaults
   const MODEL_OPTIONS = supportedModels.length > 0
@@ -143,10 +175,23 @@ export const NewTrainingFlowPage: React.FC = () => {
         },
       ];
 
-  const handleBuildDataset = () => {
+  const handleBuildDataset = async () => {
     if (!selectedDatasetId) return;
-    const newBuild = triggerDatasetBuild(selectedDatasetId, 'HASH', 3);
-    setSelectedBuildId(newBuild.id);
+    try {
+      const res = await datasetBuildsService.createBuild({
+        dataset_id: selectedDatasetId,
+        profile: 'CNN_IMAGE_CLASSIFICATION_V1',
+        batch_size: 64,
+        partition_seed: 42,
+      });
+      if (res.data?.target_id) {
+        setSelectedBuildId(res.data.target_id);
+      }
+      const buildsRes = await datasetBuildsService.listBuilds({ dataset_id: selectedDatasetId });
+      setApiBuilds(buildsRes.data || []);
+    } catch (err: any) {
+      setFormError(err?.message || 'Failed to create dataset build');
+    }
   };
 
   /**
@@ -163,25 +208,12 @@ export const NewTrainingFlowPage: React.FC = () => {
 
       let currentDraft: JobDetailData;
 
-      if (!createdJob) {
-        // API 13.0: Create Job in DRAFT state
-        const createRes = await jobsService.createJob({
-          display_name: finalName,
-          requested_contract: {
-            dataset_build_id: selectedBuildId,
-            model_id: selectedModel,
-            epochs,
-            learning_rate: learningRate,
-            training_seed: seed,
-            training_strategy: 'strict_bsp',
-          },
-        });
-        currentDraft = createRes.data;
-        setCreatedJob(currentDraft);
-      } else {
+      if (isEditMode || createdJob) {
+        const targetId = (createdJob?.job_id || jobId)!;
         // API 16.0: Patch existing DRAFT job
-        const patchRes = await jobsService.patchJob(createdJob.job_id, {
+        const patchRes = await jobsService.patchJob(targetId, {
           display_name: finalName,
+          description: jobDescription || undefined,
           requested_contract: {
             dataset_build_id: selectedBuildId,
             model_id: selectedModel,
@@ -193,6 +225,22 @@ export const NewTrainingFlowPage: React.FC = () => {
         });
         currentDraft = patchRes.data;
         setCreatedJob(currentDraft);
+      } else {
+        // API 13.0: Create Job in DRAFT state
+        const createRes = await jobsService.createJob({
+          display_name: finalName,
+          description: jobDescription || undefined,
+          requested_contract: {
+            dataset_build_id: selectedBuildId,
+            model_id: selectedModel,
+            epochs,
+            learning_rate: learningRate,
+            training_seed: seed,
+            training_strategy: 'strict_bsp',
+          },
+        });
+        currentDraft = createRes.data;
+        setCreatedJob(currentDraft);
       }
 
       // API 17.0: Validate Job contract with backend
@@ -201,7 +249,7 @@ export const NewTrainingFlowPage: React.FC = () => {
 
       setStep(4);
     } catch (err: any) {
-      setFormError(err?.message || 'Failed to create and validate training specification');
+      setFormError(err?.message || 'Failed to save and validate training specification');
     } finally {
       setValidating(false);
     }
@@ -212,14 +260,15 @@ export const NewTrainingFlowPage: React.FC = () => {
    * API 20.0 POST /api/v1/jobs/{job_id}/start -> 202 Accepted with attempt_id
    */
   const handleStartTraining = async () => {
-    if (!createdJob) return;
+    const targetId = createdJob?.job_id || jobId;
+    if (!targetId) return;
     try {
       setActionLoading('start');
       setFormError(null);
-      const startRes = await jobsService.startJob(createdJob.job_id);
+      const startRes = await jobsService.startJob(targetId);
       const attemptId = startRes.data.attempt_id;
       // Navigate to live monitoring or job detail with real attempt_id
-      navigate(`/jobs/${createdJob.job_id}`);
+      navigate(`/jobs/${targetId}`);
     } catch (err: any) {
       setFormError(err?.message || 'Failed to start training attempt');
     } finally {
@@ -241,9 +290,19 @@ export const NewTrainingFlowPage: React.FC = () => {
             <span>Jobs</span>
           </Link>
           <span>/</span>
-          <span className="text-[#a1a1a8]">New training</span>
+          {isEditMode ? (
+            <>
+              <Link to={`/jobs/${jobId}`} className="hover:text-[#f3f3f4] transition-colors font-mono">
+                {jobName || jobId}
+              </Link>
+              <span>/</span>
+              <span className="text-[#a1a1a8]">Edit draft</span>
+            </>
+          ) : (
+            <span className="text-[#a1a1a8]">New training</span>
+          )}
         </div>
-        <Link to="/jobs" className="hover:text-[#f3f3f4] transition-colors">
+        <Link to={isEditMode && jobId ? `/jobs/${jobId}` : "/jobs"} className="hover:text-[#f3f3f4] transition-colors">
           Cancel
         </Link>
       </div>
@@ -251,10 +310,12 @@ export const NewTrainingFlowPage: React.FC = () => {
       {/* Header */}
       <div>
         <h1 className="text-base font-semibold text-[#f3f3f4]">
-          New training
+          {isEditMode ? 'Edit draft training' : 'New training'}
         </h1>
         <p className="text-xs text-[#73737c] mt-0.5">
-          Configure a dataset, select a model architecture, and launch distributed training.
+          {isEditMode
+            ? 'Modify configuration, dataset selection, and hyperparameters for this draft job.'
+            : 'Configure a dataset, select a model architecture, and launch distributed training.'}
         </p>
       </div>
 
@@ -563,6 +624,20 @@ export const NewTrainingFlowPage: React.FC = () => {
             />
           </div>
 
+          {/* Job Description (Optional) */}
+          <div className="p-4 bg-[#121214] border border-white/[0.07] rounded space-y-3">
+            <label className="block text-xs font-semibold text-[#f3f3f4]">
+              Description <span className="text-[#73737c] font-normal">(Optional)</span>
+            </label>
+            <textarea
+              rows={2}
+              value={jobDescription}
+              onChange={e => setJobDescription(e.target.value)}
+              placeholder="Provide context or notes about this training specification..."
+              className="w-full px-3 py-1.5 bg-[#171719] border border-white/[0.07] rounded text-xs text-[#f3f3f4] focus:border-blue-500 focus:outline-hidden transition-colors resize-none"
+            />
+          </div>
+
           {/* Hyperparameters */}
           <div className="p-4 bg-[#121214] border border-white/[0.07] rounded space-y-4">
             <div className="text-xs font-semibold text-[#f3f3f4]">
@@ -792,7 +867,7 @@ export const NewTrainingFlowPage: React.FC = () => {
                 onClick={() => setStep(5)}
                 className="px-3.5 py-1.5 rounded text-xs text-[#a1a1a8] hover:text-[#f3f3f4] bg-[#121214] border border-white/[0.07] transition-colors"
               >
-                Save as Draft
+                {isEditMode ? 'Save Changes' : 'Save as Draft'}
               </button>
               <button
                 type="button"
@@ -801,14 +876,14 @@ export const NewTrainingFlowPage: React.FC = () => {
                 className="px-4 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:pointer-events-none"
               >
                 <Play className="w-3.5 h-3.5 fill-current" />
-                <span>{actionLoading === 'start' ? 'Starting...' : 'Create & Start'}</span>
+                <span>{actionLoading === 'start' ? 'Starting...' : isEditMode ? 'Start Training' : 'Create & Start'}</span>
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* STEP 5: READY STATE (After Job creation) */}
+      {/* STEP 5: READY STATE (After Job creation or edit) */}
       {step === 5 && (
         <div className="p-8 bg-[#121214] border border-white/[0.07] rounded text-center space-y-4 max-w-lg mx-auto">
           <div className="w-10 h-10 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center mx-auto">
@@ -817,17 +892,17 @@ export const NewTrainingFlowPage: React.FC = () => {
 
           <div>
             <h2 className="text-base font-semibold text-[#f3f3f4]">
-              Training Job Created
+              {isEditMode ? 'Training Job Updated' : 'Training Job Created'}
             </h2>
             <p className="text-xs text-[#73737c] mt-1">
-              Job specification <strong className="text-[#f3f3f4]">{createdJob?.display_name}</strong> is registered on the server.
+              Job specification <strong className="text-[#f3f3f4]">{createdJob?.display_name}</strong> {isEditMode ? 'was updated on the server and remains in DRAFT.' : 'is registered on the server.'}
             </p>
           </div>
 
           <div className="flex items-center justify-center gap-3 pt-2">
-            {createdJob && (
+            {(createdJob || jobId) && (
               <Link
-                to={`/jobs/${createdJob.job_id}`}
+                to={`/jobs/${createdJob?.job_id || jobId}`}
                 className="px-3.5 py-1.5 rounded text-xs text-[#73737c] hover:text-[#f3f3f4] bg-[#171719] border border-white/[0.07] transition-colors"
               >
                 View training details

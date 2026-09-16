@@ -1,63 +1,15 @@
-# API Contract
+# API Contract — Backend REST & WebSocket
 
-Định dạng Markdown được chuyển đổi từ bảng `API contract.xlsx`. Nội dung request, response và quy tắc được giữ nguyên theo dữ liệu nguồn.
+## 1. System — Health tổng hợp
 
-| STT | Nhóm | Chức năng | Method | Endpoint |
-|---:|---|---|---|---|
-| 1.0 | System | Health tổng hợp | `GET` | `/api/v1/health` |
-| 2.0 | System / Runtime | Capabilities hệ thống | `GET` | `/api/v1/system/capabilities` |
-| 3.0 | Runtime | Runtime snapshot | `GET` | `/api/v1/runtime/snapshot` |
-| 4.0 | Dataset | Tạo Dataset logic | `POST` | `/api/v1/datasets` |
-| 5.0 | Dataset | Danh sách Dataset | `GET` | `/api/v1/datasets` |
-| 6.0 | Dataset | Chi tiết Dataset | `GET` | `/api/v1/datasets/{dataset_id}` |
-| 7.0 | Dataset Build | Tạo Dataset Build | `POST` | `/api/v1/dataset-builds` |
-| 8.0 | Dataset Build | Danh sách Dataset Build | `GET` | `/api/v1/dataset-builds` |
-| 9.0 | Dataset Build | Chi tiết Dataset Build | `GET` | `/api/v1/dataset-builds/{dataset_build_id}` |
-| 10.0 | Dataset Build | Rebuild Dataset Build | `POST` | `/api/v1/dataset-builds/{dataset_build_id}/rebuild` |
-| 11.0 | Dataset Build | Deprecate Dataset Build | `POST` | `/api/v1/dataset-builds/{dataset_build_id}/deprecate` |
-| 12.0 | Dataset Build | Delete Dataset Build (business workflow) | `POST` | `/api/v1/dataset-builds/{dataset_build_id}/delete` |
-| 13.0 | Job | Tạo Job DRAFT | `POST` | `/api/v1/jobs` |
-| 14.0 | Job | Danh sách Job | `GET` | `/api/v1/jobs` |
-| 15.0 | Job | Chi tiết Job | `GET` | `/api/v1/jobs/{job_id}` |
-| 16.0 | Job | Sửa Job | `PATCH` | `/api/v1/jobs/{job_id}` |
-| 17.0 | Job / Training | Validate/preview Job contract | `POST` | `/api/v1/jobs/{job_id}/validate` |
-| 18.0 | Job | Clone Job | `POST` | `/api/v1/jobs/{job_id}/clone` |
-| 19.0 | Job | Archive Job | `POST` | `/api/v1/jobs/{job_id}/archive` |
-| 20.0 | Training / Attempt | Start Job - FRESH | `POST` | `/api/v1/jobs/{job_id}/start` |
-| 21.0 | Training / Attempt | Retry from start | `POST` | `/api/v1/jobs/{job_id}/retry` |
-| 22.0 | Training / Attempt | Resume từ checkpoint | `POST` | `/api/v1/jobs/{job_id}/resume` |
-| 23.0 | Attempt | Danh sách Attempt | `GET` | `/api/v1/attempts` |
-| 24.0 | Attempt | Chi tiết Attempt | `GET` | `/api/v1/attempts/{attempt_id}` |
-| 25.0 | Runtime / Attempt | Abort Attempt | `POST` | `/api/v1/attempts/{attempt_id}/abort` |
-| 26.0 | Runtime / Worker Bootstrap | Lấy Worker join spec | `GET` | `/api/v1/attempts/{attempt_id}/join-spec` |
-| 27.0 | Runtime | Attempt snapshot | `GET` | `/api/v1/attempts/{attempt_id}/snapshot` |
-| 28.0 | Runtime / Worker | Danh sách Worker Session | `GET` | `/api/v1/attempts/{attempt_id}/workers` |
-| 29.0 | Runtime / Worker | Chi tiết Worker/session | `GET` | `/api/v1/attempts/{attempt_id}/workers/{worker_id}` |
-| 30.0 | Training / StrictBSP | Danh sách Step | `GET` | `/api/v1/attempts/{attempt_id}/steps` |
-| 31.0 | Training / StrictBSP | Chi tiết Step | `GET` | `/api/v1/attempts/{attempt_id}/steps/{step_id}` |
-| 32.0 | Training / Checkpoint | Danh sách Checkpoint | `GET` | `/api/v1/checkpoints` |
-| 33.0 | Training / Checkpoint | Chi tiết Checkpoint | `GET` | `/api/v1/checkpoints/{checkpoint_id}` |
-| 34.0 | Training / Checkpoint | Yêu cầu checkpoint thủ công | `POST` | `/api/v1/attempts/{attempt_id}/checkpoint-requests` |
-| 35.0 | BE Event History | Catch-up Runtime Event | `GET` | `/api/v1/attempts/{attempt_id}/events` |
-| 36.0 | BE Audit | Audit events tổng quát | `GET` | `/api/v1/events` |
-| 37.0 | BE Command | Chi tiết command | `GET` | `/api/v1/commands/{command_id}` |
-| 38.0 | BE Command | Danh sách command | `GET` | `/api/v1/commands` |
-| 39.0 | Runtime / WebSocket | Realtime Attempt stream | `GET / Upgrade` | `/ws/v1/attempts/{attempt_id}` |
-| 40.0 | Training / Metrics | Truy vấn chuỗi số liệu đo lường (Training Metrics Time-series) | `GET` | `/api/v1/attempts/{attempt_id}/metrics` |
-
----
-
-## 1.0 — Health tổng hợp
-
-**Nhóm:** System  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/health`
+**Endpoint:** `/api/v1/health`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật theo security profile; X-Request-Id tùy chọn
+**Bên gọi:** WebUI / CLI / monitoring  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** Backend health + trạng thái kết nối PostgreSQL + Runtime MCP + Dataset Manager. Đây là health tổng hợp; không phải nguồn state của Attempt.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật theo security profile; X-Request-Id tùy chọn
-
-### Request (Body / Query)
+### Request
 
 ```text
 Không có body.
@@ -72,10 +24,10 @@ GET /api/v1/health
 HTTP 200
 {
   "data": {
-    "backend": "ok",
-    "postgres": "ok",
-    "runtime_mcp": "ok",
-    "dataset_manager": "ok",
+    "backend": "healthy",
+    "postgres": "healthy",
+    "runtime_mcp": "healthy",
+    "dataset_manager": "healthy",
     "timestamp": "2026-09-07T03:24:18.527Z"
   },
   "meta": {
@@ -90,17 +42,16 @@ API chỉ phản ánh health của Backend và các dependency; không thay đ�
 
 ---
 
-## 2.0 — Capabilities hệ thống
+## 2. System / Runtime — Capabilities hệ thống
 
-**Nhóm:** System / Runtime  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/system/capabilities`
+**Endpoint:** `/api/v1/system/capabilities`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** Backend capability registry + capability/protocol đã negotiate với Runtime; không lấy capability training từ PostgreSQL.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Không có body.
@@ -145,17 +96,16 @@ WebUI/CLI phải đọc capability trước khi bật tính năng. V1 chỉ cho 
 
 ---
 
-## 3.0 — Runtime snapshot
+## 3. Runtime — Runtime snapshot
 
-**Nhóm:** Runtime  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/runtime/snapshot`
+**Endpoint:** `/api/v1/runtime/snapshot`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** Runtime qua MCP/1 GET_STATE → STATE_SNAPSHOT là nguồn chuẩn cho live state. Backend chỉ giữ projection/cached snapshot và stale flag.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Không có body.
@@ -238,17 +188,16 @@ HTTP 200
 
 ---
 
-## 4.0 — Tạo Dataset logic
+## 4. Dataset — Tạo Dataset logic
 
-**Nhóm:** Dataset  
 **Method:** `POST`  
-**Endpoint:** `/api/v1/datasets`
+**Endpoint:** `/api/v1/datasets`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật; Idempotency-Key
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** Request của operator → Backend validate → PostgreSQL tạo Dataset logic. Dataset logic do Backend/PostgreSQL quản lý; chưa tạo artifact.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật; Idempotency-Key
-
-### Request (Body / Query)
+### Request
 
 ```text
 Body JSON — DatasetSourceV1
@@ -287,17 +236,16 @@ Dataset ở đây chỉ là nguồn dữ liệu logic. batch_size, preprocessing
 
 ---
 
-## 5.0 — Danh sách Dataset
+## 5. Dataset — Danh sách Dataset
 
-**Nhóm:** Dataset  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/datasets`
+**Endpoint:** `/api/v1/datasets`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** PostgreSQL Dataset catalog qua DatasetRepository.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Query params (đều optional):
@@ -337,17 +285,16 @@ Dùng để tìm Dataset trong catalog. Đây là API đọc có phân trang; kh
 
 ---
 
-## 6.0 — Chi tiết Dataset
+## 6. Dataset — Chi tiết Dataset
 
-**Nhóm:** Dataset  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/datasets/{dataset_id}`
+**Endpoint:** `/api/v1/datasets/{dataset_id}`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** PostgreSQL Dataset + thống kê DatasetBuild liên quan; Build lifecycle không được suy từ Dataset.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -397,17 +344,16 @@ Trả thông tin Dataset và thống kê các Build của nó. Dataset và Datas
 
 ---
 
-## 7.0 — Tạo Dataset Build
+## 7. Dataset Build — Tạo Dataset Build
 
-**Nhóm:** Dataset Build  
 **Method:** `POST`  
-**Endpoint:** `/api/v1/dataset-builds`
+**Endpoint:** `/api/v1/dataset-builds`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật; Idempotency-Key
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** Request operator + Dataset metadata trong PostgreSQL → Backend tạo Command → gọi Dataset Manager Control API. Dataset Manager là nguồn chuẩn lifecycle/progress của Build; Backend persist catalog/projection.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật; Idempotency-Key
-
-### Request (Body / Query)
+### Request
 
 ```text
 Body JSON — DatasetBuildCreateV1
@@ -454,17 +400,16 @@ Tạo Command CREATE_DATASET_BUILD và Build mới. command_state=ACCEPTED chỉ
 
 ---
 
-## 8.0 — Danh sách Dataset Build
+## 8. Dataset Build — Danh sách Dataset Build
 
-**Nhóm:** Dataset Build  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/dataset-builds`
+**Endpoint:** `/api/v1/dataset-builds`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** PostgreSQL catalog/projection để query; Dataset Manager là nguồn chuẩn cho lifecycle Build và được Backend đồng bộ vào DB.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Query params (optional):
@@ -508,17 +453,16 @@ Danh sách Build lấy state do Dataset Manager quản lý. Backend không tự 
 
 ---
 
-## 9.0 — Chi tiết Dataset Build
+## 9. Dataset Build — Chi tiết Dataset Build
 
-**Nhóm:** Dataset Build  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/dataset-builds/{dataset_build_id}`
+**Endpoint:** `/api/v1/dataset-builds/{dataset_build_id}`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** PostgreSQL catalog + canonical manifest snapshot/hash; Dataset Manager là nguồn chuẩn của artifact/lifecycle Build.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -575,17 +519,16 @@ READY Build là bất biến. Muốn đổi batch/preprocessing/seed thì phải
 
 ---
 
-## 10.0 — Rebuild Dataset Build
+## 10. Dataset Build — Rebuild Dataset Build
 
-**Nhóm:** Dataset Build  
 **Method:** `POST`  
-**Endpoint:** `/api/v1/dataset-builds/{dataset_build_id}/rebuild`
+**Endpoint:** `/api/v1/dataset-builds/{dataset_build_id}/rebuild`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật; Idempotency-Key
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** Build nguồn từ PostgreSQL + operator override → Command persisted → Dataset Manager Control API tạo Build mới.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật; Idempotency-Key
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -632,17 +575,16 @@ Tạo Command REBUILD_DATASET_BUILD. Build nguồn không bị sửa; target c�
 
 ---
 
-## 11.0 — Deprecate Dataset Build
+## 11. Dataset Build — Deprecate Dataset Build
 
-**Nhóm:** Dataset Build  
 **Method:** `POST`  
-**Endpoint:** `/api/v1/dataset-builds/{dataset_build_id}/deprecate`
+**Endpoint:** `/api/v1/dataset-builds/{dataset_build_id}/deprecate`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật; Idempotency-Key
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** Build identity/catalog từ PostgreSQL; state transition DEPRECATED được thực thi ở Dataset Manager rồi Backend cập nhật projection/catalog.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật; Idempotency-Key
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -678,17 +620,16 @@ DEPRECATED = không cho Job mới chọn, nhưng artifact vẫn phải giữ cho
 
 ---
 
-## 12.0 — Delete Dataset Build (business workflow)
+## 12. Dataset Build — Delete Dataset Build (business workflow)
 
-**Nhóm:** Dataset Build  
 **Method:** `POST`  
-**Endpoint:** `/api/v1/dataset-builds/{dataset_build_id}/delete`
+**Endpoint:** `/api/v1/dataset-builds/{dataset_build_id}/delete`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật; Idempotency-Key
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** Backend kiểm tra durable references trong PostgreSQL trước → persist DELETE_DATASET_BUILD command → gọi Dataset Manager purge bằng cùng command_id. Artifact deletion do Dataset Manager thực thi.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật; Idempotency-Key
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -749,17 +690,16 @@ Tạo Command DELETE_DATASET_BUILD sau khi Backend kiểm tra durable references
 
 ---
 
-## 13.0 — Tạo Job DRAFT
+## 13. Job — Tạo Job DRAFT
 
-**Nhóm:** Job  
 **Method:** `POST`  
-**Endpoint:** `/api/v1/jobs`
+**Endpoint:** `/api/v1/jobs`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật; Idempotency-Key
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** Request operator → Backend validate → PostgreSQL jobs lưu Job DRAFT + requested_contract.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật; Idempotency-Key
-
-### Request (Body / Query)
+### Request
 
 ```text
 Body JSON — required: display_name + requested_contract; description optional:
@@ -812,17 +752,16 @@ Job mới luôn DRAFT. requested_contract chỉ chứa 6 field người dùng đ
 
 ---
 
-## 14.0 — Danh sách Job
+## 14. Job — Danh sách Job
 
-**Nhóm:** Job  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/jobs`
+**Endpoint:** `/api/v1/jobs`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** PostgreSQL jobs + latest Attempt projection/history. JobState lấy từ Job; trạng thái chạy lấy từ Attempt riêng.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Query params (optional):
@@ -871,17 +810,16 @@ Job state chỉ có DRAFT/READY/ARCHIVED. RUNNING/FAILED/COMPLETED là trạng t
 
 ---
 
-## 15.0 — Chi tiết Job
+## 15. Job — Chi tiết Job
 
-**Nhóm:** Job  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/jobs/{job_id}`
+**Endpoint:** `/api/v1/jobs/{job_id}`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** PostgreSQL Job là nguồn chuẩn cho requested_contract/resolved_contract/contract_hash; lịch sử execution lấy từ Attempt records/projection.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -977,17 +915,16 @@ DRAFT chưa có resolved_contract. Sau freeze, resolved_contract và contract_ha
 
 ---
 
-## 16.0 — Sửa Job
+## 16. Job — Sửa Job
 
-**Nhóm:** Job  
 **Method:** `PATCH`  
-**Endpoint:** `/api/v1/jobs/{job_id}`
+**Endpoint:** `/api/v1/jobs/{job_id}`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** PostgreSQL Job hiện tại + request PATCH; Backend enforce JobState và field mutability trước khi persist.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -1049,17 +986,16 @@ PATCH là partial shallow-merge theo field. DRAFT sửa metadata + 6 key request
 
 ---
 
-## 17.0 — Validate/preview Job contract
+## 17. Job / Training — Validate/preview Job contract
 
-**Nhóm:** Job / Training  
 **Method:** `POST`  
-**Endpoint:** `/api/v1/jobs/{job_id}/validate`
+**Endpoint:** `/api/v1/jobs/{job_id}/validate`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** Job DRAFT từ PostgreSQL + DatasetBuild catalog/manifest + Runtime capabilities/config resolver. Kết quả chỉ là preview, không persist authoritative resolved_contract.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -1143,17 +1079,16 @@ Validate chỉ thử resolve và báo lỗi/cảnh báo. Nó không freeze Job, 
 
 ---
 
-## 18.0 — Clone Job
+## 18. Job — Clone Job
 
-**Nhóm:** Job  
 **Method:** `POST`  
-**Endpoint:** `/api/v1/jobs/{job_id}/clone`
+**Endpoint:** `/api/v1/jobs/{job_id}/clone`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật; Idempotency-Key
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** Job nguồn từ PostgreSQL → Backend tạo Job DRAFT mới; requested_contract/metadata được copy theo rule, không reuse contract_hash.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật; Idempotency-Key
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -1196,17 +1131,16 @@ Clone tạo một Job DRAFT mới để chỉnh tiếp. Không sửa Job READY c
 
 ---
 
-## 19.0 — Archive Job
+## 19. Job — Archive Job
 
-**Nhóm:** Job  
 **Method:** `POST`  
-**Endpoint:** `/api/v1/jobs/{job_id}/archive`
+**Endpoint:** `/api/v1/jobs/{job_id}/archive`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật; Idempotency-Key
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** PostgreSQL Job; Backend chỉ chuyển JobState sang ARCHIVED theo rule, không sở hữu lifecycle Attempt đang chạy.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật; Idempotency-Key
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -1237,17 +1171,16 @@ Archive chỉ đổi trạng thái quản trị của Job. Nó không tự abort
 
 ---
 
-## 20.0 — Start Job - FRESH
+## 20. Training / Attempt — Start Job - FRESH
 
-**Nhóm:** Training / Attempt  
 **Method:** `POST`  
-**Endpoint:** `/api/v1/jobs/{job_id}/start`
+**Endpoint:** `/api/v1/jobs/{job_id}/start`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật; Idempotency-Key
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** PostgreSQL Job: nếu DRAFT, Backend resolve + freeze thành READY để tạo resolved_contract/contract_hash; nếu READY thì reuse frozen contract → tạo Attempt + START_ATTEMPT Command bền vững → dispatch Runtime qua MCP/1. Runtime là nguồn chuẩn của Attempt execution state.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật; Idempotency-Key
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -1288,17 +1221,16 @@ Tạo Attempt mới và Command START_ATTEMPT với execution_mode=FRESH. ACCEPT
 
 ---
 
-## 21.0 — Retry from start
+## 21. Training / Attempt — Retry from start
 
-**Nhóm:** Training / Attempt  
 **Method:** `POST`  
-**Endpoint:** `/api/v1/jobs/{job_id}/retry`
+**Endpoint:** `/api/v1/jobs/{job_id}/retry`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật; Idempotency-Key
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** PostgreSQL READY Job + lịch sử Attempt → tạo Attempt mới execution_mode=RETRY_FROM_START + Command → Runtime MCP/1.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật; Idempotency-Key
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -1339,17 +1271,16 @@ Retry vẫn dùng Command START_ATTEMPT, nhưng Attempt mới có execution_mode
 
 ---
 
-## 22.0 — Resume từ checkpoint
+## 22. Training / Attempt — Resume từ checkpoint
 
-**Nhóm:** Training / Attempt  
 **Method:** `POST`  
-**Endpoint:** `/api/v1/jobs/{job_id}/resume`
+**Endpoint:** `/api/v1/jobs/{job_id}/resume`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật; Idempotency-Key
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** PostgreSQL READY Job + Checkpoint COMPLETE tương thích + contract/dataset hashes → tạo Attempt RESUME + Command → Runtime MCP/1.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật; Idempotency-Key
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -1391,17 +1322,16 @@ Resume cũng dùng Command START_ATTEMPT, nhưng Attempt mới có execution_mod
 
 ---
 
-## 23.0 — Danh sách Attempt
+## 23. Attempt — Danh sách Attempt
 
-**Nhóm:** Attempt  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/attempts`
+**Endpoint:** `/api/v1/attempts`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** PostgreSQL Attempt projection/history; active/latest state được reconcile từ Runtime events/snapshot.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Query params (optional):
@@ -1445,17 +1375,16 @@ Attempt là một lần chạy cụ thể của Job. FRESH, RETRY_FROM_START và
 
 ---
 
-## 24.0 — Chi tiết Attempt
+## 24. Attempt — Chi tiết Attempt
 
-**Nhóm:** Attempt  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/attempts/{attempt_id}`
+**Endpoint:** `/api/v1/attempts/{attempt_id}`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** PostgreSQL Attempt + projections; live execution details ưu tiên Runtime snapshot/event đã reconcile.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -1527,17 +1456,16 @@ Top-level chỉ giữ thông tin dùng chung. Chi tiết barrier/contribution c�
 
 ---
 
-## 25.0 — Abort Attempt
+## 25. Runtime / Attempt — Abort Attempt
 
-**Nhóm:** Runtime / Attempt  
 **Method:** `POST`  
-**Endpoint:** `/api/v1/attempts/{attempt_id}/abort`
+**Endpoint:** `/api/v1/attempts/{attempt_id}/abort`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật; Idempotency-Key
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** Attempt identity từ PostgreSQL → persist ABORT_ATTEMPT Command → Runtime MCP/1 thực thi. Runtime sở hữu transition của Attempt.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật; Idempotency-Key
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -1588,17 +1516,16 @@ Tạo Command ABORT_ATTEMPT. Backend không tự set Attempt=ABORTED khi command
 
 ---
 
-## 26.0 — Lấy Worker join spec
+## 26. Runtime / Worker Bootstrap — Lấy Worker join spec
 
-**Nhóm:** Runtime / Worker Bootstrap  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/attempts/{attempt_id}/join-spec`
+**Endpoint:** `/api/v1/attempts/{attempt_id}/join-spec`  
+**Headers / Quyền truy cập:** Quyền bootstrap Worker theo cấu hình bảo mật
+**Bên gọi:** Worker bootstrap / CLI / WebUI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** Attempt/resolved_contract trong PostgreSQL + Runtime/Parameter Server connection settings do Backend/Runtime exposure cung cấp. worker_id không nằm trong join-spec; DTP HELLO_ACK mới cấp.
 
-### Headers / Quyền truy cập
-
-Quyền bootstrap Worker theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -1636,17 +1563,16 @@ join-spec chỉ cung cấp thông tin để Worker kết nối Parameter Server.
 
 ---
 
-## 27.0 — Attempt snapshot
+## 27. Runtime — Attempt snapshot
 
-**Nhóm:** Runtime  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/attempts/{attempt_id}/snapshot`
+**Endpoint:** `/api/v1/attempts/{attempt_id}/snapshot`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** Live Runtime state qua MCP/1 STATE_SNAPSHOT/RUNTIME_EVENT; Backend trả projection kèm freshness/stale.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -1717,17 +1643,16 @@ Snapshot là live projection cho đúng Attempt. stale=true nghĩa dữ liệu c
 
 ---
 
-## 28.0 — Danh sách Worker Session
+## 28. Runtime / Worker — Danh sách Worker Session
 
-**Nhóm:** Runtime / Worker  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/attempts/{attempt_id}/workers`
+**Endpoint:** `/api/v1/attempts/{attempt_id}/workers`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** WorkerSession live projection từ Runtime events/snapshot; PostgreSQL giữ durable history.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -1792,17 +1717,16 @@ Danh sách Worker Session chỉ để quan sát. Client không được tự gá
 
 ---
 
-## 29.0 — Chi tiết Worker/session
+## 29. Runtime / Worker — Chi tiết Worker/session
 
-**Nhóm:** Runtime / Worker  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/attempts/{attempt_id}/workers/{worker_id}`
+**Endpoint:** `/api/v1/attempts/{attempt_id}/workers/{worker_id}`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** WorkerSession hiện hành + lịch sử reconnect từ Runtime projection/PostgreSQL; session_id do Runtime/DTP cấp.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path params:
@@ -1864,17 +1788,16 @@ Mỗi reconnect tạo session_id mới. include_history=true dùng để xem ses
 
 ---
 
-## 30.0 — Danh sách Step
+## 30. Training / StrictBSP — Danh sách Step
 
-**Nhóm:** Training / StrictBSP  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/attempts/{attempt_id}/steps`
+**Endpoint:** `/api/v1/attempts/{attempt_id}/steps`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** StrictBSP Step summaries/projection từ Runtime events → PostgreSQL để query history.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -1918,17 +1841,16 @@ Step API chỉ tồn tại vì V1 dùng strict_bsp. step_id chỉ có nghĩa tro
 
 ---
 
-## 31.0 — Chi tiết Step
+## 31. Training / StrictBSP — Chi tiết Step
 
-**Nhóm:** Training / StrictBSP  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/attempts/{attempt_id}/steps/{step_id}`
+**Endpoint:** `/api/v1/attempts/{attempt_id}/steps/{step_id}`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** Step + per-worker contribution/timing projection từ Runtime; PostgreSQL là query store, Runtime là nguồn transition live.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path params:
@@ -2028,17 +1950,16 @@ Một Step có nhiều mốc khác nhau: update xong, Worker apply xong, checkpo
 
 ---
 
-## 32.0 — Danh sách Checkpoint
+## 32. Training / Checkpoint — Danh sách Checkpoint
 
-**Nhóm:** Training / Checkpoint  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/checkpoints`
+**Endpoint:** `/api/v1/checkpoints`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** PostgreSQL checkpoint index/metadata được reconcile từ Runtime. Checkpoint binary không nằm trong Backend/DB.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Query params (optional):
@@ -2081,17 +2002,16 @@ Checkpoint list chỉ trả metadata/index để quản trị. Không tải mode
 
 ---
 
-## 33.0 — Chi tiết Checkpoint
+## 33. Training / Checkpoint — Chi tiết Checkpoint
 
-**Nhóm:** Training / Checkpoint  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/checkpoints/{checkpoint_id}`
+**Endpoint:** `/api/v1/checkpoints/{checkpoint_id}`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** PostgreSQL checkpoint metadata/index; canonical checkpoint bytes nằm tại Runtime filesystem.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -2143,17 +2063,16 @@ Checkpoint binary nằm trên filesystem Runtime. Backend/DB chỉ biết identi
 
 ---
 
-## 34.0 — Yêu cầu checkpoint thủ công
+## 34. Training / Checkpoint — Yêu cầu checkpoint thủ công
 
-**Nhóm:** Training / Checkpoint  
 **Method:** `POST`  
-**Endpoint:** `/api/v1/attempts/{attempt_id}/checkpoint-requests`
+**Endpoint:** `/api/v1/attempts/{attempt_id}/checkpoint-requests`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật; Idempotency-Key
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** Attempt từ PostgreSQL → persist REQUEST_CHECKPOINT Command → Runtime MCP/1. Runtime/CheckpointPolicy quyết định safe boundary và result.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật; Idempotency-Key
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -2192,17 +2111,16 @@ Tạo Command REQUEST_CHECKPOINT. ACCEPTED chỉ nghĩa Runtime nhận yêu cầ
 
 ---
 
-## 35.0 — Catch-up Runtime Event
+## 35. BE Event History — Catch-up Runtime Event
 
-**Nhóm:** BE Event History  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/attempts/{attempt_id}/events`
+**Endpoint:** `/api/v1/attempts/{attempt_id}/events`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI / WebSocket reconnect  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** PostgreSQL events được persist từ MCP/1 RUNTIME_EVENT; ordering/cursor chuẩn là runtime_event_seq trong Attempt.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -2251,17 +2169,16 @@ Dùng after_seq để lấy phần event bị lỡ. Thứ tự chuẩn là runti
 
 ---
 
-## 36.0 — Audit events tổng quát
+## 36. BE Audit — Audit events tổng quát
 
-**Nhóm:** BE Audit  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/events`
+**Endpoint:** `/api/v1/events`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI / audit tooling  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** PostgreSQL events/audit history từ Backend operations + Runtime semantic events.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Query params (optional):
@@ -2308,17 +2225,16 @@ EventSeverity chỉ có INFO/WARNING/ERROR/CRITICAL. event_id là BIGSERIAL củ
 
 ---
 
-## 37.0 — Chi tiết command
+## 37. BE Command — Chi tiết command
 
-**Nhóm:** BE Command  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/commands/{command_id}`
+**Endpoint:** `/api/v1/commands/{command_id}`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** PostgreSQL control_commands là nguồn chuẩn durable cho Command resource; result/state được cập nhật từ internal workflow/MCP COMMAND_RESULT.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -2362,17 +2278,16 @@ HTTP 200
 
 ---
 
-## 38.0 — Danh sách command
+## 38. BE Command — Danh sách command
 
-**Nhóm:** BE Command  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/commands`
+**Endpoint:** `/api/v1/commands`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** PostgreSQL control_commands + filters/pagination.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật
-
-### Request (Body / Query)
+### Request
 
 ```text
 Query params (optional):
@@ -2417,17 +2332,16 @@ Danh sách Command phục vụ audit/monitor workflow bất đồng bộ. comman
 
 ---
 
-## 39.0 — Realtime Attempt stream
+## 39. Runtime / WebSocket — Realtime Attempt stream
 
-**Nhóm:** Runtime / WebSocket  
 **Method:** `GET / Upgrade`  
-**Endpoint:** `/ws/v1/attempts/{attempt_id}`
+**Endpoint:** `/ws/v1/attempts/{attempt_id}`  
+**Headers / Quyền truy cập:** Dùng cùng cơ chế đăng nhập/quyền truy cập như REST
+**Bên gọi:** WebUI / browser  
+**Bên nhận:** Management Backend (WebSocketHub)  
+**Nguồn dữ liệu / Nguồn chuẩn:** Live stream từ Runtime MCP/1 RUNTIME_EVENT/STATE + Backend projection; catch-up gap lấy từ PostgreSQL events/snapshot API.
 
-### Headers / Quyền truy cập
-
-Dùng cùng cơ chế đăng nhập/quyền truy cập như REST
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
@@ -2497,17 +2411,16 @@ WebSocket chỉ stream live state/event, không nhận lệnh side-effect. Recon
 
 ---
 
-## 40.0 — Truy vấn chuỗi số liệu đo lường (Training Metrics Time-series)
+## 40. Training / Metrics — Truy vấn chuỗi số liệu đo lường (Training Metrics Time-series)
 
-**Nhóm:** Training / Metrics  
 **Method:** `GET`  
-**Endpoint:** `/api/v1/attempts/{attempt_id}/metrics`
+**Endpoint:** `/api/v1/attempts/{attempt_id}/metrics`  
+**Headers / Quyền truy cập:** Quyền operator theo cấu hình bảo mật theo security profile; X-Request-Id tùy chọn
+**Bên gọi:** WebUI / CLI  
+**Bên nhận:** Management Backend (RESTController)  
+**Nguồn dữ liệu / Nguồn chuẩn:** Training metric time-series từ Step/WorkerStep/Event projections trong PostgreSQL; metric live mới nhất có thể được cập nhật từ Runtime event stream trước khi persist.
 
-### Headers / Quyền truy cập
-
-Quyền operator theo cấu hình bảo mật theo security profile; X-Request-Id tùy chọn
-
-### Request (Body / Query)
+### Request
 
 ```text
 Path param:
