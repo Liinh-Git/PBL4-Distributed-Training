@@ -38,7 +38,7 @@ from pbl4.management_backend.schemas.dataset import (
 from pbl4.management_backend.schemas.event import EventListItem, RuntimeEventItem, RuntimeEventsMeta
 from pbl4.management_backend.schemas.job import (
     JobArchiveResponse,
-    JobCloneResponse,
+    JobCloneRequest,
     JobCreateRequest,
     JobDetail,
     JobListItem,
@@ -86,7 +86,7 @@ __all__ = [
     "HealthResponse",
     "ItemResponse",
     "JobArchiveResponse",
-    "JobCloneResponse",
+    "JobCloneRequest",
     "JobCreateRequest",
     "JobDetail",
     "JobListItem",

@@ -25,6 +25,7 @@ from pbl4.management_backend.schemas.common import ItemResponse, ListResponse, P
 from pbl4.management_backend.schemas.job import (
     AttemptSummary,
     JobArchiveResponse,
+    JobCloneRequest,
     JobCreateRequest,
     JobDetail,
     JobLinks,
@@ -75,7 +76,6 @@ def _build_job_detail(row: dict) -> JobDetail:
         frozen_at=row.get("frozen_at"),
         archived_at=row.get("archived_at"),
     )
-
 
 
 def _build_job_list_item(row: dict) -> JobListItem:
@@ -358,6 +358,7 @@ def resume_job(
 )
 def clone_job(
     job_id: str,
+    body: JobCloneRequest | None = None,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ):
     if not idempotency_key:
@@ -368,10 +369,11 @@ def clone_job(
                 "message": "Header 'Idempotency-Key' is required for this operation.",
             },
         )
+    body_payload = body.model_dump(exclude_unset=True) if body else {}
     request_hash = idempotency.compute_request_hash(
         operation="CLONE_JOB",
         path=f"/api/v1/jobs/{job_id}/clone",
-        body_obj={"job_id": job_id},
+        body_obj={"job_id": job_id, **body_payload},
     )
     with db.transaction() as conn:
         cached_record, action = idempotency.acquire_or_get_record(
@@ -384,13 +386,10 @@ def clone_job(
             cached_body = cached_record.get("response_body_jsonb") or {}
             if isinstance(cached_body, str):
                 cached_body = json.loads(cached_body)
-            cloned_id = cached_body.get("job_id")
-            if cloned_id:
-                row = job_service.get_job(conn, cloned_id)
-                return ItemResponse(data=_build_job_detail(row))
             return ItemResponse(data=JobDetail(**cached_body))
 
-        row = job_service.clone_job(conn, job_id)
+        display_name = body.display_name if body else None
+        row = job_service.clone_job(conn, job_id, display_name=display_name)
         detail = _build_job_detail(row)
         idempotency.complete_record(
             conn,

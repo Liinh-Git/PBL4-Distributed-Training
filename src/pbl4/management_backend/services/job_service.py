@@ -376,13 +376,8 @@ def clone_job(conn: psycopg.Connection, job_id: str, *, display_name: str | None
         description=source.get("description", ""),
         requested_contract=rc,
         created_at=now,
+        cloned_from_job_id=job_id,
     )
-    with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE jobs SET cloned_from_job_id = %s WHERE job_id = %s",
-            (job_id, new_job_id),
-        )
-    row = job_repository.get_job(conn, new_job_id)
     logger.info("Job cloned: %s → %s", job_id, new_job_id)
     return row
 

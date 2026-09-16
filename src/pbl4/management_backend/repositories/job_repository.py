@@ -41,18 +41,34 @@ def create_job(
     description: str,
     requested_contract: dict,
     created_at: datetime,
+    cloned_from_job_id: str | None = None,
 ) -> dict:
     """Insert a new DRAFT job and return the full row."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
             INSERT INTO jobs
-                (job_id, display_name, description, state, requested_contract, created_at)
+                (
+                    job_id,
+                    display_name,
+                    description,
+                    state,
+                    requested_contract,
+                    created_at,
+                    cloned_from_job_id,
+                )
             VALUES
-                (%s, %s, %s, 'DRAFT', %s, %s)
+                (%s, %s, %s, 'DRAFT', %s, %s, %s)
             RETURNING *
             """,
-            (job_id, display_name, description, json.dumps(requested_contract), created_at),
+            (
+                job_id,
+                display_name,
+                description,
+                json.dumps(requested_contract),
+                created_at,
+                cloned_from_job_id,
+            ),
         )
         row = cur.fetchone()
     return _row_to_dict(row)
@@ -211,7 +227,7 @@ def archive_job(
 
 def count_attempts(conn: psycopg.Connection, job_id: str) -> int:
     """Count total attempts for a job.
-    
+
     Deprecated:
         Attempts table operations belong to attempt_repository.
         Maintained here for backward compatibility.
@@ -219,4 +235,3 @@ def count_attempts(conn: psycopg.Connection, job_id: str) -> int:
     from pbl4.management_backend.repositories import attempt_repository
 
     return attempt_repository.count_attempts(conn, job_id)
-
