@@ -229,7 +229,7 @@ class JobArchiveResponse(BaseModel):
 
 
 class JobValidateResponse(BaseModel):
-    requested_contract: RequestedContractV1
+    requested_contract: dict[str, Any]
     resolved_preview: ResolvedContractV1 | None = None
     warnings: list[str] = []
     errors: list[str] = []

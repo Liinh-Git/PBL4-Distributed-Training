@@ -124,6 +124,24 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
     preprocessing = build.get("preprocessing_json") or {}
     if isinstance(preprocessing, str):
         preprocessing = json.loads(preprocessing)
+    if not isinstance(preprocessing, dict):
+        preprocessing = {}
+
+    normalization = preprocessing.get("normalization")
+    if not normalization or not isinstance(normalization, dict):
+        normalization = {
+            "mean": [0.4914, 0.4822, 0.4465],
+            "std": [0.2470, 0.2435, 0.2616],
+        }
+    else:
+        normalization = {
+            "mean": normalization.get("mean", [0.4914, 0.4822, 0.4465]),
+            "std": normalization.get("std", [0.2470, 0.2435, 0.2616]),
+        }
+
+    resolved_preprocessing: dict[str, Any] = {
+        "normalization": normalization,
+    }
 
     resolved: dict[str, Any] = {
         "dataset": {
@@ -135,7 +153,7 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
             "num_classes": build.get("num_classes", model_meta.get("num_classes", 10)),
             "batch_size": build["batch_size"],
             "shard_count": 3,
-            "preprocessing": preprocessing,
+            "preprocessing": resolved_preprocessing,
         },
         "model": {
             "model_id": model_meta["model_id"],
