@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Jobs"])
 
 
-def _build_job_detail(row: dict, conn) -> JobDetail:
+def _build_job_detail(row: dict, conn, *, is_new: bool = False) -> JobDetail:
     rc = row.get("requested_contract") or {}
     if isinstance(rc, str):
         rc = json.loads(rc)
@@ -50,11 +50,23 @@ def _build_job_detail(row: dict, conn) -> JobDetail:
     if isinstance(res, str):
         res = json.loads(res)
 
-    from pbl4.management_backend.repositories import attempt_repository
+    if is_new:
+        attempt_summary = AttemptSummary(
+            total=0,
+            latest_attempt_id=None,
+            latest_attempt_state=None,
+        )
+    else:
+        from pbl4.management_backend.repositories import attempt_repository
 
-    attempts = attempt_repository.list_attempts(conn, job_id=row["job_id"], limit=1)
-    latest = attempts[0] if attempts else None
-    attempt_count = job_service.job_repository.count_attempts(conn, row["job_id"])
+        attempts = attempt_repository.list_attempts(conn, job_id=row["job_id"], limit=1)
+        latest = attempts[0] if attempts else None
+        attempt_count = job_service.job_repository.count_attempts(conn, row["job_id"])
+        attempt_summary = AttemptSummary(
+            total=attempt_count,
+            latest_attempt_id=latest["attempt_id"] if latest else None,
+            latest_attempt_state=latest["state"] if latest else None,
+        )
 
     return JobDetail(
         job_id=row["job_id"],
@@ -65,11 +77,7 @@ def _build_job_detail(row: dict, conn) -> JobDetail:
         resolved_contract=res,
         contract_hash=row.get("contract_hash"),
         cloned_from_job_id=row.get("cloned_from_job_id"),
-        attempt_summary=AttemptSummary(
-            total=attempt_count,
-            latest_attempt_id=latest["attempt_id"] if latest else None,
-            latest_attempt_state=latest["state"] if latest else None,
-        ),
+        attempt_summary=attempt_summary,
         links=JobLinks(attempts=f"/api/v1/jobs/{row['job_id']}/attempts"),
         created_at=row["created_at"],
         frozen_at=row.get("frozen_at"),
@@ -134,10 +142,6 @@ def create_job(
             cached_body = cached_record.get("response_body_jsonb") or {}
             if isinstance(cached_body, str):
                 cached_body = json.loads(cached_body)
-            j_id = cached_body.get("job_id")
-            if j_id:
-                row = job_service.get_job(conn, j_id)
-                return ItemResponse(data=_build_job_detail(row, conn))
             return ItemResponse(data=JobDetail(**cached_body))
 
         row = job_service.create_job(
@@ -146,7 +150,7 @@ def create_job(
             description=body.description,
             requested_contract=body.requested_contract.model_dump(),
         )
-        detail = _build_job_detail(row, conn)
+        detail = _build_job_detail(row, conn, is_new=True)
         idempotency.complete_record(
             conn,
             endpoint_semantic_scope="JOB_CREATE",

@@ -233,12 +233,15 @@ def create_app() -> FastAPI:
     async def validation_error_handler(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
+        from fastapi.encoders import jsonable_encoder
+
+        safe_errors = jsonable_encoder(exc.errors(), custom_encoder={Exception: str})
         return _error_response(
             422,
             "VALIDATION_ERROR",
             "Request validation failed.",
             request,
-            details={"errors": exc.errors()},
+            details={"errors": safe_errors},
         )
 
     @app.exception_handler(JobValidationError)
