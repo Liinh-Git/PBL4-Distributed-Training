@@ -81,6 +81,8 @@ def list_attempts(
     execution_mode: str | None = None,
     limit: int = 50,
     cursor: str | None = None,
+    cursor_dt: datetime | None = None,
+    cursor_id: str | None = None,
 ) -> list[dict]:
     conditions = []
     params: list[Any] = []
@@ -95,7 +97,10 @@ def list_attempts(
         conditions.append("execution_mode = %s")
         params.append(execution_mode)
 
-    if cursor:
+    if cursor_dt and cursor_id:
+        conditions.append("(created_at, attempt_id) < (%s, %s)")
+        params.extend([cursor_dt, cursor_id])
+    elif cursor:
         try:
             ts_str, aid = cursor.split("|", 1)
             conditions.append("(created_at, attempt_id) < (%s::timestamptz, %s)")

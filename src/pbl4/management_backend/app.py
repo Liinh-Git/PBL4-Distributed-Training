@@ -30,6 +30,7 @@ from pbl4.management_backend.clients.dataset_manager import (
 from pbl4.management_backend.gateways.runtime_gateway import DatabaseUnavailableError
 from pbl4.management_backend.services.attempt_service import (
     AttemptConflictError,
+    AttemptDataIntegrityError,
     AttemptNotAbortableError,
     AttemptNotFoundError,
     AttemptStateError,
@@ -278,6 +279,13 @@ def create_app() -> FastAPI:
     @app.exception_handler(CommandNotFoundError)
     async def not_found_handler(request: Request, exc: Exception) -> JSONResponse:
         return _error_response(404, "NOT_FOUND", str(exc), request)
+
+    @app.exception_handler(AttemptDataIntegrityError)
+    async def attempt_integrity_error_handler(
+        request: Request, exc: AttemptDataIntegrityError
+    ) -> JSONResponse:
+        logger.error("Attempt data integrity error processing %s: %s", request.url.path, exc)
+        return _error_response(500, "DATA_INTEGRITY_ERROR", str(exc), request)
 
     @app.exception_handler(RuntimeUnavailableError)
     async def runtime_unavailable_handler(
