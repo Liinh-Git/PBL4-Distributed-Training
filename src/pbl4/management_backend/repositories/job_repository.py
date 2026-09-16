@@ -74,11 +74,12 @@ def list_jobs(
     q: str | None = None,
     limit: int = 50,
     cursor: str | None = None,
+    cursor_dt: datetime | None = None,
+    cursor_id: str | None = None,
 ) -> list[dict]:
     """List jobs with optional filtering and cursor-based pagination.
 
     Stable sort: created_at DESC, job_id DESC.
-    Cursor encodes (created_at, job_id) as 'ISO|job_id'.
     """
     conditions = []
     params: list[Any] = []
@@ -98,13 +99,14 @@ def list_jobs(
         like = f"%{q}%"
         params.extend([like, like])
 
-    if cursor:
-        try:
-            ts_str, cid = cursor.split("|", 1)
-            conditions.append("(created_at, job_id) < (%s::timestamptz, %s)")
-            params.extend([ts_str, cid])
-        except ValueError:
-            pass  # ignore malformed cursor
+    if cursor and (cursor_dt is None or cursor_id is None):
+        from pbl4.management_backend.services.dataset_service import decode_cursor
+
+        cursor_dt, cursor_id = decode_cursor(cursor)
+
+    if cursor_dt is not None and cursor_id is not None:
+        conditions.append("(created_at, job_id) < (%s, %s)")
+        params.extend([cursor_dt, cursor_id])
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(limit)

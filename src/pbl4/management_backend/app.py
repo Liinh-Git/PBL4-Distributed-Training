@@ -47,6 +47,7 @@ from pbl4.management_backend.services.dataset_service import (
     DatasetBuildReferenceError,
     DatasetBuildStateError,
     DatasetNotFoundError,
+    InvalidCursorError,
 )
 from pbl4.management_backend.services.idempotency import (
     IdempotencyConflictError,
@@ -265,6 +266,10 @@ def create_app() -> FastAPI:
             request,
             details={"errors": exc.errors},
         )
+
+    @app.exception_handler(InvalidCursorError)
+    async def invalid_cursor_handler(request: Request, exc: InvalidCursorError) -> JSONResponse:
+        return _error_response(400, "INVALID_CURSOR", str(exc), request)
 
     @app.exception_handler(JobNotFoundError)
     @app.exception_handler(AttemptNotFoundError)

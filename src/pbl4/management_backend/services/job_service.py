@@ -25,6 +25,10 @@ from pbl4.management_backend.repositories import (
     job_repository,
 )
 from pbl4.management_backend.services import contract_resolver
+from pbl4.management_backend.services.dataset_service import (
+    InvalidCursorError,
+    decode_cursor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +153,10 @@ def list_jobs(
     limit: int = 50,
     cursor: str | None = None,
 ) -> list[dict]:
+    cursor_dt: datetime | None = None
+    cursor_id: str | None = None
+    if cursor:
+        cursor_dt, cursor_id = decode_cursor(cursor)
     return job_repository.list_jobs(
         conn,
         state=state,
@@ -156,6 +164,8 @@ def list_jobs(
         q=q,
         limit=limit,
         cursor=cursor,
+        cursor_dt=cursor_dt,
+        cursor_id=cursor_id,
     )
 
 

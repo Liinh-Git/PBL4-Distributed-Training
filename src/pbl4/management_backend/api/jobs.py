@@ -174,15 +174,24 @@ def list_jobs(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     cursor: Annotated[str | None, Query()] = None,
 ):
-    with db.get_connection() as conn:
-        rows = job_service.list_jobs(
-            conn,
-            state=state,
-            dataset_build_id=dataset_build_id,
-            q=q,
-            limit=limit + 1,
-            cursor=cursor,
-        )
+    try:
+        with db.get_connection() as conn:
+            rows = job_service.list_jobs(
+                conn,
+                state=state,
+                dataset_build_id=dataset_build_id,
+                q=q,
+                limit=limit + 1,
+                cursor=cursor,
+            )
+    except job_service.InvalidCursorError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "INVALID_CURSOR",
+                "message": str(exc),
+            },
+        ) from exc
     has_more = len(rows) > limit
     items = [_build_job_list_item(r) for r in rows[:limit]]
     next_cursor = None
