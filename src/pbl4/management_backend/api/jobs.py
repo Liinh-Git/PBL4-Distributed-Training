@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Jobs"])
 
 
-def _build_job_detail(row: dict, conn, *, is_new: bool = False) -> JobDetail:
+def _build_job_detail(row: dict) -> JobDetail:
     rc = row.get("requested_contract") or {}
     if isinstance(rc, str):
         rc = json.loads(rc)
@@ -50,22 +50,14 @@ def _build_job_detail(row: dict, conn, *, is_new: bool = False) -> JobDetail:
     if isinstance(res, str):
         res = json.loads(res)
 
-    if is_new:
+    raw_summary = row.get("attempt_summary")
+    if raw_summary:
+        attempt_summary = AttemptSummary(**raw_summary)
+    else:
         attempt_summary = AttemptSummary(
             total=0,
             latest_attempt_id=None,
             latest_attempt_state=None,
-        )
-    else:
-        from pbl4.management_backend.repositories import attempt_repository
-
-        attempts = attempt_repository.list_attempts(conn, job_id=row["job_id"], limit=1)
-        latest = attempts[0] if attempts else None
-        attempt_count = job_service.job_repository.count_attempts(conn, row["job_id"])
-        attempt_summary = AttemptSummary(
-            total=attempt_count,
-            latest_attempt_id=latest["attempt_id"] if latest else None,
-            latest_attempt_state=latest["state"] if latest else None,
         )
 
     return JobDetail(
@@ -78,11 +70,12 @@ def _build_job_detail(row: dict, conn, *, is_new: bool = False) -> JobDetail:
         contract_hash=row.get("contract_hash"),
         cloned_from_job_id=row.get("cloned_from_job_id"),
         attempt_summary=attempt_summary,
-        links=JobLinks(attempts=f"/api/v1/jobs/{row['job_id']}/attempts"),
+        links=JobLinks(attempts=f"/api/v1/attempts?job_id={row['job_id']}"),
         created_at=row["created_at"],
         frozen_at=row.get("frozen_at"),
         archived_at=row.get("archived_at"),
     )
+
 
 
 def _build_job_list_item(row: dict) -> JobListItem:
@@ -150,7 +143,7 @@ def create_job(
             description=body.description,
             requested_contract=body.requested_contract.model_dump(),
         )
-        detail = _build_job_detail(row, conn, is_new=True)
+        detail = _build_job_detail(row)
         idempotency.complete_record(
             conn,
             endpoint_semantic_scope="JOB_CREATE",
@@ -208,8 +201,8 @@ def list_jobs(
 )
 def get_job(job_id: str):
     with db.get_connection() as conn:
-        row = job_service.get_job(conn, job_id)
-        return ItemResponse(data=_build_job_detail(row, conn))
+        row = job_service.get_job_detail(conn, job_id)
+        return ItemResponse(data=_build_job_detail(row))
 
 
 @router.patch(
@@ -226,7 +219,7 @@ def patch_job(job_id: str, body: JobPatchRequest):
             description=body.description,
             requested_contract=body.requested_contract,
         )
-        return ItemResponse(data=_build_job_detail(row, conn))
+        return ItemResponse(data=_build_job_detail(row))
 
 
 @router.post(
@@ -389,11 +382,11 @@ def clone_job(
             cloned_id = cached_body.get("job_id")
             if cloned_id:
                 row = job_service.get_job(conn, cloned_id)
-                return ItemResponse(data=_build_job_detail(row, conn))
+                return ItemResponse(data=_build_job_detail(row))
             return ItemResponse(data=JobDetail(**cached_body))
 
         row = job_service.clone_job(conn, job_id)
-        detail = _build_job_detail(row, conn)
+        detail = _build_job_detail(row)
         idempotency.complete_record(
             conn,
             endpoint_semantic_scope="JOB_CLONE",

@@ -144,6 +144,34 @@ def get_job(conn: psycopg.Connection, job_id: str) -> dict:
     return row
 
 
+def get_job_detail(conn: psycopg.Connection, job_id: str) -> dict:
+    """Retrieve full job detail including attempt summary.
+
+    Invariants:
+    - If state is DRAFT, attempts are domain-impossible; returns total=0 without querying attempts table.
+    - If state is READY or ARCHIVED, queries latest attempt and total attempts via attempt_repository.
+    """
+    row = get_job(conn, job_id)
+    state = row.get("state")
+    if state == "DRAFT":
+        row["attempt_summary"] = {
+            "total": 0,
+            "latest_attempt_id": None,
+            "latest_attempt_state": None,
+        }
+    else:
+        attempts = attempt_repository.list_attempts(conn, job_id=job_id, limit=1)
+        latest = attempts[0] if attempts else None
+        total = attempt_repository.count_attempts(conn, job_id)
+        row["attempt_summary"] = {
+            "total": total,
+            "latest_attempt_id": latest["attempt_id"] if latest else None,
+            "latest_attempt_state": latest["state"] if latest else None,
+        }
+    return row
+
+
+
 def list_jobs(
     conn: psycopg.Connection,
     *,

@@ -172,3 +172,12 @@ def get_active_attempt(conn: psycopg.Connection) -> dict | None:
         )
         row = cur.fetchone()
     return _row_to_dict(row) if row else None
+
+
+def count_attempts(conn: psycopg.Connection, job_id: str) -> int:
+    """Count total attempts for a job."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM attempts WHERE job_id = %s", (job_id,))
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+

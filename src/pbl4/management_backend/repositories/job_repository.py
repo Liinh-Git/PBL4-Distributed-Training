@@ -210,7 +210,13 @@ def archive_job(
 
 
 def count_attempts(conn: psycopg.Connection, job_id: str) -> int:
-    """Count total attempts for a job."""
-    with conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM attempts WHERE job_id = %s", (job_id,))
-        return cur.fetchone()[0]
+    """Count total attempts for a job.
+    
+    Deprecated:
+        Attempts table operations belong to attempt_repository.
+        Maintained here for backward compatibility.
+    """
+    from pbl4.management_backend.repositories import attempt_repository
+
+    return attempt_repository.count_attempts(conn, job_id)
+
