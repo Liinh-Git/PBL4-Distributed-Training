@@ -416,6 +416,7 @@ def deprecate_build(
 )
 def delete_build(
     dataset_build_id: str,
+    request: Request,
     body: DatasetBuildDeleteRequest | None = None,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ):
@@ -431,14 +432,19 @@ def delete_build(
     build_row, cmd_row = dataset_service.execute_delete_build(
         db, dataset_build_id, reason=req.reason, idempotency_key=idempotency_key
     )
+    req_id = getattr(request.state, "request_id", None) or request.headers.get("X-Request-ID")
+    meta = Meta(request_id=req_id) if req_id else Meta()
+    cmd_state = cmd_row.get("state") or cmd_row.get("command_state") or "ACCEPTED"
+    build_state = build_row.get("state") or build_row.get("dataset_build_state") or "DELETING"
     return ItemResponse(
         data=BuildCommandResponse(
             command_id=str(cmd_row["command_id"]),
             command_type=cmd_row.get("command_type", "DELETE_DATASET_BUILD"),
-            command_state=cmd_row["state"],
+            command_state=cmd_state,
             target_type=cmd_row.get("target_type", "DATASET_BUILD"),
             target_id=str(cmd_row.get("target_id") or dataset_build_id),
-            dataset_build_id=build_row["dataset_build_id"],
-            dataset_build_state=build_row["state"],
-        )
+            dataset_build_id=build_row.get("dataset_build_id") or dataset_build_id,
+            dataset_build_state=build_state,
+        ),
+        meta=meta,
     )

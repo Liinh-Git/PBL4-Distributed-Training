@@ -862,11 +862,34 @@ def execute_delete_build(
             body = cached_record.get("response_body_jsonb") or {}
             if isinstance(body, str):
                 body = json.loads(body)
-            b_id = body.get("dataset_build_id")
-            c_id = body.get("command_id")
-            build_row = dataset_build_repository.get_build(conn, b_id) if b_id else {}
-            cmd_row = command_repository.get_command(conn, c_id) if c_id else {}
-            return build_row or body, cmd_row or body
+            b_id = (
+                body.get("dataset_build_id")
+                or cached_record.get("resource_id")
+                or dataset_build_id
+            )
+            c_id = body.get("command_id") or cached_record.get("command_id")
+            build_row = dataset_build_repository.get_build(conn, b_id) if b_id else None
+            cmd_row = command_repository.get_command(conn, c_id) if c_id else None
+
+            # Defensive fallback if rows in DB were purged or unavailable
+            norm_build_state = body.get("dataset_build_state") or body.get("state") or "DELETING"
+            norm_cmd_state = body.get("command_state") or body.get("state") or "ACCEPTED"
+            if not build_row:
+                build_row = {
+                    "dataset_build_id": b_id,
+                    "state": norm_build_state,
+                    "dataset_build_state": norm_build_state,
+                }
+            if not cmd_row:
+                cmd_row = {
+                    "command_id": str(c_id) if c_id else "unknown",
+                    "command_type": body.get("command_type", "DELETE_DATASET_BUILD"),
+                    "state": norm_cmd_state,
+                    "command_state": norm_cmd_state,
+                    "target_type": body.get("target_type", "DATASET_BUILD"),
+                    "target_id": body.get("target_id") or b_id,
+                }
+            return build_row, cmd_row
 
         build = dataset_build_repository.get_build(conn, dataset_build_id)
         if build is None:
@@ -899,6 +922,13 @@ def execute_delete_build(
                 target_id=dataset_build_id,
                 request={"dataset_build_id": dataset_build_id, "reason": reason},
                 requested_at=now,
+            )
+            idempotency.bind_command_to_record(
+                conn,
+                endpoint_semantic_scope="DATASET_BUILD_DELETE",
+                idempotency_key=effective_key,
+                command_id=command_id,
+                resource_id=dataset_build_id,
             )
 
     # Outside TX: Call DM purge
