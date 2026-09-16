@@ -222,6 +222,8 @@ def update_job(
             current_state=current["state"],
         )
     if requested_contract is not None:
+        if hasattr(requested_contract, "model_dump"):
+            requested_contract = requested_contract.model_dump(exclude_unset=True)
         rc = current["requested_contract"]
         if isinstance(rc, str):
             rc = json.loads(rc)
@@ -241,6 +243,23 @@ def update_job(
     )
     if row is None:
         raise JobNotFoundError(f"Job '{job_id}' not found after update.")
+
+    state = row.get("state")
+    if state == "DRAFT":
+        row["attempt_summary"] = {
+            "total": 0,
+            "latest_attempt_id": None,
+            "latest_attempt_state": None,
+        }
+    else:
+        attempts = attempt_repository.list_attempts(conn, job_id=job_id, limit=1)
+        latest = attempts[0] if attempts else None
+        total = attempt_repository.count_attempts(conn, job_id)
+        row["attempt_summary"] = {
+            "total": total,
+            "latest_attempt_id": latest["attempt_id"] if latest else None,
+            "latest_attempt_state": latest["state"] if latest else None,
+        }
     return row
 
 

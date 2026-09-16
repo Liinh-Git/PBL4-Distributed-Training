@@ -212,12 +212,17 @@ def get_job(job_id: str):
 )
 def patch_job(job_id: str, body: JobPatchRequest):
     with db.transaction() as conn:
+        contract_patch = (
+            body.requested_contract.model_dump(exclude_unset=True)
+            if body.requested_contract is not None
+            else None
+        )
         row = job_service.update_job(
             conn,
             job_id,
             display_name=body.display_name,
             description=body.description,
-            requested_contract=body.requested_contract,
+            requested_contract=contract_patch,
         )
         return ItemResponse(data=_build_job_detail(row))
 
