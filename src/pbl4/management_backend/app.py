@@ -403,7 +403,14 @@ def create_app() -> FastAPI:
     async def attempt_not_abortable_handler(
         request: Request, exc: AttemptNotAbortableError
     ) -> JSONResponse:
-        return _error_response(409, "ATTEMPT_NOT_ABORTABLE", str(exc), request)
+        details = {"state": exc.current_state} if getattr(exc, "current_state", None) else None
+        return _error_response(
+            409,
+            "ATTEMPT_NOT_ABORTABLE",
+            str(exc),
+            request,
+            details=details,
+        )
 
     @app.exception_handler(CheckpointNotCompleteError)
     async def checkpoint_not_complete_handler(
