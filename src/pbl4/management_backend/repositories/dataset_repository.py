@@ -9,6 +9,8 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 
+from pbl4.management_backend.repositories.dataset_build_repository import DATASET_BUILD_STATES
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,7 +55,8 @@ def list_datasets(
     task_type: str | None = None,
     q: str | None = None,
     limit: int = 50,
-    cursor: str | None = None,
+    cursor_dt: datetime | None = None,
+    cursor_id: str | None = None,
 ) -> list[dict]:
     """List datasets with optional filters and cursor pagination.
 
@@ -71,13 +74,9 @@ def list_datasets(
         like = f"%{q}%"
         params.extend([like, like])
 
-    if cursor:
-        try:
-            ts_str, did = cursor.split("|", 1)
-            conditions.append("(created_at, dataset_id) < (%s::timestamptz, %s)")
-            params.extend([ts_str, did])
-        except ValueError:
-            pass
+    if cursor_dt is not None and cursor_id is not None:
+        conditions.append("(created_at, dataset_id) < (%s, %s)")
+        params.extend([cursor_dt, cursor_id])
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(limit)
@@ -96,21 +95,6 @@ def list_datasets(
 
 def get_build_counts_for_dataset(conn: psycopg.Connection, dataset_id: str) -> dict:
     """Return a count per state for all dataset builds of the given dataset."""
-    all_states = [
-        "CREATED",
-        "QUEUED",
-        "IMPORTING",
-        "VALIDATING",
-        "PREPROCESSING",
-        "MATERIALIZING",
-        "VERIFYING",
-        "REGISTERING",
-        "READY",
-        "FAILED",
-        "DEPRECATED",
-        "DELETING",
-        "DELETED",
-    ]
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -122,8 +106,15 @@ def get_build_counts_for_dataset(conn: psycopg.Connection, dataset_id: str) -> d
         )
         rows = cur.fetchall()
 
-    counts = {s: 0 for s in all_states}
+    counts = {s: 0 for s in DATASET_BUILD_STATES}
     for state, cnt in rows:
         if state in counts:
             counts[state] = int(cnt)
+        else:
+            logger.warning(
+                "Unrecognized dataset build state '%s' (count=%s) for dataset '%s'",
+                state,
+                cnt,
+                dataset_id,
+            )
     return counts

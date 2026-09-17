@@ -27,6 +27,7 @@ LIFECYCLE INVARIANTS:
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import uuid
@@ -85,12 +86,82 @@ class DatasetBuildStateError(Exception):
 class DatasetBuildReferenceError(Exception):
     code = "DATASET_BUILD_IN_USE"
 
+    def __init__(
+        self,
+        msg: str,
+        references: list[dict[str, Any]] | None = None,
+    ) -> None:
+        super().__init__(msg)
+        self.references = references or []
+
 
 DatasetBuildInUseError = DatasetBuildReferenceError
 
 
 class DatasetManifestVerificationError(Exception):
     pass
+
+
+class InvalidCursorError(ValueError):
+    """Raised when pagination cursor is malformed or invalid."""
+
+    pass
+
+
+def encode_cursor(created_at: datetime, resource_id: str) -> str:
+    """Encode pagination state into an opaque URL-safe base64 string.
+
+    Canonical contract format: base64-encoded JSON {"created_at": "...", "id": "..."}
+    """
+    payload = {
+        "created_at": created_at.isoformat(),
+        "id": resource_id,
+    }
+    raw_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw_bytes).decode("ascii").rstrip("=")
+
+
+def decode_cursor(cursor_str: str) -> tuple[datetime, str]:
+    """Decode and validate a pagination cursor.
+
+    Supports:
+    1. Canonical format: base64-encoded JSON {"created_at": "...", "id": "..."}
+    2. Legacy format: "<created_at>|<id>" for backward compatibility.
+
+    Raises InvalidCursorError if decoding fails or fields are invalid.
+    """
+    if not cursor_str or not isinstance(cursor_str, str):
+        raise InvalidCursorError("Pagination cursor cannot be empty.")
+
+    # 1. Try canonical Base64 JSON cursor
+    try:
+        padded = cursor_str + "=" * (-len(cursor_str) % 4)
+        raw_json = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+        data = json.loads(raw_json)
+        if isinstance(data, dict) and "created_at" in data and "id" in data:
+            ts_str = str(data["created_at"]).strip().replace(" ", "+")
+            dt = datetime.fromisoformat(ts_str)
+            resource_id = str(data["id"]).strip()
+            if not resource_id:
+                raise InvalidCursorError("Pagination cursor 'id' cannot be empty.")
+            return dt, resource_id
+    except Exception:
+        pass
+
+    # 2. Fallback: Legacy pipe-delimited format "<created_at>|<id>"
+    if "|" in cursor_str:
+        try:
+            ts_part, id_part = cursor_str.split("|", 1)
+            ts_clean = ts_part.strip().replace(" ", "+")
+            dt = datetime.fromisoformat(ts_clean)
+            resource_id = id_part.strip()
+            if not resource_id:
+                raise InvalidCursorError("Pagination cursor 'id' cannot be empty.")
+            return dt, resource_id
+        except Exception as exc:
+            raise InvalidCursorError(f"Invalid pagination cursor: {exc}") from exc
+
+    raise InvalidCursorError("Invalid pagination cursor format.")
 
 
 def _new_dataset_id() -> str:
@@ -161,8 +232,17 @@ def list_datasets(
     limit: int = 50,
     cursor: str | None = None,
 ) -> list[dict]:
+    cursor_dt: datetime | None = None
+    cursor_id: str | None = None
+    if cursor:
+        cursor_dt, cursor_id = decode_cursor(cursor)
     return dataset_repository.list_datasets(
-        conn, task_type=task_type, q=q, limit=limit, cursor=cursor
+        conn,
+        task_type=task_type,
+        q=q,
+        limit=limit,
+        cursor_dt=cursor_dt,
+        cursor_id=cursor_id,
     )
 
 
@@ -176,6 +256,11 @@ def get_build(conn: psycopg.Connection, dataset_build_id: str) -> dict:
     return row
 
 
+def get_build_references(conn: psycopg.Connection, dataset_build_id: str) -> list[dict]:
+    """Return job/checkpoint references for a given build."""
+    return dataset_build_repository.get_references(conn, dataset_build_id)
+
+
 def list_builds(
     conn: psycopg.Connection,
     *,
@@ -185,13 +270,18 @@ def list_builds(
     limit: int = 50,
     cursor: str | None = None,
 ) -> list[dict]:
+    cursor_dt: datetime | None = None
+    cursor_id: str | None = None
+    if cursor:
+        cursor_dt, cursor_id = decode_cursor(cursor)
     return dataset_build_repository.list_builds(
         conn,
         dataset_id=dataset_id,
         state=state,
         profile=profile,
         limit=limit,
-        cursor=cursor,
+        cursor_dt=cursor_dt,
+        cursor_id=cursor_id,
     )
 
 
@@ -482,11 +572,26 @@ def execute_rebuild_build(
         if isinstance(src_input_shape, str):
             src_input_shape = json.loads(src_input_shape)
 
-        merged_preprocessing = {**src_preprocessing, **(preprocessing or {})}
+        override_preprocessing = preprocessing or {}
+        merged_preprocessing = dict(src_preprocessing)
+        for k, v in override_preprocessing.items():
+            if v is not None:
+                merged_preprocessing[k] = v
+
         new_batch_size = batch_size or source["batch_size"]
         new_seed = partition_seed if partition_seed is not None else source["partition_seed"]
-        input_shape = merged_preprocessing.get("input_shape", src_input_shape)
-        normalization = merged_preprocessing.get("normalization", {})
+        override_input_shape = override_preprocessing.get("input_shape")
+        input_shape = override_input_shape if override_input_shape is not None else src_input_shape
+        override_norm = override_preprocessing.get("normalization")
+        normalization = (
+            override_norm
+            if override_norm is not None
+            else src_preprocessing.get("normalization", {})
+        )
+        if input_shape is not None:
+            merged_preprocessing["input_shape"] = input_shape
+        if normalization:
+            merged_preprocessing["normalization"] = normalization
 
         if action == "RESUME" and cached_record and cached_record.get("command_id"):
             command_id = str(cached_record["command_id"])
@@ -601,7 +706,7 @@ def execute_rebuild_build(
                 dataset_id=source["dataset_id"],
                 profile=source["profile"],
                 batch_size=new_batch_size,
-                shard_count=3,
+                shard_count=dm_resp.get("shard_count") or source["shard_count"],
                 partition_seed=new_seed,
                 sample_count=None,
                 input_shape_json=input_shape,
@@ -765,11 +870,34 @@ def execute_delete_build(
             body = cached_record.get("response_body_jsonb") or {}
             if isinstance(body, str):
                 body = json.loads(body)
-            b_id = body.get("dataset_build_id")
-            c_id = body.get("command_id")
-            build_row = dataset_build_repository.get_build(conn, b_id) if b_id else {}
-            cmd_row = command_repository.get_command(conn, c_id) if c_id else {}
-            return build_row or body, cmd_row or body
+            b_id = (
+                body.get("dataset_build_id")
+                or cached_record.get("resource_id")
+                or dataset_build_id
+            )
+            c_id = body.get("command_id") or cached_record.get("command_id")
+            build_row = dataset_build_repository.get_build(conn, b_id) if b_id else None
+            cmd_row = command_repository.get_command(conn, c_id) if c_id else None
+
+            # Defensive fallback if rows in DB were purged or unavailable
+            norm_build_state = body.get("dataset_build_state") or body.get("state") or "DELETING"
+            norm_cmd_state = body.get("command_state") or body.get("state") or "ACCEPTED"
+            if not build_row:
+                build_row = {
+                    "dataset_build_id": b_id,
+                    "state": norm_build_state,
+                    "dataset_build_state": norm_build_state,
+                }
+            if not cmd_row:
+                cmd_row = {
+                    "command_id": str(c_id) if c_id else "unknown",
+                    "command_type": body.get("command_type", "DELETE_DATASET_BUILD"),
+                    "state": norm_cmd_state,
+                    "command_state": norm_cmd_state,
+                    "target_type": body.get("target_type", "DATASET_BUILD"),
+                    "target_id": body.get("target_id") or b_id,
+                }
+            return build_row, cmd_row
 
         build = dataset_build_repository.get_build(conn, dataset_build_id)
         if build is None:
@@ -785,7 +913,8 @@ def execute_delete_build(
         if refs:
             raise DatasetBuildReferenceError(
                 f"Build '{dataset_build_id}' is referenced by {len(refs)} "
-                f"resource(s) (jobs/checkpoints): {refs}."
+                f"resource(s) (jobs/checkpoints).",
+                references=refs,
             )
 
         if action == "RESUME" and cached_record and cached_record.get("command_id"):
@@ -802,6 +931,13 @@ def execute_delete_build(
                 target_id=dataset_build_id,
                 request={"dataset_build_id": dataset_build_id, "reason": reason},
                 requested_at=now,
+            )
+            idempotency.bind_command_to_record(
+                conn,
+                endpoint_semantic_scope="DATASET_BUILD_DELETE",
+                idempotency_key=effective_key,
+                command_id=command_id,
+                resource_id=dataset_build_id,
             )
 
     # Outside TX: Call DM purge
@@ -1072,15 +1208,28 @@ def refresh_build_from_dataset_manager(db_module: Any, dataset_build_id: str) ->
         if current is None:
             raise DatasetBuildNotFoundError(f"Dataset build '{dataset_build_id}' not found.")
         if current["state"] in {"READY", "FAILED", "DEPRECATED", "DELETED"}:
-            return current
-        updated = dataset_build_repository.update_build_state(
-            conn,
-            dataset_build_id,
-            state,
-            sample_count=dm_status.get("sample_count"),
-            shard_count=dm_status.get("shard_count"),
-        )
-    return updated or current
+            base_row = current
+        else:
+            updated = dataset_build_repository.update_build_state(
+                conn,
+                dataset_build_id,
+                state,
+                sample_count=dm_status.get("sample_count"),
+                shard_count=dm_status.get("shard_count"),
+            )
+            base_row = updated or current
+
+    result = dict(base_row)
+    stage = dm_status.get("current_stage") or dm_status.get("stage")
+    progress = dm_status.get("progress")
+    if stage is not None:
+        result["current_stage"] = stage
+    if progress is not None:
+        result["progress"] = progress
+    error_msg = dm_status.get("error") or dm_status.get("error_message") or dm_status.get("message")
+    if error_msg is not None:
+        result["error"] = error_msg
+    return result
 
 
 # ─── Backward compatibility wrappers for direct connection callers ───────────

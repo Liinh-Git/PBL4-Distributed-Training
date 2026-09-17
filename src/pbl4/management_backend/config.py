@@ -33,8 +33,9 @@ class BackendSettings(BaseSettings):
     # ─── Database ─────────────────────────────────────────────────────────────
     database_url: str | None = Field(default=None, alias="DATABASE_URL")
 
-    # ─── Runtime (MCP/1) ──────────────────────────────────────────────────────
+    # ─── Runtime (MCP/1 & DTP/1) ──────────────────────────────────────────────
     runtime_host: str = Field(default="127.0.0.1", alias="RUNTIME_HOST")
+    runtime_dtp_port: int = Field(default=9000, alias="RUNTIME_PORT")
     runtime_management_port: int | None = Field(default=None, alias="RUNTIME_MANAGEMENT_PORT")
 
     # ─── Dataset Manager ──────────────────────────────────────────────────────

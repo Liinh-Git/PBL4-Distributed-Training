@@ -76,6 +76,7 @@ class AttemptDetail(BaseModel):
     contract_hash: str
     state: str
     execution_mode: str
+    resume_from_checkpoint_id: str | None = None
     training_strategy: str | None = None
     expected_workers: int | None = None
     membership: MembershipInfo | None = None
@@ -135,8 +136,8 @@ class WorkerSessionItem(BaseModel):
     state: str
     shard_id: int | None = None
     local_model_version: int | None = None
-    protocol_version: int
-    connected_at: datetime
+    protocol_version: int = 1
+    connected_at: datetime | None = None
     last_heartbeat_at: datetime | None = None
     disconnected_at: datetime | None = None
     failure_code: str | None = None

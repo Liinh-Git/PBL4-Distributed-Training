@@ -25,6 +25,12 @@ from pbl4.management_backend.repositories import (
     job_repository,
 )
 from pbl4.management_backend.services import contract_resolver
+from pbl4.management_backend.services.dataset_service import (
+    InvalidCursorError as InvalidCursorError,
+)
+from pbl4.management_backend.services.dataset_service import (
+    decode_cursor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +146,35 @@ def get_job(conn: psycopg.Connection, job_id: str) -> dict:
     return row
 
 
+def get_job_detail(conn: psycopg.Connection, job_id: str) -> dict:
+    """Retrieve full job detail including attempt summary.
+
+    Invariants:
+    - If state is DRAFT, attempts are domain-impossible; returns total=0 without
+      querying attempts table.
+    - If state is READY or ARCHIVED, queries latest attempt and total attempts
+      via attempt_repository.
+    """
+    row = get_job(conn, job_id)
+    state = row.get("state")
+    if state == "DRAFT":
+        row["attempt_summary"] = {
+            "total": 0,
+            "latest_attempt_id": None,
+            "latest_attempt_state": None,
+        }
+    else:
+        attempts = attempt_repository.list_attempts(conn, job_id=job_id, limit=1)
+        latest = attempts[0] if attempts else None
+        total = attempt_repository.count_attempts(conn, job_id)
+        row["attempt_summary"] = {
+            "total": total,
+            "latest_attempt_id": latest["attempt_id"] if latest else None,
+            "latest_attempt_state": latest["state"] if latest else None,
+        }
+    return row
+
+
 def list_jobs(
     conn: psycopg.Connection,
     *,
@@ -149,6 +184,10 @@ def list_jobs(
     limit: int = 50,
     cursor: str | None = None,
 ) -> list[dict]:
+    cursor_dt: datetime | None = None
+    cursor_id: str | None = None
+    if cursor:
+        cursor_dt, cursor_id = decode_cursor(cursor)
     return job_repository.list_jobs(
         conn,
         state=state,
@@ -156,6 +195,8 @@ def list_jobs(
         q=q,
         limit=limit,
         cursor=cursor,
+        cursor_dt=cursor_dt,
+        cursor_id=cursor_id,
     )
 
 
@@ -184,6 +225,8 @@ def update_job(
             current_state=current["state"],
         )
     if requested_contract is not None:
+        if hasattr(requested_contract, "model_dump"):
+            requested_contract = requested_contract.model_dump(exclude_unset=True)
         rc = current["requested_contract"]
         if isinstance(rc, str):
             rc = json.loads(rc)
@@ -203,6 +246,23 @@ def update_job(
     )
     if row is None:
         raise JobNotFoundError(f"Job '{job_id}' not found after update.")
+
+    state = row.get("state")
+    if state == "DRAFT":
+        row["attempt_summary"] = {
+            "total": 0,
+            "latest_attempt_id": None,
+            "latest_attempt_state": None,
+        }
+    else:
+        attempts = attempt_repository.list_attempts(conn, job_id=job_id, limit=1)
+        latest = attempts[0] if attempts else None
+        total = attempt_repository.count_attempts(conn, job_id)
+        row["attempt_summary"] = {
+            "total": total,
+            "latest_attempt_id": latest["attempt_id"] if latest else None,
+            "latest_attempt_state": latest["state"] if latest else None,
+        }
     return row
 
 
@@ -212,9 +272,28 @@ def validate_job(conn: psycopg.Connection, job_id: str) -> dict:
     if current is None:
         raise JobNotFoundError(f"Job '{job_id}' not found.")
 
+    if current["state"] == "ARCHIVED":
+        raise JobStateError(
+            f"Job '{job_id}' is ARCHIVED; archived jobs cannot be validated.",
+            current_state="ARCHIVED",
+        )
+
     rc = current["requested_contract"]
     if isinstance(rc, str):
         rc = json.loads(rc)
+    if not isinstance(rc, dict):
+        rc = {}
+
+    if current["state"] == "READY":
+        frozen_resolved = current.get("resolved_contract")
+        if isinstance(frozen_resolved, str):
+            frozen_resolved = json.loads(frozen_resolved)
+        return {
+            "requested_contract": rc,
+            "resolved_preview": frozen_resolved,
+            "warnings": ["Job is already frozen (READY); returning frozen contract."],
+            "errors": [],
+        }
 
     errors = _validate_contract(rc)
     resolved_preview = None
@@ -297,13 +376,8 @@ def clone_job(conn: psycopg.Connection, job_id: str, *, display_name: str | None
         description=source.get("description", ""),
         requested_contract=rc,
         created_at=now,
+        cloned_from_job_id=job_id,
     )
-    with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE jobs SET cloned_from_job_id = %s WHERE job_id = %s",
-            (job_id, new_job_id),
-        )
-    row = job_repository.get_job(conn, new_job_id)
     logger.info("Job cloned: %s → %s", job_id, new_job_id)
     return row
 

@@ -81,6 +81,8 @@ def list_attempts(
     execution_mode: str | None = None,
     limit: int = 50,
     cursor: str | None = None,
+    cursor_dt: datetime | None = None,
+    cursor_id: str | None = None,
 ) -> list[dict]:
     conditions = []
     params: list[Any] = []
@@ -95,7 +97,10 @@ def list_attempts(
         conditions.append("execution_mode = %s")
         params.append(execution_mode)
 
-    if cursor:
+    if cursor_dt and cursor_id:
+        conditions.append("(created_at, attempt_id) < (%s, %s)")
+        params.extend([cursor_dt, cursor_id])
+    elif cursor:
         try:
             ts_str, aid = cursor.split("|", 1)
             conditions.append("(created_at, attempt_id) < (%s::timestamptz, %s)")
@@ -172,3 +177,12 @@ def get_active_attempt(conn: psycopg.Connection) -> dict | None:
         )
         row = cur.fetchone()
     return _row_to_dict(row) if row else None
+
+
+def count_attempts(conn: psycopg.Connection, job_id: str) -> int:
+    """Count total attempts for a job."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM attempts WHERE job_id = %s", (job_id,))
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+

@@ -41,18 +41,34 @@ def create_job(
     description: str,
     requested_contract: dict,
     created_at: datetime,
+    cloned_from_job_id: str | None = None,
 ) -> dict:
     """Insert a new DRAFT job and return the full row."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
             INSERT INTO jobs
-                (job_id, display_name, description, state, requested_contract, created_at)
+                (
+                    job_id,
+                    display_name,
+                    description,
+                    state,
+                    requested_contract,
+                    created_at,
+                    cloned_from_job_id,
+                )
             VALUES
-                (%s, %s, %s, 'DRAFT', %s, %s)
+                (%s, %s, %s, 'DRAFT', %s, %s, %s)
             RETURNING *
             """,
-            (job_id, display_name, description, json.dumps(requested_contract), created_at),
+            (
+                job_id,
+                display_name,
+                description,
+                json.dumps(requested_contract),
+                created_at,
+                cloned_from_job_id,
+            ),
         )
         row = cur.fetchone()
     return _row_to_dict(row)
@@ -74,11 +90,12 @@ def list_jobs(
     q: str | None = None,
     limit: int = 50,
     cursor: str | None = None,
+    cursor_dt: datetime | None = None,
+    cursor_id: str | None = None,
 ) -> list[dict]:
     """List jobs with optional filtering and cursor-based pagination.
 
     Stable sort: created_at DESC, job_id DESC.
-    Cursor encodes (created_at, job_id) as 'ISO|job_id'.
     """
     conditions = []
     params: list[Any] = []
@@ -98,13 +115,14 @@ def list_jobs(
         like = f"%{q}%"
         params.extend([like, like])
 
-    if cursor:
-        try:
-            ts_str, cid = cursor.split("|", 1)
-            conditions.append("(created_at, job_id) < (%s::timestamptz, %s)")
-            params.extend([ts_str, cid])
-        except ValueError:
-            pass  # ignore malformed cursor
+    if cursor and (cursor_dt is None or cursor_id is None):
+        from pbl4.management_backend.services.dataset_service import decode_cursor
+
+        cursor_dt, cursor_id = decode_cursor(cursor)
+
+    if cursor_dt is not None and cursor_id is not None:
+        conditions.append("(created_at, job_id) < (%s, %s)")
+        params.extend([cursor_dt, cursor_id])
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(limit)
@@ -208,7 +226,12 @@ def archive_job(
 
 
 def count_attempts(conn: psycopg.Connection, job_id: str) -> int:
-    """Count total attempts for a job."""
-    with conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM attempts WHERE job_id = %s", (job_id,))
-        return cur.fetchone()[0]
+    """Count total attempts for a job.
+
+    Deprecated:
+        Attempts table operations belong to attempt_repository.
+        Maintained here for backward compatibility.
+    """
+    from pbl4.management_backend.repositories import attempt_repository
+
+    return attempt_repository.count_attempts(conn, job_id)

@@ -321,6 +321,27 @@ class RuntimeGateway:
             return
 
         observed_at = datetime.now(UTC)
+
+        reconciled = {**self._empty_snapshot(), **snapshot}
+        reconciled.update(
+            {
+                "attempt_id": attempt_id,
+                "active_attempt_id": attempt_id,
+                "runtime_event_seq": snap_seq,
+                "stale": False,
+                "observed_at": observed_at,
+            }
+        )
+        self._attempt_snapshots[attempt_id] = reconciled
+        self._cached_snapshot.update(reconciled)
+        cursor = self.get_cursor(attempt_id)
+        cursor.authoritative_snapshot_seq = snap_seq
+        cursor.highest_contiguous_seq = snap_seq
+        cursor.max_seen_seq = max(cursor.max_seen_seq, snap_seq)
+        cursor.gap_fenced = False
+        cursor.stale = False
+        cursor.observed_at = observed_at
+
         try:
             from pbl4.management_backend import db
             from pbl4.management_backend.repositories import (
@@ -413,27 +434,6 @@ class RuntimeGateway:
                         )
         except Exception as exc:
             logger.warning("Could not reconcile STATE_SNAPSHOT into PostgreSQL: %s", exc)
-            return
-
-        reconciled = {**self._empty_snapshot(), **snapshot}
-        reconciled.update(
-            {
-                "attempt_id": attempt_id,
-                "active_attempt_id": attempt_id,
-                "runtime_event_seq": snap_seq,
-                "stale": False,
-                "observed_at": observed_at,
-            }
-        )
-        self._attempt_snapshots[attempt_id] = reconciled
-        self._cached_snapshot.update(reconciled)
-        cursor = self.get_cursor(attempt_id)
-        cursor.authoritative_snapshot_seq = snap_seq
-        cursor.highest_contiguous_seq = snap_seq
-        cursor.max_seen_seq = max(cursor.max_seen_seq, snap_seq)
-        cursor.gap_fenced = False
-        cursor.stale = False
-        cursor.observed_at = observed_at
 
         try:
             from pbl4.management_backend.websocket import hub

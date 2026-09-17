@@ -173,7 +173,11 @@ class DatasetManagerClient:
                 if resp.status_code == httpx.codes.OK:
                     return "healthy"
                 return "degraded"
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
+            logger.warning("Dataset Manager health probe HTTP/transport failure: %s", exc)
+            return "unreachable"
+        except Exception as exc:
+            logger.error("Dataset Manager health probe unexpected failure: %s", exc)
             return "unreachable"
 
     def create_build(
