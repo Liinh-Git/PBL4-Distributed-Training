@@ -1,0 +1,8 @@
+{
+  "name": "Remix Distributed Deep Learning Training Console",
+  "description": "Enterprise operations console for distributed deep learning training orchestration, Strict BSP synchronization inspection, worker sessions, and dataset management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

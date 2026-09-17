@@ -1,37 +1,20 @@
-# PBL4 WebUI — Management Interface
+<div align="center">
+<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
+</div>
 
-> Frontend management interface for the PBL4 distributed training infrastructure.
-> Connects exclusively to the Management Backend via REST and WebSocket.
+# Run and deploy your AI Studio app
 
-## Architecture
+This contains everything you need to run your app locally.
 
-- **Role**: Operator dashboard for inspecting cluster topology, training attempts, metrics, and dataset catalog.
-- **Backend Boundary**: Communicates strictly with `pbl4-backend` over HTTP/REST and WebSocket. Does NOT communicate directly with Runtime or Workers.
-- **Technology**: React SPA built with Vite and TypeScript.
+View your app in AI Studio: https://ai.studio/apps/c12c430a-3f8b-4f91-91b2-b93e05e87b82
 
-## Development
+## Run Locally
 
-```bash
-# Install dependencies
-npm ci
+**Prerequisites:**  Node.js
 
-# Typecheck
-npm run typecheck
 
-# Production build
-npm run build
-```
-
-## Structure
-
-```
-src/
-├── api/          — REST client and API bindings to Management Backend
-├── app/          — Application shell, providers, and layout
-├── components/   — Shared UI components
-├── domain/       — TypeScript domain models and contract types
-├── features/     — Feature modules (jobs, attempts, cluster)
-├── live/         — WebSocket connection and telemetry state
-├── pages/        — Route views
-└── strategies/   — Strategy-specific UI projections (e.g. strict_bsp)
-```
+1. Install dependencies:
+   `npm install`
+2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+3. Run the app:
+   `npm run dev`

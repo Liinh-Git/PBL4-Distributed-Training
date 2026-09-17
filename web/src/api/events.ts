@@ -1,24 +1,52 @@
-import { api } from './client';
-import type { EventListItem, ListResponse } from '../domain/types';
+/**
+ * Audit Events API Service
+ *
+ * Source of Truth: API_contract.md (36.0)
+ */
 
-export const eventsApi = {
-  list: (params?: {
-    attempt_id?: string;
-    scope_type?: string;
-    scope_id?: string;
-    event_type?: string;
-    severity?: string;
-    limit?: number;
-    cursor?: string;
-  }) => {
-    const qs = new URLSearchParams();
-    if (params?.attempt_id) qs.set('attempt_id', params.attempt_id);
-    if (params?.scope_type) qs.set('scope_type', params.scope_type);
-    if (params?.scope_id) qs.set('scope_id', params.scope_id);
-    if (params?.event_type) qs.set('event_type', params.event_type);
-    if (params?.severity) qs.set('severity', params.severity);
-    if (params?.limit) qs.set('limit', String(params.limit));
-    if (params?.cursor) qs.set('cursor', params.cursor);
-    return api.get<ListResponse<EventListItem>>(`/events?${qs}`);
-  },
-};
+import { apiClient, ApiClient, RequestOptions } from './client';
+import {
+  EventListItemData,
+  EventSeverity,
+  PaginatedResponse,
+  ScopeType,
+} from '../types/api';
+
+export interface ListEventsParams {
+  scope_type?: ScopeType | string;
+  scope_id?: string;
+  event_type?: string;
+  severity?: EventSeverity | string;
+  from?: string;
+  to?: string;
+  cursor?: string | null;
+  limit?: number;
+}
+
+export class EventsService {
+  constructor(private readonly client: ApiClient = apiClient) {}
+
+  /**
+   * 36.0 GET /api/v1/events — Audit log of management-plane and system events
+   */
+  async listEvents(
+    params?: ListEventsParams,
+    options?: RequestOptions
+  ): Promise<PaginatedResponse<EventListItemData>> {
+    return this.client.getPaginated<EventListItemData>('/api/v1/events', {
+      ...options,
+      params: {
+        scope_type: params?.scope_type,
+        scope_id: params?.scope_id,
+        event_type: params?.event_type,
+        severity: params?.severity,
+        from: params?.from,
+        to: params?.to,
+        cursor: params?.cursor,
+        limit: params?.limit,
+      },
+    });
+  }
+}
+
+export const eventsService = new EventsService();
