@@ -119,36 +119,42 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
 
     input_shape = build.get("input_shape_json") or []
     if isinstance(input_shape, str):
-        input_shape = json.loads(input_shape)
+        try:
+            input_shape = json.loads(input_shape)
+        except (json.JSONDecodeError, TypeError):
+            input_shape = []
 
     preprocessing = build.get("preprocessing_json") or {}
     if isinstance(preprocessing, str):
-        preprocessing = json.loads(preprocessing)
+        try:
+            preprocessing = json.loads(preprocessing)
+        except (json.JSONDecodeError, TypeError):
+            preprocessing = {}
     if not isinstance(preprocessing, dict):
         preprocessing = {}
 
-    normalization = preprocessing.get("normalization")
-    if not normalization or not isinstance(normalization, dict):
-        normalization = {
-            "mean": [0.4914, 0.4822, 0.4465],
-            "std": [0.2470, 0.2435, 0.2616],
-        }
-    else:
-        normalization = {
-            "mean": normalization.get("mean", [0.4914, 0.4822, 0.4465]),
-            "std": normalization.get("std", [0.2470, 0.2435, 0.2616]),
-        }
+    if not preprocessing and build.get("manifest_snapshot_jsonb"):
+        snap = build["manifest_snapshot_jsonb"]
+        if isinstance(snap, str):
+            try:
+                snap = json.loads(snap)
+            except (json.JSONDecodeError, TypeError):
+                snap = {}
+        if isinstance(snap, dict) and isinstance(snap.get("preprocessing"), dict):
+            preprocessing = snap["preprocessing"]
 
-    resolved_preprocessing: dict[str, Any] = {
-        "normalization": normalization,
-    }
+    resolved_preprocessing: dict[str, Any] = dict(preprocessing)
 
     resolved: dict[str, Any] = {
         "dataset": {
             "dataset_build_id": build["dataset_build_id"],
             "dataset_manifest_hash": dataset_manifest_hash,
             "task_type": _get_task_type(conn, build["dataset_id"]),
-            "input_shape": input_shape or model_meta.get("input_shape", [3, 32, 32]),
+            "input_shape": (
+                input_shape
+                or preprocessing.get("input_shape")
+                or model_meta.get("input_shape", [3, 32, 32])
+            ),
             "dtype": build.get("dtype", "float32"),
             "num_classes": build.get("num_classes", model_meta.get("num_classes", 10)),
             "batch_size": build["batch_size"],

@@ -30,7 +30,11 @@ from pbl4.management_backend.repositories import (
 from pbl4.management_backend.services import idempotency, job_service
 from pbl4.management_backend.services.dataset_service import (
     InvalidCursorError as InvalidCursorError,
+)
+from pbl4.management_backend.services.dataset_service import (
     decode_cursor as decode_cursor,
+)
+from pbl4.management_backend.services.dataset_service import (
     encode_cursor as encode_cursor,
 )
 
@@ -464,7 +468,12 @@ def get_attempt_detail(conn: psycopg.Connection, attempt_id: str) -> dict:
 
     rc = job.get("resolved_contract") if job else None
     if isinstance(rc, str):
-        rc = json.loads(rc)
+        try:
+            rc = json.loads(rc)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise AttemptDataIntegrityError(
+                f"Attempt '{attempt_id}' has an unparseable frozen resolved contract."
+            ) from exc
     if not isinstance(rc, dict) or "synchronization" not in rc:
         raise AttemptDataIntegrityError(
             f"Attempt '{attempt_id}' has an invalid frozen resolved contract."
@@ -745,7 +754,7 @@ def get_join_spec(conn: psycopg.Connection, attempt_id: str) -> dict | None:
     expected_workers = rc["synchronization"]["expected_workers"]
 
     return {
-        "ps_host": settings.runtime_host,
+        "ps_host": settings.dtp_advertised_host,
         "ps_port": int(
             getattr(settings, "runtime_dtp_port", getattr(settings, "runtime_port", 9000))
         ),

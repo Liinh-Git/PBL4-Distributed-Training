@@ -136,8 +136,8 @@ class WorkerSessionItem(BaseModel):
     state: str
     shard_id: int | None = None
     local_model_version: int | None = None
-    protocol_version: int = 1
-    connected_at: datetime | None = None
+    protocol_version: int
+    connected_at: datetime
     last_heartbeat_at: datetime | None = None
     disconnected_at: datetime | None = None
     failure_code: str | None = None

@@ -1,9 +1,13 @@
 """Tests for HTTP idempotency identity, hashing, and conflict semantics."""
 
-from __future__ import annotations
+from unittest.mock import MagicMock
+
+import pytest
 
 from pbl4.management_backend.services.idempotency import (
     IdempotencyConflictError,
+    IdempotencyRecordNotFoundError,
+    bind_command_to_record,
     build_request_hash,
 )
 
@@ -66,3 +70,54 @@ def test_idempotency_conflict_error_properties():
     err = IdempotencyConflictError("Key reused with different request payload.")
     assert err.code == "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST"
     assert "different request" in str(err)
+
+
+def test_bind_command_to_record_success():
+    mock_cursor = MagicMock()
+    mock_cursor.rowcount = 1
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    bind_command_to_record(
+        mock_conn,
+        operator_identity="admin",
+        endpoint_semantic_scope="DATASET_BUILD_DELETE",
+        idempotency_key="idemp-key-1",
+        command_id="550e8400-e29b-41d4-a716-446655440000",
+        resource_id="build-42",
+    )
+
+    assert mock_cursor.execute.called
+    query_str, params = mock_cursor.execute.call_args[0]
+    assert "UPDATE idempotency_records" in query_str
+    assert "command_id = %s::uuid" in query_str
+    assert params == (
+        "550e8400-e29b-41d4-a716-446655440000",
+        "build-42",
+        "admin",
+        "DATASET_BUILD_DELETE",
+        "idemp-key-1",
+    )
+
+
+def test_bind_command_to_record_raises_when_record_missing():
+    mock_cursor = MagicMock()
+    mock_cursor.rowcount = 0
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    with pytest.raises(IdempotencyRecordNotFoundError) as exc_info:
+        bind_command_to_record(
+            mock_conn,
+            operator_identity="default",
+            endpoint_semantic_scope="DATASET_BUILD_DELETE",
+            idempotency_key="missing-key-999",
+            command_id="550e8400-e29b-41d4-a716-446655440000",
+        )
+
+    err = exc_info.value
+    assert isinstance(err, RuntimeError)
+    assert "Idempotency record not found" in str(err)
+    assert "missing-key-999" in str(err)
+    assert "DATASET_BUILD_DELETE" in str(err)
+    assert "default" in str(err)

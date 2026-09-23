@@ -360,13 +360,17 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(psycopg.DataError)
     async def database_data_error_handler(request: Request, exc: psycopg.DataError) -> JSONResponse:
-        logger.warning("Database data error processing %s: %s", request.url.path, exc)
+        logger.error(
+            "Database data error processing %s: %s",
+            request.url.path,
+            exc,
+            exc_info=True,
+        )
         return _error_response(
-            400,
-            "BAD_REQUEST",
-            "Invalid input data format encountered during database operation.",
+            500,
+            "INTERNAL_SERVER_ERROR",
+            "A database data processing error occurred.",
             request,
-            details={"db_error": str(exc)},
         )
 
     @app.exception_handler(JobFrozenError)

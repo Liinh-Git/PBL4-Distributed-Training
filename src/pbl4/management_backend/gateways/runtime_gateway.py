@@ -21,6 +21,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+import psycopg
+import psycopg_pool
+
 from pbl4.common.errors import ProtocolError
 from pbl4.management_backend.gateways.mcp_port import (
     McpClientPort,
@@ -303,15 +306,6 @@ class RuntimeGateway:
                 "observed_at": observed_at,
             }
         )
-        self._attempt_snapshots[attempt_id] = reconciled
-        self._cached_snapshot.update(reconciled)
-        cursor = self.get_cursor(attempt_id)
-        cursor.authoritative_snapshot_seq = snap_seq
-        cursor.highest_contiguous_seq = snap_seq
-        cursor.max_seen_seq = max(cursor.max_seen_seq, snap_seq)
-        cursor.gap_fenced = False
-        cursor.stale = False
-        cursor.observed_at = observed_at
 
         try:
             from pbl4.management_backend import db
@@ -323,7 +317,11 @@ class RuntimeGateway:
             with db.transaction() as conn:
                 attempt = attempt_repository.get_attempt(conn, attempt_id)
                 if attempt is None:
-                    raise ValueError(f"Unknown attempt '{attempt_id}' in STATE_SNAPSHOT")
+                    logger.warning(
+                        "Unknown attempt '%s' in STATE_SNAPSHOT; rejecting reconciliation and broadcast.",
+                        attempt_id,
+                    )
+                    return
                 metadata = attempt.get("runtime_metadata") or {}
                 if isinstance(metadata, str):
                     metadata = json.loads(metadata)
@@ -403,9 +401,34 @@ class RuntimeGateway:
                             connected_at=connected_at,
                             last_heartbeat_at=heartbeat,
                         )
+        except (psycopg.OperationalError, psycopg_pool.PoolTimeout, RuntimeError) as exc:
+            logger.error(
+                "Database operational error reconciling STATE_SNAPSHOT for attempt '%s': %s",
+                attempt_id,
+                exc,
+            )
+            return
         except Exception as exc:
-            logger.warning("Could not reconcile STATE_SNAPSHOT into PostgreSQL: %s", exc)
+            logger.error(
+                "Programming or data-integrity error during STATE_SNAPSHOT reconciliation for attempt '%s': %s",
+                attempt_id,
+                exc,
+                exc_info=True,
+            )
+            return
 
+        # DB reconciliation succeeded — update in-memory cache and advance authoritative cursor:
+        self._attempt_snapshots[attempt_id] = reconciled
+        self._cached_snapshot.update(reconciled)
+        cursor = self.get_cursor(attempt_id)
+        cursor.authoritative_snapshot_seq = snap_seq
+        cursor.highest_contiguous_seq = snap_seq
+        cursor.max_seen_seq = max(cursor.max_seen_seq, snap_seq)
+        cursor.gap_fenced = False
+        cursor.stale = False
+        cursor.observed_at = observed_at
+
+        # Broadcast authoritative snapshot via WebSocket:
         try:
             from pbl4.management_backend.websocket import hub
 

@@ -54,6 +54,10 @@ class RequestInProgressError(Exception):
         self.code = code
 
 
+class IdempotencyRecordNotFoundError(RuntimeError):
+    """Raised when an operation targets an idempotency record that does not exist."""
+
+
 def compute_request_hash(
     operation: str,
     path: str,
@@ -300,3 +304,8 @@ def bind_command_to_record(
                 idempotency_key,
             ),
         )
+        if cur.rowcount == 0:
+            raise IdempotencyRecordNotFoundError(
+                f"Idempotency record not found for key '{idempotency_key}' "
+                f"(scope='{endpoint_semantic_scope}', operator='{operator_identity}')."
+            )

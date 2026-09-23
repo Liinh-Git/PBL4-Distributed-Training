@@ -15,7 +15,6 @@ GET    /api/v1/attempts/{attempt_id}/steps/{step_id} — step detail
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Annotated
 
@@ -72,18 +71,6 @@ def _session_to_item(row: dict) -> WorkerSessionItem:
     )
 
 
-def _extract_training_strategy(row: dict) -> str | None:
-    meta = row.get("runtime_metadata")
-    if isinstance(meta, str):
-        try:
-            meta = json.loads(meta)
-        except Exception:
-            meta = None
-    if isinstance(meta, dict):
-        return meta.get("training_strategy")
-    return None
-
-
 @router.get(
     "/api/v1/attempts",
     response_model=ListResponse[AttemptListItem],
@@ -113,7 +100,7 @@ def list_attempts(
             job_id=r["job_id"],
             state=r["state"],
             execution_mode=r["execution_mode"],
-            training_strategy=_extract_training_strategy(r),
+            training_strategy=r.get("training_strategy"),
             created_at=r["created_at"],
             started_at=r.get("started_at"),
             ended_at=r.get("ended_at"),

@@ -89,7 +89,6 @@ def list_jobs(
     dataset_build_id: str | None = None,
     q: str | None = None,
     limit: int = 50,
-    cursor: str | None = None,
     cursor_dt: datetime | None = None,
     cursor_id: str | None = None,
 ) -> list[dict]:
@@ -114,11 +113,6 @@ def list_jobs(
         )
         like = f"%{q}%"
         params.extend([like, like])
-
-    if cursor and (cursor_dt is None or cursor_id is None):
-        from pbl4.management_backend.services.dataset_service import decode_cursor
-
-        cursor_dt, cursor_id = decode_cursor(cursor)
 
     if cursor_dt is not None and cursor_id is not None:
         conditions.append("(created_at, job_id) < (%s, %s)")

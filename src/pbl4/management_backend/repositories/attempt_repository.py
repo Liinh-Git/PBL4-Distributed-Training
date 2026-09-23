@@ -88,22 +88,22 @@ def list_attempts(
     params: list[Any] = []
 
     if job_id:
-        conditions.append("job_id = %s")
+        conditions.append("a.job_id = %s")
         params.append(job_id)
     if state:
-        conditions.append("state = %s")
+        conditions.append("a.state = %s")
         params.append(state)
     if execution_mode:
-        conditions.append("execution_mode = %s")
+        conditions.append("a.execution_mode = %s")
         params.append(execution_mode)
 
     if cursor_dt and cursor_id:
-        conditions.append("(created_at, attempt_id) < (%s, %s)")
+        conditions.append("(a.created_at, a.attempt_id) < (%s, %s)")
         params.extend([cursor_dt, cursor_id])
     elif cursor:
         try:
             ts_str, aid = cursor.split("|", 1)
-            conditions.append("(created_at, attempt_id) < (%s::timestamptz, %s)")
+            conditions.append("(a.created_at, a.attempt_id) < (%s::timestamptz, %s)")
             params.extend([ts_str, aid])
         except ValueError:
             pass
@@ -112,9 +112,12 @@ def list_attempts(
     params.append(limit)
 
     sql = f"""
-        SELECT * FROM attempts
+        SELECT a.*,
+               j.resolved_contract->'synchronization'->>'training_strategy' AS training_strategy
+        FROM attempts a
+        LEFT JOIN jobs j ON a.job_id = j.job_id
         {where}
-        ORDER BY created_at DESC, attempt_id DESC
+        ORDER BY a.created_at DESC, a.attempt_id DESC
         LIMIT %s
     """
     with conn.cursor(row_factory=dict_row) as cur:
@@ -185,4 +188,3 @@ def count_attempts(conn: psycopg.Connection, job_id: str) -> int:
         cur.execute("SELECT COUNT(*) FROM attempts WHERE job_id = %s", (job_id,))
         row = cur.fetchone()
         return int(row[0]) if row else 0
-

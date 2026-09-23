@@ -190,7 +190,7 @@ def list_jobs(
     next_cursor = None
     if has_more:
         last = rows[limit - 1]
-        next_cursor = f"{last['created_at'].isoformat()}|{last['job_id']}"
+        next_cursor = job_service.encode_cursor(last["created_at"], last["job_id"])
     return ListResponse(data=items, page=PageInfo(next_cursor=next_cursor))
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -305,3 +305,118 @@ def test_snapshot_creation_uses_runtime_owned_session_metadata() -> None:
         )
     assert upsert.call_args.kwargs["protocol_version"] == 1
     assert upsert.call_args.kwargs["connected_at"] == datetime.fromisoformat(connected_at)
+
+
+def test_state_snapshot_unknown_attempt_does_not_update_cache_or_broadcast() -> None:
+    """Verify that an unknown attempt in STATE_SNAPSHOT rejects reconciliation and never broadcasts."""
+    gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
+    transaction = MagicMock()
+
+    with (
+        patch("pbl4.management_backend.db.transaction", transaction),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.get_attempt",
+            return_value=None,
+        ),
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync") as mock_broadcast,
+    ):
+        gateway.handle_state_snapshot(
+            {
+                "runtime_instance_id": "runtime-1",
+                "active_job_id": "job-1",
+                "active_attempt_id": "unknown-attempt-999",
+                "attempt_state": "RUNNING",
+                "training_strategy": "strict_bsp",
+                "checkpoint_policy": "after_each_model_update_blocking",
+                "epoch": 0,
+                "current_operation_id": None,
+                "current_batch_ordinal": 0,
+                "model_version": 0,
+                "workers": [],
+                "last_runtime_event_seq": 10,
+            }
+        )
+
+    # Invariants:
+    # 1. No snapshot cache entry created for unknown attempt
+    assert gateway.get_authoritative_snapshot("unknown-attempt-999") is None
+    # 2. Cursor not advanced as authoritative
+    cursor = gateway.get_cursor("unknown-attempt-999")
+    assert cursor.authoritative_snapshot_seq is None
+    # 3. Never broadcast to websocket
+    mock_broadcast.assert_not_called()
+
+
+def test_state_snapshot_db_outage_does_not_broadcast_or_advance_cursor() -> None:
+    """Verify that DB operational failure during STATE_SNAPSHOT does not advance authoritative cursor or broadcast."""
+    import psycopg
+
+    gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
+    transaction = MagicMock()
+    transaction.side_effect = psycopg.OperationalError("Database down")
+
+    with (
+        patch("pbl4.management_backend.db.transaction", transaction),
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync") as mock_broadcast,
+    ):
+        gateway.handle_state_snapshot(
+            {
+                "runtime_instance_id": "runtime-1",
+                "active_job_id": "job-1",
+                "active_attempt_id": "attempt-db-fail",
+                "attempt_state": "RUNNING",
+                "training_strategy": "strict_bsp",
+                "checkpoint_policy": "after_each_model_update_blocking",
+                "epoch": 0,
+                "current_operation_id": None,
+                "current_batch_ordinal": 0,
+                "model_version": 0,
+                "workers": [],
+                "last_runtime_event_seq": 10,
+            }
+        )
+
+    # Invariants:
+    # 1. Authoritative snapshot seq not recorded
+    assert gateway.get_authoritative_snapshot("attempt-db-fail") is None
+    # 2. Never broadcast to websocket
+    mock_broadcast.assert_not_called()
+
+
+def test_state_snapshot_programming_error_does_not_broadcast() -> None:
+    """Verify that programming/data-integrity error during STATE_SNAPSHOT aborts before broadcast."""
+    gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
+    transaction = MagicMock()
+
+    with (
+        patch("pbl4.management_backend.db.transaction", transaction),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.get_attempt",
+            return_value={"state": "RUNNING", "runtime_metadata": {}},
+        ),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.update_attempt_state",
+            side_effect=TypeError("Unexpected type in update"),
+        ),
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync") as mock_broadcast,
+    ):
+        gateway.handle_state_snapshot(
+            {
+                "runtime_instance_id": "runtime-1",
+                "active_job_id": "job-1",
+                "active_attempt_id": "attempt-bug",
+                "attempt_state": "RUNNING",
+                "training_strategy": "strict_bsp",
+                "checkpoint_policy": "after_each_model_update_blocking",
+                "epoch": 0,
+                "current_operation_id": None,
+                "current_batch_ordinal": 0,
+                "model_version": 0,
+                "workers": [],
+                "last_runtime_event_seq": 10,
+            }
+        )
+
+    # Invariants:
+    assert gateway.get_authoritative_snapshot("attempt-bug") is None
+    mock_broadcast.assert_not_called()

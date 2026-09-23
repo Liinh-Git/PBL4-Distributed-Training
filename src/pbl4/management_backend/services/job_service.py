@@ -31,6 +31,9 @@ from pbl4.management_backend.services.dataset_service import (
 from pbl4.management_backend.services.dataset_service import (
     decode_cursor,
 )
+from pbl4.management_backend.services.dataset_service import (
+    encode_cursor as encode_cursor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +197,6 @@ def list_jobs(
         dataset_build_id=dataset_build_id,
         q=q,
         limit=limit,
-        cursor=cursor,
         cursor_dt=cursor_dt,
         cursor_id=cursor_id,
     )

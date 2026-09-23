@@ -35,6 +35,7 @@ class BackendSettings(BaseSettings):
 
     # ─── Runtime (MCP/1 & DTP/1) ──────────────────────────────────────────────
     runtime_host: str = Field(default="127.0.0.1", alias="RUNTIME_HOST")
+    runtime_advertised_host: str | None = Field(default=None, alias="RUNTIME_ADVERTISED_HOST")
     runtime_dtp_port: int = Field(default=9000, alias="RUNTIME_PORT")
     runtime_management_port: int | None = Field(default=None, alias="RUNTIME_MANAGEMENT_PORT")
 
@@ -84,6 +85,11 @@ class BackendSettings(BaseSettings):
         if self.runtime_management_port is None:
             return None
         return f"{self.runtime_host}:{self.runtime_management_port}"
+
+    @property
+    def dtp_advertised_host(self) -> str:
+        """Host advertised to workers for DTP/1 connections in join-spec."""
+        return self.runtime_advertised_host or self.runtime_host
 
     @property
     def dataset_manager_base_url(self) -> str | None:
