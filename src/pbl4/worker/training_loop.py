@@ -142,6 +142,30 @@ class ParameterAppliedEligibility:
     model_version: int
 
 
+class _SingleShardCacheWrapper:
+    def __init__(self, shard: Any) -> None:
+        self._shard = shard
+        self.shard_id = int(shard.key.shard_id)
+        self.shards = {self.shard_id: shard}
+
+    def __contains__(self, shard_id: int) -> bool:
+        return shard_id == self.shard_id
+
+    def load_work_unit(
+        self, unit: WorkUnitRef
+    ) -> tuple[np.ndarray, np.ndarray, Sequence[str]]:
+        if unit.shard_id != self.shard_id:
+            raise KeyError(f"Shard {unit.shard_id} not available")
+        return self._shard.load_batch(unit.batch_id)
+
+    def load_batch(
+        self, shard_id: int, batch_id: int
+    ) -> tuple[np.ndarray, np.ndarray, Sequence[str]]:
+        if shard_id != self.shard_id:
+            raise KeyError(f"Shard {shard_id} not available")
+        return self._shard.load_batch(batch_id)
+
+
 class TrainingLoop:
     def __init__(
         self,
@@ -152,15 +176,17 @@ class TrainingLoop:
         if type(model_version) is not int or model_version < 0:
             raise ValueError("Invalid local model version")
         self._adapter = adapter
-        if isinstance(dataset, CachedShard):
+        if isinstance(dataset, DatasetCache):
+            self._dataset_cache = dataset
+        elif isinstance(dataset, CachedShard):
             self._dataset_cache = DatasetCache(
                 dataset_build_id=dataset.key.dataset_build_id,
                 dataset_manifest_hash=dataset.key.dataset_manifest_hash,
                 shards={dataset.key.shard_id: dataset},
                 root_manifest=dataset.root_manifest,
             )
-        elif isinstance(dataset, DatasetCache):
-            self._dataset_cache = dataset
+        elif hasattr(dataset, "load_batch") and hasattr(dataset, "key"):
+            self._dataset_cache = _SingleShardCacheWrapper(dataset)  # type: ignore[assignment]
         else:
             raise TypeError(f"Expected CachedShard or DatasetCache, got {type(dataset).__name__}")
         self._model_version = model_version

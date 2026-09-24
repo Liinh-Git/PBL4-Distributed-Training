@@ -21,8 +21,10 @@ from pbl4.runtime.synchronization.base import (
     SynchronizationPolicy,
 )
 from pbl4.runtime.synchronization.context import OperationContext, StrategyContext
+from pbl4.runtime.synchronization.update_plan import UpdatePlan
 from pbl4.runtime.update_engine import UpdateEngine
 from pbl4.runtime.worker_registry import SessionState, WorkerRegistry
+from pbl4.runtime.workload_scheduler import WorkloadScheduler
 
 
 def _now() -> str:
@@ -50,6 +52,7 @@ class Coordinator:
         checkpoint_context: CheckpointSnapshot,
         events: EventEmitter,
         cursor: RecoveryCursor | None = None,
+        workload_scheduler: WorkloadScheduler | None = None,
     ):
         if (
             checkpoint_context.job_id != context.job_id
@@ -67,6 +70,7 @@ class Coordinator:
         self._model = model
         self._engine = engine
         self._scheduler = scheduler
+        self._workload_scheduler = workload_scheduler
         self._checkpoint_policy = checkpoint_policy
         self._checkpoints = checkpoints
         self._checkpoint_context = checkpoint_context
@@ -76,6 +80,7 @@ class Coordinator:
         self._state = "CREATED"
         self._step_state: str | None = None
         self._operation: OperationContext | None = None
+        self._plan: UpdatePlan | None = None
         self._store = GradientStore()
         self._aggregator = GradientAggregator()
         self._latest: CompleteCheckpoint | None = None
@@ -124,7 +129,11 @@ class Coordinator:
         with self._lock:
             if self._state != "RUNNING" or self._step_state not in (None, "COMMITTED"):
                 raise ValueError("Attempt/Step progression is blocked")
-            assignments = self._scheduler.assignments(self._cursor)
+            if self._workload_scheduler is not None:
+                plan = self._workload_scheduler.plan_for_epoch(self._cursor.epoch)
+                assignments = self._scheduler.assignments(self._cursor, plan)
+            else:
+                assignments = self._scheduler.assignments(self._cursor)
             step = 0 if self._operation is None else self._operation.step_id + 1
             operation = OperationContext(
                 step,
@@ -178,6 +187,7 @@ class Coordinator:
             plan = decision.update_plan
             if plan is None:
                 return decision, None
+            self._plan = plan
             self._step_state = "AGGREGATING"
         try:
             aggregate = self._aggregator.aggregate(plan)
@@ -330,6 +340,24 @@ class Coordinator:
                 self._step_state = "COMMITTED"
                 self._milestones["committed_at"] = _now()
                 self._cursor = next_cursor
+                if self._workload_scheduler is not None and self._plan is not None:
+                    self._workload_scheduler.record_committed(
+                        self._plan.contributions,
+                        epoch=operation.epoch,
+                    )
+                if next_cursor.epoch > operation.epoch and self._workload_scheduler is not None:
+                    new_plan = self._workload_scheduler.on_epoch_completed(operation.epoch)
+                    if new_plan is not None:
+                        self._event(
+                            "workload.plan_changed",
+                            {
+                                "epoch": new_plan.epoch,
+                                "policy": new_plan.policy,
+                                "units_per_worker": new_plan.units_per_worker,
+                                "target_ratios": new_plan.target_ratios,
+                            },
+                        )
+                self._plan = None
                 self._store.discard(self._context.attempt_id, operation.operation_id)
                 self._event(
                     "checkpoint.saved",

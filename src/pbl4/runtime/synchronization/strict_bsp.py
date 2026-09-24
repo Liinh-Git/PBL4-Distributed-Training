@@ -95,7 +95,11 @@ class StrictBSP(SynchronizationPolicy):
                 return AdmissionDecision(Code.REJECT_STRATEGY_STATE, "Update selection is frozen")
             if type(c.model_version) is not int or c.model_version != op.input_model_version:
                 return AdmissionDecision(Code.REJECT_MODEL_VERSION, "Wrong input model version")
-            assignment = next(a for a in op.assignments if a.worker_id == c.worker_id)
+            assignment = next((a for a in op.assignments if a.worker_id == c.worker_id), None)
+            if assignment is None:
+                return AdmissionDecision(
+                    Code.REJECT_ASSIGNMENT, "Worker not in operation assignments"
+                )
             actual = (c.shard_id, c.batch_id, c.batch_ordinal, c.sample_count)
             expected = (
                 assignment.shard_id,

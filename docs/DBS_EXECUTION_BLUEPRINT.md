@@ -496,10 +496,10 @@ DONE WHEN: 100% tests pass, architecture check passes, ruff check passes with ze
 | **Phase 4** | `T4.1` | Expand StepStart & GradientMeta wire fields | `src/pbl4/protocol/messages.py` | `DONE` |
 | **Phase 4** | `T4.2` | Multi-unit execution in TrainingLoop | `src/pbl4/worker/training_loop.py` | `DONE` |
 | **Phase 4** | `T4.3` | Measure pure compute_ms in worker | `src/pbl4/worker/process.py`, `src/pbl4/worker/worker_client.py` | `DONE` |
-| **Phase 5** | `T5.1` | Ingest compute_ms into Contribution | `contribution.py`, `parameter_server.py` | `PLANNED` |
-| **Phase 5** | `T5.2` | StrictBSP multi-unit assignment admission | `src/pbl4/runtime/synchronization/strict_bsp.py` | `PLANNED` |
-| **Phase 5** | `T5.3` | Implement WorkloadScheduler runtime state | `src/pbl4/runtime/workload_scheduler.py` | `PLANNED` |
-| **Phase 5** | `T5.4` | Integrate Coordinator & RuntimeProcess | `coordinator.py`, `process.py` | `PLANNED` |
+| **Phase 5** | `T5.1` | Ingest compute_ms into Contribution | `contribution.py`, `parameter_server.py` | `DONE` |
+| **Phase 5** | `T5.2` | StrictBSP multi-unit assignment admission | `src/pbl4/runtime/synchronization/strict_bsp.py` | `DONE` |
+| **Phase 5** | `T5.3` | Implement WorkloadScheduler runtime state | `src/pbl4/runtime/workload_scheduler.py` | `DONE` |
+| **Phase 5** | `T5.4` | Integrate Coordinator & RuntimeProcess | `coordinator.py`, `process.py` | `DONE` |
 | **Phase 6** | `T6.1` | Checkpoint resume warm-up logic | `workload_scheduler.py`, `coordinator.py` | `PLANNED` |
 | **Phase 6** | `T6.2` | Emit workload.plan_changed event | `src/pbl4/runtime/coordinator.py` | `PLANNED` |
 | **Phase 7** | `T7.1` | Heterogeneous speed cluster test | `tests/integration/test_dbs_heterogeneous_cluster.py` | `PLANNED` |
