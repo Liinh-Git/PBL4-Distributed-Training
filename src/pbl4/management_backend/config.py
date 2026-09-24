@@ -33,8 +33,10 @@ class BackendSettings(BaseSettings):
     # ─── Database ─────────────────────────────────────────────────────────────
     database_url: str | None = Field(default=None, alias="DATABASE_URL")
 
-    # ─── Runtime (MCP/1) ──────────────────────────────────────────────────────
+    # ─── Runtime (MCP/1 & DTP/1) ──────────────────────────────────────────────
     runtime_host: str = Field(default="127.0.0.1", alias="RUNTIME_HOST")
+    runtime_advertised_host: str | None = Field(default=None, alias="RUNTIME_ADVERTISED_HOST")
+    runtime_dtp_port: int = Field(default=9000, alias="RUNTIME_PORT")
     runtime_management_port: int | None = Field(default=None, alias="RUNTIME_MANAGEMENT_PORT")
 
     # ─── Dataset Manager ──────────────────────────────────────────────────────
@@ -71,9 +73,21 @@ class BackendSettings(BaseSettings):
             return 8000
         return v
 
-    @field_validator("runtime_management_port", "dataset_manager_port", mode="before")
+    @field_validator("runtime_dtp_port", mode="before")
     @classmethod
-    def parse_empty_optional_port(cls, v: object) -> object:
+    def parse_runtime_dtp_port(cls, v: object) -> object:
+        if v == "" or v is None:
+            return 9000
+        return v
+
+    @field_validator(
+        "runtime_management_port",
+        "dataset_manager_port",
+        "runtime_advertised_host",
+        mode="before",
+    )
+    @classmethod
+    def parse_empty_optional_fields(cls, v: object) -> object:
         if v == "" or v is None:
             return None
         return v
@@ -83,6 +97,11 @@ class BackendSettings(BaseSettings):
         if self.runtime_management_port is None:
             return None
         return f"{self.runtime_host}:{self.runtime_management_port}"
+
+    @property
+    def dtp_advertised_host(self) -> str:
+        """Host advertised to workers for DTP/1 connections in join-spec."""
+        return self.runtime_advertised_host or self.runtime_host
 
     @property
     def dataset_manager_base_url(self) -> str | None:

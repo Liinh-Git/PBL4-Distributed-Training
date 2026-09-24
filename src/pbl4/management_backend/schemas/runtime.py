@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from pbl4.management_backend.schemas.attempt import StrategyStateStrictBSP, WorkerSessionItem
 
@@ -30,6 +30,12 @@ class FeatureFlags(BaseModel):
     manual_checkpoint_request: bool = True
 
 
+class SupportedModel(BaseModel):
+    model_id: str
+    display_name: str
+    task_type: str
+
+
 class CapabilitiesResponse(BaseModel):
     api_version: str = "v1"
     dtp_versions: list[int] = [1]
@@ -37,6 +43,7 @@ class CapabilitiesResponse(BaseModel):
     runtime_connected: bool
     runtime_instance_id: str | None = None
     supported_training_strategies: list[str] = ["strict_bsp"]
+    supported_models: list[SupportedModel] = Field(default_factory=list)
     feature_flags: FeatureFlags = FeatureFlags()
 
 

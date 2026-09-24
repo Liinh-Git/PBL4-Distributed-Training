@@ -15,7 +15,6 @@ GET    /api/v1/attempts/{attempt_id}/steps/{step_id} — step detail
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Annotated
 
@@ -75,6 +74,7 @@ def _session_to_item(row: dict) -> WorkerSessionItem:
 @router.get(
     "/api/v1/attempts",
     response_model=ListResponse[AttemptListItem],
+    status_code=status.HTTP_200_OK,
     summary="List all attempts",
 )
 def list_attempts(
@@ -100,6 +100,7 @@ def list_attempts(
             job_id=r["job_id"],
             state=r["state"],
             execution_mode=r["execution_mode"],
+            training_strategy=r.get("training_strategy"),
             created_at=r["created_at"],
             started_at=r.get("started_at"),
             ended_at=r.get("ended_at"),
@@ -110,37 +111,25 @@ def list_attempts(
     next_cursor = None
     if has_more:
         last = rows[limit - 1]
-        next_cursor = f"{last['created_at'].isoformat()}|{last['attempt_id']}"
+        next_cursor = attempt_service.encode_cursor(last["created_at"], last["attempt_id"])
     return ListResponse(data=items, page=PageInfo(next_cursor=next_cursor))
 
 
 @router.get(
     "/api/v1/attempts/{attempt_id}",
     response_model=ItemResponse[AttemptDetail],
+    status_code=status.HTTP_200_OK,
     summary="Get attempt detail",
 )
 def get_attempt(attempt_id: str):
     with db.get_connection() as conn:
-        row = attempt_service.get_attempt(conn, attempt_id)
-        workers = attempt_service.list_attempt_workers(conn, attempt_id)
-        from pbl4.management_backend.repositories import job_repository
+        detail = attempt_service.get_attempt_detail(conn, attempt_id)
 
-        job = job_repository.get_job(conn, row["job_id"])
-        rc = job.get("resolved_contract") if job else None
-        if isinstance(rc, str):
-            rc = json.loads(rc)
-        try:
-            expected_workers = rc["synchronization"]["expected_workers"]
-            training_strategy = rc["synchronization"]["training_strategy"]
-        except (KeyError, TypeError) as exc:
-            raise attempt_service.AttemptStateError(
-                f"Attempt '{attempt_id}' has an invalid frozen resolved contract."
-            ) from exc
-        if not isinstance(expected_workers, int) or isinstance(expected_workers, bool):
-            raise attempt_service.AttemptStateError(
-                f"Attempt '{attempt_id}' has invalid expected_workers in its frozen contract."
-            )
-        snap = attempt_service.get_attempt_snapshot(conn, attempt_id)
+    row = detail["row"]
+    workers = detail["workers"]
+    expected_workers = detail["expected_workers"]
+    training_strategy = detail["training_strategy"]
+    snap = detail["snapshot"]
 
     active_sessions = [w for w in workers if w["state"] not in ("DISCONNECTED", "FAILED")]
     failure = None
@@ -158,6 +147,7 @@ def get_attempt(attempt_id: str):
             contract_hash=row["contract_hash"],
             state=row["state"],
             execution_mode=row["execution_mode"],
+            resume_from_checkpoint_id=row.get("resume_from_checkpoint_id"),
             training_strategy=training_strategy,
             expected_workers=expected_workers,
             membership=MembershipInfo(

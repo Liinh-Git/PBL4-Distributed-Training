@@ -59,6 +59,13 @@ def test_capabilities_ok(client):
     assert data["api_version"] == "v1"
     assert "strict_bsp" in data["supported_training_strategies"]
     assert data["runtime_connected"] is False
+    assert data["supported_models"] == [
+        {
+            "model_id": "resnet18_groupnorm",
+            "display_name": "ResNet-18 (GroupNorm)",
+            "task_type": "image_classification",
+        }
+    ]
 
 
 def test_runtime_snapshot_ok(client):
@@ -266,3 +273,126 @@ def test_websocket_route_registered(client):
     assert any("/ws/v1/attempts/{attempt_id}" in r.path for r in ws_routes), (
         "WebSocket route /ws/v1/attempts/{attempt_id} not registered"
     )
+
+
+# ─── Dataset Builds Error Handling Tests ─────────────────────────────────────
+
+
+def test_list_dataset_builds_database_data_error_returns_500_without_leak(client):
+    """Verify that psycopg.DataError during dataset builds query returns 500 and does NOT leak DB internals."""
+    from unittest.mock import patch
+
+    import psycopg
+
+    with (
+        patch("pbl4.management_backend.db.get_connection"),
+        patch(
+            "pbl4.management_backend.services.dataset_service.list_builds",
+            side_effect=psycopg.DataError("corrupted timestamp in table dataset_builds: 0000-00-00"),
+        ),
+    ):
+        res = client.get("/api/v1/dataset-builds")
+        assert res.status_code == 500
+        body = res.json()
+        assert "error" in body
+        assert body["error"]["code"] == "INTERNAL_SERVER_ERROR"
+        assert body["error"]["message"] == "A database data processing error occurred."
+
+        # Verify PostgreSQL internal details are NOT leaked to client
+        details = body["error"].get("details")
+        assert details is None or "db_error" not in details
+        assert "corrupted timestamp" not in str(body)
+        assert "dataset_builds" not in str(body)
+
+
+def test_list_dataset_builds_invalid_cursor_returns_400_invalid_cursor(client):
+    """Verify that a genuine client-side invalid cursor continues to return HTTP 400 INVALID_CURSOR."""
+    from unittest.mock import patch
+
+    with patch("pbl4.management_backend.db.get_connection"):
+        res = client.get("/api/v1/dataset-builds?cursor=invalid_base64_payload_!!!")
+        assert res.status_code == 400
+        body = res.json()
+        assert "error" in body
+        assert body["error"]["code"] == "INVALID_CURSOR"
+
+
+# ─── Join Spec ps_host Advertising Tests ─────────────────────────────────────
+
+
+def test_join_spec_advertises_dtp_host_when_runtime_advertised_host_set():
+    """Verify join-spec advertises RUNTIME_ADVERTISED_HOST as ps_host for multi-machine clusters."""
+    from unittest.mock import MagicMock, patch
+    from pbl4.management_backend.config import BackendSettings
+    from pbl4.management_backend.services import attempt_service
+
+    mock_conn = MagicMock()
+    mock_attempt = {
+        "attempt_id": "att-spec-1",
+        "job_id": "job-1",
+        "contract_hash": "h" * 64,
+        "state": "INITIALIZING",
+    }
+    mock_job = {
+        "job_id": "job-1",
+        "resolved_contract": {
+            "synchronization": {"expected_workers": 3},
+        },
+    }
+    custom_settings = BackendSettings(
+        RUNTIME_HOST="127.0.0.1",
+        RUNTIME_ADVERTISED_HOST="192.168.1.100",
+        RUNTIME_PORT=9000,
+    )
+
+    mock_gw = MagicMock(connected=True)
+
+    with (
+        patch("pbl4.management_backend.repositories.attempt_repository.get_attempt", return_value=mock_attempt),
+        patch("pbl4.management_backend.repositories.job_repository.get_job", return_value=mock_job),
+        patch("pbl4.management_backend.services.attempt_service.get_gateway", return_value=mock_gw),
+        patch("pbl4.management_backend.config.get_settings", return_value=custom_settings),
+    ):
+        spec = attempt_service.get_join_spec(mock_conn, "att-spec-1")
+        assert spec is not None
+        assert spec["ps_host"] == "192.168.1.100"
+        assert spec["ps_port"] == 9000
+        assert spec["expected_workers"] == 3
+
+
+def test_join_spec_falls_back_to_runtime_host_when_advertised_host_not_set():
+    """Verify join-spec falls back to RUNTIME_HOST when RUNTIME_ADVERTISED_HOST is not set."""
+    from unittest.mock import MagicMock, patch
+    from pbl4.management_backend.config import BackendSettings
+    from pbl4.management_backend.services import attempt_service
+
+    mock_conn = MagicMock()
+    mock_attempt = {
+        "attempt_id": "att-spec-2",
+        "job_id": "job-2",
+        "contract_hash": "h" * 64,
+        "state": "INITIALIZING",
+    }
+    mock_job = {
+        "job_id": "job-2",
+        "resolved_contract": {
+            "synchronization": {"expected_workers": 3},
+        },
+    }
+    default_settings = BackendSettings(
+        RUNTIME_HOST="10.0.0.5",
+        RUNTIME_ADVERTISED_HOST=None,
+        RUNTIME_PORT=9000,
+    )
+    mock_gw = MagicMock(connected=True)
+
+    with (
+        patch("pbl4.management_backend.repositories.attempt_repository.get_attempt", return_value=mock_attempt),
+        patch("pbl4.management_backend.repositories.job_repository.get_job", return_value=mock_job),
+        patch("pbl4.management_backend.services.attempt_service.get_gateway", return_value=mock_gw),
+        patch("pbl4.management_backend.config.get_settings", return_value=default_settings),
+    ):
+        spec = attempt_service.get_join_spec(mock_conn, "att-spec-2")
+        assert spec is not None
+        assert spec["ps_host"] == "10.0.0.5"
+        assert spec["ps_port"] == 9000

@@ -28,6 +28,15 @@ from pbl4.management_backend.repositories import (
     worker_session_repository,
 )
 from pbl4.management_backend.services import idempotency, job_service
+from pbl4.management_backend.services.dataset_service import (
+    InvalidCursorError as InvalidCursorError,
+)
+from pbl4.management_backend.services.dataset_service import (
+    decode_cursor as decode_cursor,
+)
+from pbl4.management_backend.services.dataset_service import (
+    encode_cursor as encode_cursor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +59,12 @@ def _require_idempotency_key(value: str | None) -> str:
 
 
 class AttemptNotFoundError(Exception):
+    pass
+
+
+class AttemptDataIntegrityError(Exception):
+    """Raised when attempt data or its parent contract is corrupted or inconsistent."""
+
     pass
 
 
@@ -440,6 +455,61 @@ def get_attempt(conn: psycopg.Connection, attempt_id: str) -> dict:
     return row
 
 
+def get_attempt_detail(conn: psycopg.Connection, attempt_id: str) -> dict:
+    row = attempt_repository.get_attempt(conn, attempt_id)
+    if row is None:
+        raise AttemptNotFoundError(f"Attempt '{attempt_id}' not found.")
+
+    job = job_repository.get_job(conn, row["job_id"])
+    if job is None:
+        raise AttemptDataIntegrityError(
+            f"Parent job '{row['job_id']}' for attempt '{attempt_id}' not found."
+        )
+
+    rc = job.get("resolved_contract") if job else None
+    if isinstance(rc, str):
+        try:
+            rc = json.loads(rc)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise AttemptDataIntegrityError(
+                f"Attempt '{attempt_id}' has an unparseable frozen resolved contract."
+            ) from exc
+    if not isinstance(rc, dict) or "synchronization" not in rc:
+        raise AttemptDataIntegrityError(
+            f"Attempt '{attempt_id}' has an invalid frozen resolved contract."
+        )
+
+    try:
+        sync = rc["synchronization"]
+        expected_workers = sync["expected_workers"]
+        training_strategy = sync["training_strategy"]
+    except (KeyError, TypeError) as exc:
+        raise AttemptDataIntegrityError(
+            f"Attempt '{attempt_id}' has an invalid frozen resolved contract."
+        ) from exc
+
+    if (
+        not isinstance(expected_workers, int)
+        or isinstance(expected_workers, bool)
+        or expected_workers <= 0
+    ):
+        raise AttemptDataIntegrityError(
+            f"Attempt '{attempt_id}' has invalid expected_workers in its frozen contract."
+        )
+
+    workers = worker_session_repository.get_sessions_for_attempt(conn, attempt_id)
+    snap = get_attempt_snapshot(conn, attempt_id)
+
+    return {
+        "row": row,
+        "job": job,
+        "expected_workers": expected_workers,
+        "training_strategy": training_strategy,
+        "workers": workers,
+        "snapshot": snap,
+    }
+
+
 def list_attempts(
     conn: psycopg.Connection,
     *,
@@ -449,6 +519,10 @@ def list_attempts(
     limit: int = 50,
     cursor: str | None = None,
 ) -> list[dict]:
+    cursor_dt: datetime | None = None
+    cursor_id: str | None = None
+    if cursor:
+        cursor_dt, cursor_id = decode_cursor(cursor)
     return attempt_repository.list_attempts(
         conn,
         job_id=job_id,
@@ -456,6 +530,8 @@ def list_attempts(
         execution_mode=execution_mode,
         limit=limit,
         cursor=cursor,
+        cursor_dt=cursor_dt,
+        cursor_id=cursor_id,
     )
 
 
@@ -678,8 +754,10 @@ def get_join_spec(conn: psycopg.Connection, attempt_id: str) -> dict | None:
     expected_workers = rc["synchronization"]["expected_workers"]
 
     return {
-        "ps_host": settings.runtime_host,
-        "ps_port": settings.runtime_dtp_port,
+        "ps_host": settings.dtp_advertised_host,
+        "ps_port": int(
+            getattr(settings, "runtime_dtp_port", getattr(settings, "runtime_port", 9000))
+        ),
         "job_id": attempt["job_id"],
         "attempt_id": attempt_id,
         "contract_hash": attempt["contract_hash"],

@@ -25,6 +25,7 @@ from pbl4.management_backend.schemas.common import ItemResponse, ListResponse, P
 from pbl4.management_backend.schemas.job import (
     AttemptSummary,
     JobArchiveResponse,
+    JobCloneRequest,
     JobCreateRequest,
     JobDetail,
     JobLinks,
@@ -42,7 +43,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Jobs"])
 
 
-def _build_job_detail(row: dict, conn) -> JobDetail:
+def _build_job_detail(row: dict) -> JobDetail:
     rc = row.get("requested_contract") or {}
     if isinstance(rc, str):
         rc = json.loads(rc)
@@ -50,11 +51,15 @@ def _build_job_detail(row: dict, conn) -> JobDetail:
     if isinstance(res, str):
         res = json.loads(res)
 
-    from pbl4.management_backend.repositories import attempt_repository
-
-    attempts = attempt_repository.list_attempts(conn, job_id=row["job_id"], limit=1)
-    latest = attempts[0] if attempts else None
-    attempt_count = job_service.job_repository.count_attempts(conn, row["job_id"])
+    raw_summary = row.get("attempt_summary")
+    if raw_summary:
+        attempt_summary = AttemptSummary(**raw_summary)
+    else:
+        attempt_summary = AttemptSummary(
+            total=0,
+            latest_attempt_id=None,
+            latest_attempt_state=None,
+        )
 
     return JobDetail(
         job_id=row["job_id"],
@@ -65,12 +70,8 @@ def _build_job_detail(row: dict, conn) -> JobDetail:
         resolved_contract=res,
         contract_hash=row.get("contract_hash"),
         cloned_from_job_id=row.get("cloned_from_job_id"),
-        attempt_summary=AttemptSummary(
-            total=attempt_count,
-            latest_attempt_id=latest["attempt_id"] if latest else None,
-            latest_attempt_state=latest["state"] if latest else None,
-        ),
-        links=JobLinks(attempts=f"/api/v1/jobs/{row['job_id']}/attempts"),
+        attempt_summary=attempt_summary,
+        links=JobLinks(attempts=f"/api/v1/attempts?job_id={row['job_id']}"),
         created_at=row["created_at"],
         frozen_at=row.get("frozen_at"),
         archived_at=row.get("archived_at"),
@@ -134,10 +135,6 @@ def create_job(
             cached_body = cached_record.get("response_body_jsonb") or {}
             if isinstance(cached_body, str):
                 cached_body = json.loads(cached_body)
-            j_id = cached_body.get("job_id")
-            if j_id:
-                row = job_service.get_job(conn, j_id)
-                return ItemResponse(data=_build_job_detail(row, conn))
             return ItemResponse(data=JobDetail(**cached_body))
 
         row = job_service.create_job(
@@ -146,7 +143,7 @@ def create_job(
             description=body.description,
             requested_contract=body.requested_contract.model_dump(),
         )
-        detail = _build_job_detail(row, conn)
+        detail = _build_job_detail(row)
         idempotency.complete_record(
             conn,
             endpoint_semantic_scope="JOB_CREATE",
@@ -170,21 +167,30 @@ def list_jobs(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     cursor: Annotated[str | None, Query()] = None,
 ):
-    with db.get_connection() as conn:
-        rows = job_service.list_jobs(
-            conn,
-            state=state,
-            dataset_build_id=dataset_build_id,
-            q=q,
-            limit=limit + 1,
-            cursor=cursor,
-        )
+    try:
+        with db.get_connection() as conn:
+            rows = job_service.list_jobs(
+                conn,
+                state=state,
+                dataset_build_id=dataset_build_id,
+                q=q,
+                limit=limit + 1,
+                cursor=cursor,
+            )
+    except job_service.InvalidCursorError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "INVALID_CURSOR",
+                "message": str(exc),
+            },
+        ) from exc
     has_more = len(rows) > limit
     items = [_build_job_list_item(r) for r in rows[:limit]]
     next_cursor = None
     if has_more:
         last = rows[limit - 1]
-        next_cursor = f"{last['created_at'].isoformat()}|{last['job_id']}"
+        next_cursor = job_service.encode_cursor(last["created_at"], last["job_id"])
     return ListResponse(data=items, page=PageInfo(next_cursor=next_cursor))
 
 
@@ -195,8 +201,8 @@ def list_jobs(
 )
 def get_job(job_id: str):
     with db.get_connection() as conn:
-        row = job_service.get_job(conn, job_id)
-        return ItemResponse(data=_build_job_detail(row, conn))
+        row = job_service.get_job_detail(conn, job_id)
+        return ItemResponse(data=_build_job_detail(row))
 
 
 @router.patch(
@@ -206,14 +212,19 @@ def get_job(job_id: str):
 )
 def patch_job(job_id: str, body: JobPatchRequest):
     with db.transaction() as conn:
+        contract_patch = (
+            body.requested_contract.model_dump(exclude_unset=True)
+            if body.requested_contract is not None
+            else None
+        )
         row = job_service.update_job(
             conn,
             job_id,
             display_name=body.display_name,
             description=body.description,
-            requested_contract=body.requested_contract,
+            requested_contract=contract_patch,
         )
-        return ItemResponse(data=_build_job_detail(row, conn))
+        return ItemResponse(data=_build_job_detail(row))
 
 
 @router.post(
@@ -347,6 +358,7 @@ def resume_job(
 )
 def clone_job(
     job_id: str,
+    body: JobCloneRequest | None = None,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ):
     if not idempotency_key:
@@ -357,10 +369,11 @@ def clone_job(
                 "message": "Header 'Idempotency-Key' is required for this operation.",
             },
         )
+    body_payload = body.model_dump(exclude_unset=True) if body else {}
     request_hash = idempotency.compute_request_hash(
         operation="CLONE_JOB",
         path=f"/api/v1/jobs/{job_id}/clone",
-        body_obj={"job_id": job_id},
+        body_obj={"job_id": job_id, **body_payload},
     )
     with db.transaction() as conn:
         cached_record, action = idempotency.acquire_or_get_record(
@@ -373,14 +386,11 @@ def clone_job(
             cached_body = cached_record.get("response_body_jsonb") or {}
             if isinstance(cached_body, str):
                 cached_body = json.loads(cached_body)
-            cloned_id = cached_body.get("job_id")
-            if cloned_id:
-                row = job_service.get_job(conn, cloned_id)
-                return ItemResponse(data=_build_job_detail(row, conn))
             return ItemResponse(data=JobDetail(**cached_body))
 
-        row = job_service.clone_job(conn, job_id)
-        detail = _build_job_detail(row, conn)
+        display_name = body.display_name if body else None
+        row = job_service.clone_job(conn, job_id, display_name=display_name)
+        detail = _build_job_detail(row)
         idempotency.complete_record(
             conn,
             endpoint_semantic_scope="JOB_CLONE",

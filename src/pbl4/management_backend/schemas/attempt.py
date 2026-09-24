@@ -76,6 +76,7 @@ class AttemptDetail(BaseModel):
     contract_hash: str
     state: str
     execution_mode: str
+    resume_from_checkpoint_id: str | None = None
     training_strategy: str | None = None
     expected_workers: int | None = None
     membership: MembershipInfo | None = None

@@ -16,6 +16,8 @@ from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
+import psycopg
+import psycopg_pool
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +30,7 @@ from pbl4.management_backend.clients.dataset_manager import (
 from pbl4.management_backend.gateways.runtime_gateway import DatabaseUnavailableError
 from pbl4.management_backend.services.attempt_service import (
     AttemptConflictError,
+    AttemptDataIntegrityError,
     AttemptNotAbortableError,
     AttemptNotFoundError,
     AttemptStateError,
@@ -45,6 +48,7 @@ from pbl4.management_backend.services.dataset_service import (
     DatasetBuildReferenceError,
     DatasetBuildStateError,
     DatasetNotFoundError,
+    InvalidCursorError,
 )
 from pbl4.management_backend.services.idempotency import (
     IdempotencyConflictError,
@@ -231,12 +235,15 @@ def create_app() -> FastAPI:
     async def validation_error_handler(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
+        from fastapi.encoders import jsonable_encoder
+
+        safe_errors = jsonable_encoder(exc.errors(), custom_encoder={Exception: str})
         return _error_response(
             422,
             "VALIDATION_ERROR",
             "Request validation failed.",
             request,
-            details={"errors": exc.errors()},
+            details={"errors": safe_errors},
         )
 
     @app.exception_handler(JobValidationError)
@@ -261,6 +268,10 @@ def create_app() -> FastAPI:
             details={"errors": exc.errors},
         )
 
+    @app.exception_handler(InvalidCursorError)
+    async def invalid_cursor_handler(request: Request, exc: InvalidCursorError) -> JSONResponse:
+        return _error_response(400, "INVALID_CURSOR", str(exc), request)
+
     @app.exception_handler(JobNotFoundError)
     @app.exception_handler(AttemptNotFoundError)
     @app.exception_handler(DatasetNotFoundError)
@@ -268,6 +279,13 @@ def create_app() -> FastAPI:
     @app.exception_handler(CommandNotFoundError)
     async def not_found_handler(request: Request, exc: Exception) -> JSONResponse:
         return _error_response(404, "NOT_FOUND", str(exc), request)
+
+    @app.exception_handler(AttemptDataIntegrityError)
+    async def attempt_integrity_error_handler(
+        request: Request, exc: AttemptDataIntegrityError
+    ) -> JSONResponse:
+        logger.error("Attempt data integrity error processing %s: %s", request.url.path, exc)
+        return _error_response(500, "DATA_INTEGRITY_ERROR", str(exc), request)
 
     @app.exception_handler(RuntimeUnavailableError)
     async def runtime_unavailable_handler(
@@ -324,6 +342,37 @@ def create_app() -> FastAPI:
             command_id=exc.command_id,
         )
 
+    @app.exception_handler(psycopg.OperationalError)
+    @app.exception_handler(psycopg_pool.PoolTimeout)
+    async def database_operational_error_handler(request: Request, exc: Exception) -> JSONResponse:
+        logger.error(
+            "Database operational error processing %s: %s",
+            request.url.path,
+            exc,
+            exc_info=True,
+        )
+        return _error_response(
+            503,
+            "DATABASE_UNAVAILABLE",
+            "Database is currently unavailable. Please retry later.",
+            request,
+        )
+
+    @app.exception_handler(psycopg.DataError)
+    async def database_data_error_handler(request: Request, exc: psycopg.DataError) -> JSONResponse:
+        logger.error(
+            "Database data error processing %s: %s",
+            request.url.path,
+            exc,
+            exc_info=True,
+        )
+        return _error_response(
+            500,
+            "INTERNAL_SERVER_ERROR",
+            "A database data processing error occurred.",
+            request,
+        )
+
     @app.exception_handler(JobFrozenError)
     async def job_frozen_handler(request: Request, exc: JobFrozenError) -> JSONResponse:
         return _error_response(409, "JOB_FROZEN", str(exc), request)
@@ -358,7 +407,14 @@ def create_app() -> FastAPI:
     async def attempt_not_abortable_handler(
         request: Request, exc: AttemptNotAbortableError
     ) -> JSONResponse:
-        return _error_response(409, "ATTEMPT_NOT_ABORTABLE", str(exc), request)
+        details = {"state": exc.current_state} if getattr(exc, "current_state", None) else None
+        return _error_response(
+            409,
+            "ATTEMPT_NOT_ABORTABLE",
+            str(exc),
+            request,
+            details=details,
+        )
 
     @app.exception_handler(CheckpointNotCompleteError)
     async def checkpoint_not_complete_handler(
@@ -387,7 +443,14 @@ def create_app() -> FastAPI:
     async def build_reference_handler(
         request: Request, exc: DatasetBuildReferenceError
     ) -> JSONResponse:
-        return _error_response(409, "DATASET_BUILD_IN_USE", str(exc), request)
+        details = {"references": exc.references} if exc.references else None
+        return _error_response(
+            409,
+            "DATASET_BUILD_IN_USE",
+            str(exc),
+            request,
+            details=details,
+        )
 
     @app.exception_handler(IdempotencyConflictError)
     async def idempotency_conflict_handler(
