@@ -14,7 +14,7 @@ Status:
 from __future__ import annotations
 
 import argparse
-import sys
+import logging
 
 
 def main() -> None:
@@ -41,11 +41,35 @@ def main() -> None:
         default=None,
         help="Runtime Parameter Server DTP/1 port.",
     )
-    parser.parse_args()
+    parser.add_argument("--cache-dir", default="var/worker-cache")
+    parser.add_argument("--initialization-seed", type=int, required=True)
+    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--heartbeat-interval", type=float, default=5.0)
+    parser.add_argument("--log-level", default="INFO")
+    args = parser.parse_args()
+    if args.runtime_port is None:
+        parser.error("--runtime-port is required")
 
-    # Worker training loop execution is pending implementation
-    print("pbl4-worker: worker implementation pending", file=sys.stderr)
-    sys.exit(1)
+    from pbl4.worker.config import WorkerConfig
+    from pbl4.worker.process import WorkerProcess
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    process = WorkerProcess(
+        WorkerConfig(
+            node_label=args.node_label,
+            runtime_host=args.runtime_host,
+            runtime_port=args.runtime_port,
+            cache_dir=args.cache_dir,
+            heartbeat_interval_seconds=args.heartbeat_interval,
+            log_level=args.log_level,
+        ),
+        initialization_seed=args.initialization_seed,
+        device=args.device,
+    )
+    raise SystemExit(0 if process.run() else 1)
 
 
 if __name__ == "__main__":

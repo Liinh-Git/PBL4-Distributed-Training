@@ -21,8 +21,11 @@ ENV/
 .coverage
 htmlcov/
 .pytest_cache/
+.pytest-*/
 .mypy_cache/
 .ruff_cache/
+test_api.py
+report.md
 
 # ─── Node / Frontend ─────────────────────────────────────
 node_modules/
@@ -50,6 +53,7 @@ checkpoints/
 dataset_store/
 worker_cache/
 /logs/
+artifacts/e2e/
 
 # ─── Local PostgreSQL data ────────────────────────────────
 pgdata/
@@ -62,3 +66,6 @@ postgres-data/
 *.tmp
 *.bak
 *.log
+
+# ─── Reports / Local ─────────────────────────────────────
+report.md

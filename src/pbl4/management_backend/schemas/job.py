@@ -211,17 +211,6 @@ class JobDetail(BaseModel):
     archived_at: datetime | None = None
 
 
-class JobCloneResponse(BaseModel):
-    job_id: str
-    state: str
-    cloned_from_job_id: str
-    display_name: str
-    description: str
-    requested_contract: RequestedContractV1
-    resolved_contract: None = None
-    contract_hash: None = None
-
-
 class JobArchiveResponse(BaseModel):
     job_id: str
     state: str
@@ -229,7 +218,7 @@ class JobArchiveResponse(BaseModel):
 
 
 class JobValidateResponse(BaseModel):
-    requested_contract: RequestedContractV1
+    requested_contract: dict[str, Any]
     resolved_preview: ResolvedContractV1 | None = None
     warnings: list[str] = []
     errors: list[str] = []

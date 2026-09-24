@@ -8,15 +8,18 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import numpy as np
 
-from pbl4.common.errors import ProtocolError
+from pbl4.common.errors import ProtocolError, TransportError
 from pbl4.protocol.codec import DTPFrame
 from pbl4.protocol.constants import (
+    MESSAGE_TYPE_ERROR,
     MESSAGE_TYPE_GRADIENT_CHUNK,
     MESSAGE_TYPE_GRADIENT_END,
     MESSAGE_TYPE_GRADIENT_META,
+    MESSAGE_TYPE_HEARTBEAT,
     MESSAGE_TYPE_HELLO,
     MESSAGE_TYPE_MODEL_INIT,
     MESSAGE_TYPE_MODEL_MANIFEST,
@@ -31,13 +34,17 @@ from pbl4.protocol.constants import (
 from pbl4.protocol.messages import (
     DatasetAssignment,
     DtpControlMessage,
+    Error,
     GradientEnd,
     GradientMeta,
+    Heartbeat,
     Hello,
     HelloAck,
     ModelManifest,
     ParameterMeta,
+    Ready,
     StepStart,
+    Stop,
     build_control_frame,
     decode_control_message,
 )
@@ -61,6 +68,7 @@ GradientHandler = Callable[[Contribution], None]
 ParameterAppliedHandler = Callable[[ParameterApplied], None]
 ModelInitHandler = Callable[[CompletedTensorTransfer], None]
 DisconnectHandler = Callable[[int, int], None]
+ErrorHandler = Callable[[int, int, Error], None]
 
 
 @dataclass(slots=True)
@@ -71,6 +79,14 @@ class _Connection:
     validator: ConnectionProtocolValidator
     assembler: TensorTransferAssembler
     sender: LogicalTransferSender
+    node_label: str = ""
+    protocol_version: int = 1
+    connected_at: str = ""
+    last_heartbeat_at: str = ""
+    terminal_stop_sent: bool = False
+    shard_id: int | None = None
+    local_model_version: int | None = None
+    last_seen: float = 0.0
 
 
 class ParameterServer:
@@ -90,6 +106,7 @@ class ParameterServer:
         parameter_applied_handler: ParameterAppliedHandler | None = None,
         model_init_handler: ModelInitHandler | None = None,
         disconnect_handler: DisconnectHandler | None = None,
+        error_handler: ErrorHandler | None = None,
         heartbeat_interval_ms: int = 5_000,
         heartbeat_timeout_ms: int = 15_000,
         max_tensor_chunk_bytes: int = 1024 * 1024,
@@ -105,6 +122,7 @@ class ParameterServer:
         self._parameter_applied_handler = parameter_applied_handler
         self._model_init_handler = model_init_handler
         self._disconnect_handler = disconnect_handler
+        self._error_handler = error_handler
         self._heartbeat_interval_ms = heartbeat_interval_ms
         self._heartbeat_timeout_ms = heartbeat_timeout_ms
         self._max_chunk = max_tensor_chunk_bytes
@@ -138,6 +156,26 @@ class ParameterServer:
     def worker_ids(self) -> tuple[int, ...]:
         with self._lock:
             return tuple(sorted(self._connections))
+
+    def worker_snapshots(self) -> tuple[dict[str, object], ...]:
+        """Return management metadata without exposing live socket objects."""
+        sessions = {item.worker_id: item for item in self.registry.snapshot()}
+        with self._lock:
+            return tuple(
+                {
+                    "worker_id": worker_id,
+                    "session_id": connection.session_id,
+                    "node_label": connection.node_label,
+                    "state": sessions[worker_id].state.value,
+                    "protocol_version": connection.protocol_version,
+                    "connected_at": connection.connected_at,
+                    "last_heartbeat_at": connection.last_heartbeat_at,
+                    "shard_id": connection.shard_id,
+                    "local_model_version": connection.local_model_version,
+                }
+                for worker_id, connection in sorted(self._connections.items())
+                if worker_id in sessions
+            )
 
     def wait_for_manifests(self, timeout: float) -> bool:
         deadline = time.monotonic() + timeout
@@ -178,6 +216,7 @@ class ParameterServer:
                     time.monotonic(),
                 )
                 validator.bind(session_id, registered.worker_id)
+                connected_at = datetime.now(UTC).isoformat()
                 connection = _Connection(
                     sock=sock,
                     session_id=session_id,
@@ -189,6 +228,11 @@ class ParameterServer:
                         max_tensor_chunk_bytes=self._max_chunk,
                     ),
                     sender=LogicalTransferSender(self._write_frame),
+                    node_label=str(hello.node_label),
+                    protocol_version=1,
+                    connected_at=connected_at,
+                    last_heartbeat_at=connected_at,
+                    last_seen=time.monotonic(),
                 )
                 self._connections[registered.worker_id] = connection
                 self._membership_changed.notify_all()
@@ -209,7 +253,13 @@ class ParameterServer:
                 }
             )
             self._send_control(connection, ack)
-            self._read_bound(connection)
+            try:
+                self._read_bound(connection)
+            except TransportError:
+                with self._lock:
+                    terminal_stop_sent = connection.terminal_stop_sent
+                if not terminal_stop_sent:
+                    raise
         finally:
             if connection is not None:
                 connection.assembler.discard()
@@ -241,6 +291,12 @@ class ParameterServer:
             }:
                 message = decode_control_message(frame.header.message_type, frame.payload)
             connection.validator.validate(frame.header, message)
+            now = time.monotonic()
+            connection.last_seen = now
+            with contextlib.suppress(ValueError):
+                self.registry.heartbeat(connection.worker_id, connection.session_id, now)
+            with self._lock:
+                connection.last_heartbeat_at = datetime.now(UTC).isoformat()
             identity = (
                 TransferIdentity(
                     frame.header.session_id,
@@ -260,6 +316,8 @@ class ParameterServer:
             )
 
             if frame.header.message_type == MESSAGE_TYPE_SHARD_READY:
+                assert message is not None
+                connection.shard_id = int(message.shard_id)
                 self.registry.transition(
                     connection.worker_id,
                     connection.session_id,
@@ -268,7 +326,36 @@ class ParameterServer:
                 )
                 connection.validator.set_phase(ConnectionPhase.SHARD_READY)
             elif frame.header.message_type == MESSAGE_TYPE_SHARD_ERROR:
+                now = time.monotonic()
+                with contextlib.suppress(ValueError):
+                    self.registry.transition(
+                        connection.worker_id,
+                        connection.session_id,
+                        SessionState.FAILED,
+                        now,
+                        failure_code="SHARD_PROVISIONING_FAILED",
+                    )
+                connection.validator.set_phase(ConnectionPhase.CLOSED)
                 raise ProtocolError("Worker reported shard provisioning failure")
+            elif frame.header.message_type == MESSAGE_TYPE_ERROR:
+                assert isinstance(message, Error)
+                if self._error_handler is not None:
+                    self._error_handler(connection.worker_id, connection.session_id, message)
+                if message.is_fatal:
+                    now = time.monotonic()
+                    with contextlib.suppress(ValueError):
+                        self.registry.transition(
+                            connection.worker_id,
+                            connection.session_id,
+                            SessionState.FAILED,
+                            now,
+                            failure_code=message.error_code,
+                        )
+                    connection.validator.set_phase(ConnectionPhase.CLOSED)
+                    raise ProtocolError(
+                        f"Fatal worker error (scope={message.scope}, "
+                        f"code={message.error_code}): {message.message}"
+                    )
             elif frame.header.message_type == MESSAGE_TYPE_MODEL_MANIFEST:
                 assert isinstance(message, ModelManifest)
                 if message.to_dict() != self.manifest.to_dict():
@@ -281,8 +368,8 @@ class ParameterServer:
                 if connection.worker_id != 0:
                     raise ProtocolError("Only worker 0 may announce MODEL_INIT")
                 with self._lock:
-                    if len(self._manifest_workers) != self.expected_workers:
-                        raise ProtocolError("MODEL_INIT requires full manifest membership")
+                    if connection.worker_id not in self._manifest_workers:
+                        raise ProtocolError("MODEL_INIT requires the sender's verified manifest")
             elif frame.header.message_type == MESSAGE_TYPE_PARAMETER_META:
                 assert identity is not None and isinstance(message, ParameterMeta)
                 connection.assembler.begin_parameter(identity, message)
@@ -294,6 +381,8 @@ class ParameterServer:
                 if complete is not None and self._model_init_handler is not None:
                     self._model_init_handler(complete)
             elif frame.header.message_type == MESSAGE_TYPE_READY:
+                assert isinstance(message, Ready)
+                connection.local_model_version = int(message.model_version)
                 self.registry.transition(
                     connection.worker_id,
                     connection.session_id,
@@ -301,6 +390,12 @@ class ParameterServer:
                     time.monotonic(),
                 )
                 connection.validator.set_phase(ConnectionPhase.READY)
+            elif frame.header.message_type == MESSAGE_TYPE_HEARTBEAT:
+                assert isinstance(message, Heartbeat)
+                self.registry.heartbeat(
+                    connection.worker_id, connection.session_id, time.monotonic()
+                )
+                connection.local_model_version = int(message.local_model_version)
             elif frame.header.message_type == MESSAGE_TYPE_GRADIENT_META:
                 assert identity is not None and isinstance(message, GradientMeta)
                 connection.assembler.begin_gradient(identity, message)
@@ -358,6 +453,13 @@ class ParameterServer:
             except KeyError as exc:
                 raise ValueError(f"Worker {worker_id} is not connected") from exc
 
+    def last_seen(self, worker_id: int) -> float:
+        with self._lock:
+            try:
+                return self._connections[worker_id].last_seen
+            except KeyError as exc:
+                raise ValueError(f"Worker {worker_id} is not connected") from exc
+
     def _send_control(
         self,
         connection: _Connection,
@@ -375,6 +477,15 @@ class ParameterServer:
 
     def send_dataset_assignment(self, worker_id: int, assignment: DatasetAssignment) -> None:
         self._send_control(self._connection(worker_id), assignment)
+
+    def send_error(
+        self,
+        worker_id: int,
+        error: Error,
+        *,
+        operation_id: int = NO_OPERATION,
+    ) -> None:
+        self._send_control(self._connection(worker_id), error, operation_id=operation_id)
 
     def mark_model_syncing(self) -> None:
         """Apply the Runtime-owned semantic transition after manifest admission."""
@@ -432,3 +543,24 @@ class ParameterServer:
             if not initialization:
                 connection.validator.set_phase(ConnectionPhase.APPLYING)
             connection.sender.send_transfer(connection.sock, frames)
+
+    def send_stop(self, *, attempt_state: str, reason_code: str, reason: str) -> None:
+        message = Stop.from_dict(
+            {
+                "reason_code": reason_code,
+                "reason": reason,
+                "attempt_state": attempt_state,
+                "whether_reconnect_allowed": False,
+            }
+        )
+        for worker_id in self.worker_ids():
+            connection: _Connection | None = None
+            try:
+                connection = self._connection(worker_id)
+                with self._lock:
+                    connection.terminal_stop_sent = True
+                self._send_control(connection, message)
+            except Exception:
+                if connection is not None:
+                    with self._lock:
+                        connection.terminal_stop_sent = False

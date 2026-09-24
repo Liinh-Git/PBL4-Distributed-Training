@@ -1,64 +1,39 @@
 """Runtime and Worker HTTP provisioning clients verify identity and hash chains."""
 
 import io
-import json
 from concurrent.futures import ThreadPoolExecutor
 
-import numpy as np
 import pytest
 
 from pbl4.common.hashing import sha256_bytes
-from pbl4.dataset_manager.config import DatasetBuildConfig
-from pbl4.dataset_manager.preprocessing import Preprocessor
-from pbl4.dataset_manager.storage import DatasetStorage
 from pbl4.runtime.dataset_manifest_client import DatasetManifestClient
 from pbl4.worker.shard_cache import ShardCache, ShardCacheKey
 from pbl4.worker.shard_downloader import ShardDownloader
+from tests.fixtures.synthetic_dataset import create_synthetic_dataset_artifacts
 
 
 def artifacts(tmp_path):
-    config = DatasetBuildConfig(
-        1,
-        "download-build",
-        "cifar10",
-        "CIFAR-10",
-        "CNN_IMAGE_CLASSIFICATION_V1",
-        "image_classification",
-        (3, 2, 2),
-        "float32",
-        10,
-        {
-            "channel_order": "NCHW",
-            "scale": "uint8_to_unit",
-            "mean": [0.5, 0.5, 0.5],
-            "std": [0.5, 0.5, 0.5],
-        },
-        2,
-        2,
-        "seeded_permutation_round_robin",
-        42,
+    data = create_synthetic_dataset_artifacts(
+        tmp_path / "dataset",
+        dataset_build_id="download-build",
+        shard_count=2,
+        batches_per_shard=2,
+        batch_size=2,
+        input_shape=(3, 2, 2),
     )
-    raw = np.arange(8 * 12, dtype=np.uint8).reshape(8, 3, 2, 2)
-    samples = Preprocessor((3, 2, 2), 10, (0.5,) * 3, (0.5,) * 3).transform(
-        raw, np.arange(8, dtype=np.int64)
-    )
-    published = DatasetStorage(tmp_path / "dataset").materialize(config, samples)
-    root = json.loads(published.manifest_path.read_bytes())
-    reference = root["shards"][0]
-    shard_path = published.directory / reference["relative_shard_manifest_path"]
-    shard = json.loads(shard_path.read_bytes())
     service_base = "http://dm"
-    artifact_base = f"{service_base}/artifacts/v1/dataset-builds/{published.dataset_build_id}"
+    artifact_base = f"{service_base}/artifacts/v1/dataset-builds/{data.dataset_build_id}"
     responses = {
-        f"{artifact_base}/manifest.json": published.manifest_path.read_bytes(),
-        f"{artifact_base}/shards/0/manifest.json": shard_path.read_bytes(),
+        f"{artifact_base}/manifest.json": data.root_manifest_bytes,
+        f"{artifact_base}/shards/0/manifest.json": data.shard_manifest_bytes[0],
     }
+    shard = data.shard_manifest_dicts[0]
     for entry in shard["batches"]:
-        responses[f"{artifact_base}/shards/0/batches/{entry['batch_id']}"] = (
-            published.directory / entry["relative_filename"]
-        ).read_bytes()
-    key = ShardCacheKey(published.dataset_build_id, published.dataset_manifest_hash, shard_id=0)
-    return service_base, artifact_base, responses, key, root
+        responses[f"{artifact_base}/shards/0/batches/{entry['batch_id']}"] = data.batch_bytes[
+            entry["relative_filename"]
+        ]
+    key = ShardCacheKey(data.dataset_build_id, data.dataset_manifest_hash, shard_id=0)
+    return service_base, artifact_base, responses, key, data.root_manifest_dict
 
 
 class Response:

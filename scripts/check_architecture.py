@@ -176,28 +176,15 @@ def main() -> int:
             [
                 "pbl4.runtime",
                 "pbl4.worker",
+                "pbl4.dataset_manager",
                 "torch",
                 "torchvision",
             ],
-            "management_backend must not import runtime internals, worker, or torch",
+            "management_backend must not import runtime internals, worker, DM service, or torch",
         )
     )
 
-    # 6. Dataset Manager isolation
-    violations.extend(
-        check_forbidden_imports(
-            "dataset_manager",
-            [
-                "pbl4.runtime",
-                "pbl4.management_backend",
-                "torch",
-                "torchvision",
-            ],
-            "dataset_manager must not import runtime internals, backend app code, or torch",
-        )
-    )
-
-    # 7. Runtime isolation (framework-neutral coordinator/PS)
+    # 6. Runtime isolation (framework-neutral coordinator/PS)
     violations.extend(
         check_forbidden_imports(
             "runtime",
@@ -210,14 +197,15 @@ def main() -> int:
                 "asyncpg",
                 "sqlalchemy",
                 "pbl4.management_backend",
+                "pbl4.dataset_manager",
                 "torch",
                 "torchvision",
             ],
-            "runtime must not import web frameworks, DB drivers, backend, or torch models",
+            "runtime must not import web frameworks, DB drivers, backend, DM, or torch models",
         )
     )
 
-    # 8. Runtime Synchronization isolation
+    # 7. Runtime Synchronization isolation
     violations.extend(
         check_forbidden_imports(
             "runtime/synchronization",
@@ -231,18 +219,20 @@ def main() -> int:
                 "sqlalchemy",
                 "fastapi",
                 "pbl4.management_backend",
+                "pbl4.dataset_manager",
             ],
-            "synchronization must not import checkpoint, transport, DB, HTTP, or backend",
+            "synchronization must not import checkpoint, transport, DB, HTTP, backend, or DM",
         )
     )
 
-    # 9. Management Protocol isolation (wire format only)
+    # 8. Management Protocol isolation (wire format only)
     violations.extend(
         check_forbidden_imports(
             "management_protocol",
             [
                 "pbl4.runtime",
                 "pbl4.management_backend",
+                "pbl4.dataset_manager",
                 "pbl4.worker",
                 "psycopg",
                 "psycopg_pool",
@@ -251,7 +241,7 @@ def main() -> int:
                 "torch",
                 "torchvision",
             ],
-            "management_protocol is wire format only: no runtime/backend/worker/DB/torch imports",
+            "management_protocol is wire format only: no runtime/backend/worker/DM/DB imports",
         )
     )
 

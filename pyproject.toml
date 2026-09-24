@@ -38,14 +38,6 @@ management-backend = [
     "sqlalchemy>=2.0.0,<3.0.0",
 ]
 
-# Dataset Manager dependencies
-dataset-manager = [
-    "fastapi>=0.110.0",
-    "uvicorn[standard]>=0.27.0",
-    "numpy>=1.26.0",
-    "pydantic>=2.6.0",
-]
-
 [dependency-groups]
 dev = [
     "pytest>=8.0",
@@ -61,7 +53,6 @@ dev = [
 [project.scripts]
 pbl4-runtime = "pbl4.runtime.entrypoint:main"
 pbl4-worker = "pbl4.worker.entrypoint:main"
-pbl4-dataset-manager = "pbl4.dataset_manager.entrypoint:main"
 pbl4-backend = "pbl4.management_backend.entrypoint:main"
 pblctl = "pbl4.cli.pblctl:main"
 

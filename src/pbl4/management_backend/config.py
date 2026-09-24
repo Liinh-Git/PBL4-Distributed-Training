@@ -33,13 +33,18 @@ class BackendSettings(BaseSettings):
     # ─── Database ─────────────────────────────────────────────────────────────
     database_url: str | None = Field(default=None, alias="DATABASE_URL")
 
-    # ─── Runtime (MCP/1) ──────────────────────────────────────────────────────
+    # ─── Runtime (MCP/1 & DTP/1) ──────────────────────────────────────────────
     runtime_host: str = Field(default="127.0.0.1", alias="RUNTIME_HOST")
+    runtime_advertised_host: str | None = Field(default=None, alias="RUNTIME_ADVERTISED_HOST")
+    runtime_dtp_port: int = Field(default=9000, alias="RUNTIME_PORT")
     runtime_management_port: int | None = Field(default=None, alias="RUNTIME_MANAGEMENT_PORT")
 
     # ─── Dataset Manager ──────────────────────────────────────────────────────
+    dataset_manager_url: str | None = Field(default=None, alias="DATASET_MANAGER_URL")
+    # Legacy fallback configuration
     dataset_manager_host: str = Field(default="127.0.0.1", alias="DATASET_MANAGER_HOST")
     dataset_manager_port: int | None = Field(default=None, alias="DATASET_MANAGER_PORT")
+    dataset_manager_timeout_seconds: float = Field(default=30.0, gt=0)
 
     # ─── Training Cluster Defaults ────────────────────────────────────────────
     expected_workers: int = Field(default=3, alias="EXPECTED_WORKERS")
@@ -68,9 +73,21 @@ class BackendSettings(BaseSettings):
             return 8000
         return v
 
-    @field_validator("runtime_management_port", "dataset_manager_port", mode="before")
+    @field_validator("runtime_dtp_port", mode="before")
     @classmethod
-    def parse_empty_optional_port(cls, v: object) -> object:
+    def parse_runtime_dtp_port(cls, v: object) -> object:
+        if v == "" or v is None:
+            return 9000
+        return v
+
+    @field_validator(
+        "runtime_management_port",
+        "dataset_manager_port",
+        "runtime_advertised_host",
+        mode="before",
+    )
+    @classmethod
+    def parse_empty_optional_fields(cls, v: object) -> object:
         if v == "" or v is None:
             return None
         return v
@@ -82,7 +99,19 @@ class BackendSettings(BaseSettings):
         return f"{self.runtime_host}:{self.runtime_management_port}"
 
     @property
+    def dtp_advertised_host(self) -> str:
+        """Host advertised to workers for DTP/1 connections in join-spec."""
+        return self.runtime_advertised_host or self.runtime_host
+
+    @property
     def dataset_manager_base_url(self) -> str | None:
+        """Resolve external Dataset Manager URL.
+
+        Canonical authority: DATASET_MANAGER_URL.
+        Legacy fallback: http://{DATASET_MANAGER_HOST}:{DATASET_MANAGER_PORT}.
+        """
+        if self.dataset_manager_url:
+            return self.dataset_manager_url.rstrip("/")
         if self.dataset_manager_port is None:
             return None
         return f"http://{self.dataset_manager_host}:{self.dataset_manager_port}"

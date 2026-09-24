@@ -13,7 +13,9 @@ Status:
 from __future__ import annotations
 
 import argparse
-import sys
+import logging
+import signal
+from pathlib import Path
 
 
 def main() -> None:
@@ -40,11 +42,33 @@ def main() -> None:
         default=None,
         help="MCP/1 management port.",
     )
-    parser.parse_args()
+    parser.add_argument("--dataset-manager-url", required=True)
+    parser.add_argument("--checkpoint-dir", required=True)
+    parser.add_argument("--parameter-manifest", required=True)
+    parser.add_argument("--heartbeat-timeout", type=float, default=120.0)
+    parser.add_argument("--log-level", default="INFO")
+    args = parser.parse_args()
+    if args.port is None or args.management_port is None:
+        parser.error("--port and --management-port are required")
 
-    # Runtime Parameter Server execution is pending implementation
-    print("pbl4-runtime: service implementation pending", file=sys.stderr)
-    sys.exit(1)
+    from pbl4.runtime.process import RuntimeProcess, load_parameter_manifest
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    process = RuntimeProcess(
+        host=args.host,
+        dtp_port=args.port,
+        management_port=args.management_port,
+        dataset_manager_url=args.dataset_manager_url,
+        checkpoint_dir=Path(args.checkpoint_dir),
+        parameter_manifest=load_parameter_manifest(Path(args.parameter_manifest)),
+        heartbeat_timeout_seconds=args.heartbeat_timeout,
+    )
+    signal.signal(signal.SIGINT, lambda *_: process.stop())
+    signal.signal(signal.SIGTERM, lambda *_: process.stop())
+    process.run()
 
 
 if __name__ == "__main__":

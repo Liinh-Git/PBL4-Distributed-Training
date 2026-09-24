@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import socket
 import threading
+import time
 from collections.abc import Callable
 from uuid import uuid4
 
@@ -18,8 +19,10 @@ from pbl4.protocol.constants import (
 )
 from pbl4.protocol.messages import (
     DtpControlMessage,
+    Error,
     GradientEnd,
     GradientMeta,
+    Heartbeat,
     Hello,
     HelloAck,
     ModelInit,
@@ -281,6 +284,34 @@ class WorkerClient:
         )
         self._validator.set_phase(ConnectionPhase.WAITING_NEXT)
 
+    def send_error(self, error: Error, *, operation_id: int = NO_OPERATION) -> None:
+        self._send_control(error, operation_id=operation_id)
+
+    def send_heartbeat(
+        self,
+        *,
+        local_model_version: int,
+        last_completed_operation_id: int | None,
+        worker_state: str,
+        epoch: int = 0,
+        next_batch_ordinal: int = 0,
+        last_completed_step_id: int | None = None,
+    ) -> None:
+        values: dict[str, object] = {
+            "attempt_id": self.attempt_id,
+            "local_model_version": local_model_version,
+            "last_completed_operation_id": last_completed_operation_id,
+            "recovery_cursor": {
+                "epoch": epoch,
+                "next_batch_ordinal": next_batch_ordinal,
+            },
+            "monotonic_timestamp_ms": time.monotonic() * 1000.0,
+            "worker_state": worker_state,
+        }
+        if last_completed_step_id is not None:
+            values["last_completed_step_id"] = last_completed_step_id
+        self._send_control(Heartbeat.from_dict(values))
+
     def _read_loop(self) -> None:
         try:
             while not self._closing.is_set():
@@ -321,6 +352,16 @@ class WorkerClient:
                     self._validator.set_phase(ConnectionPhase.UPLOADING)
                     if self._message_handler is not None:
                         self._message_handler(message, frame.header.operation_id)
+                elif isinstance(message, Error):
+                    if self._message_handler is not None:
+                        self._message_handler(message, frame.header.operation_id)
+                    if message.is_fatal:
+                        self._closing.set()
+                        self._validator.set_phase(ConnectionPhase.CLOSED)
+                        raise TransportError(
+                            f"Fatal error from runtime (scope={message.scope}, "
+                            f"code={message.error_code}): {message.message}"
+                        )
                 elif message is not None and self._message_handler is not None:
                     self._message_handler(message, frame.header.operation_id)
         except Exception:

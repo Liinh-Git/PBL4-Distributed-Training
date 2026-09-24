@@ -46,21 +46,18 @@ REQUIRED_PATHS: list[str] = [
     "src/pbl4/runtime",
     "src/pbl4/worker",
     "src/pbl4/adapter",
-    "src/pbl4/dataset_manager",
     "src/pbl4/management_backend",
     "src/pbl4/management_protocol",
     "src/pbl4/cli",
     # Dedicated entrypoints
     "src/pbl4/runtime/entrypoint.py",
     "src/pbl4/worker/entrypoint.py",
-    "src/pbl4/dataset_manager/entrypoint.py",
     "src/pbl4/management_backend/entrypoint.py",
     "src/pbl4/cli/pblctl.py",
-    # 5 nested AGENTS.md files
+    # 4 nested AGENTS.md files
     "src/pbl4/protocol/AGENTS.md",
     "src/pbl4/runtime/AGENTS.md",
     "src/pbl4/management_backend/AGENTS.md",
-    "src/pbl4/dataset_manager/AGENTS.md",
     "web/AGENTS.md",
     # Seven renamed skills
     ".agents/skills/architecture-guard/SKILL.md",
@@ -84,6 +81,7 @@ REQUIRED_PATHS: list[str] = [
 
 PROHIBITED_PATHS: list[str] = [
     "src/pbl4/backend",
+    "src/pbl4/dataset_manager",
     ".agents/skills/pbl4-architecture-guard",
     ".agents/skills/pbl4-protocol-change",
     ".agents/skills/pbl4-contract-change",

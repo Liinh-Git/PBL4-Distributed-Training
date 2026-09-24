@@ -1,38 +1,60 @@
-import { api } from './client';
-import type { CheckpointListItem, ListResponse } from '../domain/types';
+/**
+ * Checkpoints API Service
+ *
+ * Source of Truth: API_contract.md (32.0, 33.0)
+ */
 
-export interface CheckpointDetail extends CheckpointListItem {
-  contract_hash?: string;
-  dataset_build_id?: string;
-  dataset_manifest_hash?: string;
-  parameter_manifest_hash?: string;
-  source_operation_id: string;
-  recovery_cursor?: {
-    epoch: number;
-    next_batch_ordinal: number;
-  } | null;
-  integrity?: {
-    model_sha256: string;
-    metadata_sha256?: string;
-    artifact_size_bytes?: number;
-  } | null;
+import { apiClient, ApiClient, RequestOptions } from './client';
+import {
+  ApiResponse,
+  CheckpointDetailData,
+  CheckpointListItemData,
+  CheckpointState,
+  PaginatedResponse,
+} from '../types/api';
+
+export interface ListCheckpointsParams {
+  job_id?: string;
+  attempt_id?: string;
+  state?: CheckpointState | string;
+  cursor?: string | null;
+  limit?: number;
 }
 
-export const checkpointsApi = {
-  list: (params?: {
-    attempt_id?: string;
-    job_id?: string;
-    state?: string;
-    limit?: number;
-    cursor?: string;
-  }) => {
-    const qs = new URLSearchParams();
-    if (params?.attempt_id) qs.set('attempt_id', params.attempt_id);
-    if (params?.job_id) qs.set('job_id', params.job_id);
-    if (params?.state) qs.set('state', params.state);
-    if (params?.limit) qs.set('limit', String(params.limit));
-    if (params?.cursor) qs.set('cursor', params.cursor);
-    return api.get<ListResponse<CheckpointListItem>>(`/checkpoints?${qs}`);
-  },
-  get: (checkpointId: string) => api.getItem<CheckpointDetail>(`/checkpoints/${checkpointId}`),
-};
+export class CheckpointsService {
+  constructor(private readonly client: ApiClient = apiClient) {}
+
+  /**
+   * 32.0 GET /api/v1/checkpoints — List checkpoints with cursor pagination
+   */
+  async listCheckpoints(
+    params?: ListCheckpointsParams,
+    options?: RequestOptions
+  ): Promise<PaginatedResponse<CheckpointListItemData>> {
+    return this.client.getPaginated<CheckpointListItemData>('/api/v1/checkpoints', {
+      ...options,
+      params: {
+        job_id: params?.job_id,
+        attempt_id: params?.attempt_id,
+        state: params?.state,
+        cursor: params?.cursor,
+        limit: params?.limit,
+      },
+    });
+  }
+
+  /**
+   * 33.0 GET /api/v1/checkpoints/{checkpoint_id} — Get checkpoint detail with integrity and recovery cursor
+   */
+  async getCheckpoint(
+    checkpointId: string,
+    options?: RequestOptions
+  ): Promise<ApiResponse<CheckpointDetailData>> {
+    return this.client.get<CheckpointDetailData>(
+      `/api/v1/checkpoints/${encodeURIComponent(checkpointId)}`,
+      options
+    );
+  }
+}
+
+export const checkpointsService = new CheckpointsService();

@@ -140,7 +140,25 @@ class Coordinator:
             self._checkpoint_state = None
             self._milestones = {"started_at": _now()}
             self._event(
-                "step.started", {"step_id": step, "model_version": operation.input_model_version}
+                "step.started",
+                {
+                    "step_id": step,
+                    "operation_id": operation.operation_id,
+                    "epoch": operation.epoch,
+                    "batch_ordinal": operation.batch_ordinal,
+                    "input_model_version": operation.input_model_version,
+                    "training_strategy": self._context.training_strategy,
+                    "assignments": [
+                        {
+                            "worker_id": item.worker_id,
+                            "shard_id": item.shard_id,
+                            "batch_id": item.batch_id,
+                            "batch_ordinal": item.batch_ordinal,
+                            "sample_count": item.sample_count,
+                        }
+                        for item in assignments
+                    ],
+                },
             )
             return operation
 
@@ -171,7 +189,29 @@ class Coordinator:
                 self._milestones["update_completed_at"] = _now()
                 self._policy.mark_update_published(plan, published.model_version)
                 self._step_state = "WAITING_PARAMETER_APPLIED"
-                self._event("model.updated", {"model_version": published.model_version})
+                self._event(
+                    "model.updated",
+                    {
+                        "step_id": plan.step_id,
+                        "operation_id": plan.operation_id,
+                        "input_model_version": plan.input_model_version,
+                        "output_model_version": published.model_version,
+                        "total_sample_count": plan.total_sample_count,
+                        "contributions": [
+                            {
+                                "worker_id": item.worker_id,
+                                "session_id": item.session_id,
+                                "shard_id": item.shard_id,
+                                "batch_id": item.batch_id,
+                                "batch_ordinal": item.batch_ordinal,
+                                "sample_count": item.sample_count,
+                                "tensor_id": item.tensor_id,
+                                "parameter_manifest_hash": item.parameter_manifest_hash,
+                            }
+                            for item in plan.contributions
+                        ],
+                    },
+                )
                 # Caller sends this immutable snapshot through DTP outside our lock.
                 return decision, published
         except Exception:
@@ -193,7 +233,13 @@ class Coordinator:
                 return False
             self._event(
                 "parameter.applied",
-                {"worker_id": ack.worker_id, "model_version": ack.model_version},
+                {
+                    "worker_id": ack.worker_id,
+                    "session_id": ack.session_id,
+                    "operation_id": ack.operation_id,
+                    "step_id": ack.step_id,
+                    "model_version": ack.model_version,
+                },
             )
             if self._policy.synchronization_complete:
                 self._milestones["synchronization_completed_at"] = _now()
@@ -225,7 +271,26 @@ class Coordinator:
             )
             self._step_state = "CHECKPOINTING"
             self._checkpoint_state = "WRITING"
-            self._event("checkpoint.started", {"checkpoint_id": snapshot.checkpoint_id})
+            self._event(
+                "checkpoint.started",
+                {
+                    "checkpoint_id": snapshot.checkpoint_id,
+                    "source_operation_id": snapshot.source_operation_id,
+                    "source_step_id": snapshot.source_step_id,
+                    "model_version": snapshot.model.model_version,
+                    "recovery_cursor": {
+                        "epoch": snapshot.recovery_cursor.epoch,
+                        "next_batch_ordinal": snapshot.recovery_cursor.next_batch_ordinal,
+                    },
+                    "contract_hash": snapshot.contract_hash,
+                    "dataset_build_id": snapshot.dataset_build_id,
+                    "dataset_manifest_hash": snapshot.dataset_manifest_hash,
+                    "parameter_manifest_hash": snapshot.model.parameter_manifest_hash,
+                    "checkpoint_policy": snapshot.checkpoint_policy,
+                    "checkpoint_policy_version": snapshot.checkpoint_policy_version,
+                    "created_at": snapshot.created_at,
+                },
+            )
         attempts = 0
         while self._checkpoint_policy.may_retry(attempts):
             with self._lock:
@@ -257,7 +322,6 @@ class Coordinator:
                 self._latest = complete
                 self._checkpoint_state = "COMPLETE"
                 self._milestones["checkpoint_completed_at"] = _now()
-                self._event("checkpoint.saved", {"checkpoint_id": snapshot.checkpoint_id})
                 if not self._checkpoint_policy.allows_commit(
                     synchronization_complete=self._policy.synchronization_complete,
                     checkpoint_state=self._checkpoint_state,
@@ -267,6 +331,26 @@ class Coordinator:
                 self._milestones["committed_at"] = _now()
                 self._cursor = next_cursor
                 self._store.discard(self._context.attempt_id, operation.operation_id)
+                self._event(
+                    "checkpoint.saved",
+                    {
+                        "checkpoint_id": snapshot.checkpoint_id,
+                        "source_operation_id": snapshot.source_operation_id,
+                        "source_step_id": snapshot.source_step_id,
+                        "model_version": snapshot.model.model_version,
+                        "model_path": f"{complete.directory.name}/model.bin",
+                        "metadata_path": f"{complete.directory.name}/checkpoint.json",
+                        "model_sha256": complete.model_sha256,
+                        "metadata_sha256": complete.metadata_sha256,
+                        "artifact_size_bytes": complete.model_size + complete.metadata_size,
+                        "recovery_cursor": {
+                            "epoch": next_cursor.epoch,
+                            "next_batch_ordinal": next_cursor.next_batch_ordinal,
+                        },
+                        "checkpoint_completed_at": self._milestones["checkpoint_completed_at"],
+                        "committed_at": self._milestones["committed_at"],
+                    },
+                )
                 return complete
         raise AssertionError("Checkpoint policy allowed no attempt")
 
@@ -284,6 +368,13 @@ class Coordinator:
             decision = self._policy.worker_failed(worker_id, session_id)
             if decision.code == AdmissionCode.FATAL_STRATEGY_ERROR:
                 self._fail(decision.reason)
+
+    def fail(self, reason: str) -> None:
+        """Fail the Attempt for a Runtime-owned fatal condition."""
+        with self._lock:
+            if self._state in ("COMPLETED", "FAILED", "ABORTED"):
+                return
+            self._fail(reason)
 
     def abort(self) -> None:
         with self._lock:

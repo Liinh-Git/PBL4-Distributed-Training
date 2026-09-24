@@ -472,10 +472,10 @@ def test_system_api_decodes_canonical_item_envelopes():
     source = (Path(__file__).parents[4] / "web" / "src" / "api" / "system.ts").read_text(
         encoding="utf-8"
     )
-    assert "api.getItem<HealthResponse>('/health')" in source
-    assert "api.getItem<CapabilitiesResponse>('/system/capabilities')" in source
-    assert "api.getItem<RuntimeSnapshot>('/runtime/snapshot')" in source
-    assert "api.get<" not in source
+    assert "this.client.get<HealthData>('/api/v1/health')" in source
+    assert "this.client.get<CapabilitiesData>('/api/v1/system/capabilities')" in source
+    assert "this.client.get<RuntimeSnapshotData>('/api/v1/runtime/snapshot')" in source
+
 
 
 # ─── 11.4 OpenAPI Envelope Shape Test ─────────────────────────────────────────

@@ -6,6 +6,7 @@ GET /api/v1/system/capabilities
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 from fastapi import APIRouter
@@ -18,7 +19,11 @@ from pbl4.management_backend.schemas.runtime import (
     CapabilitiesResponse,
     FeatureFlags,
     HealthResponse,
+    SupportedModel,
 )
+from pbl4.management_backend.services import model_catalog
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["System"])
 
@@ -33,7 +38,11 @@ def health() -> ItemResponse[HealthResponse]:
     db_ok = db.check_health()
     gateway = get_gateway()
     dm_client = get_dm_client()
-    dm_status = dm_client.check_health() if hasattr(dm_client, "check_health") else "unknown"
+    try:
+        dm_status = dm_client.check_health() if hasattr(dm_client, "check_health") else "unknown"
+    except Exception as exc:
+        logger.warning("Dataset Manager health probe failed with unexpected error: %s", exc)
+        dm_status = "unreachable"
 
     return ItemResponse(
         data=HealthResponse(
@@ -54,6 +63,18 @@ def health() -> ItemResponse[HealthResponse]:
 def capabilities() -> ItemResponse[CapabilitiesResponse]:
     """Return backend version, protocol support, and feature flags."""
     gateway = get_gateway()
+    models = [
+        SupportedModel(
+            model_id=str(m["model_id"]),
+            display_name=str(m["display_name"]),
+            task_type=(
+                str(m["supported_tasks"][0])
+                if m.get("supported_tasks")
+                else "image_classification"
+            ),
+        )
+        for m in model_catalog.list_models()
+    ]
     return ItemResponse(
         data=CapabilitiesResponse(
             api_version="v1",
@@ -62,6 +83,7 @@ def capabilities() -> ItemResponse[CapabilitiesResponse]:
             runtime_connected=gateway.connected,
             runtime_instance_id=gateway.runtime_instance_id,
             supported_training_strategies=["strict_bsp"],
+            supported_models=models,
             feature_flags=FeatureFlags(
                 attempt_websocket_stream=True,
                 manual_checkpoint_request=True,

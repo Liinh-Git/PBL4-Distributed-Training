@@ -145,3 +145,69 @@ def test_contract_resolver_rejections():
                 },
             )
         assert any("Unsupported training_strategy" in err for err in exc_info.value.errors)
+
+
+# ─── WorkerSessionItem Strictness Tests ──────────────────────────────────────
+
+
+def test_worker_session_item_schema_strictness():
+    """Verify that WorkerSessionItem strictly requires protocol_version and connected_at.
+
+    Neither field may be omitted or defaulted to prevent fabricating metadata
+    or masking data corruption.
+    """
+    from datetime import UTC, datetime
+
+    from pydantic import ValidationError
+
+    from pbl4.management_backend.schemas.attempt import WorkerSessionItem
+
+    now = datetime.now(UTC)
+
+    # 1. Valid instantiation succeeds
+    item = WorkerSessionItem(
+        worker_id=0,
+        session_id="101",
+        node_label="worker-node-0",
+        state="READY",
+        protocol_version=1,
+        connected_at=now,
+    )
+    assert item.worker_id == 0
+    assert item.session_id == "101"
+    assert item.protocol_version == 1
+    assert item.connected_at == now
+
+    # 2. Missing protocol_version must raise ValidationError (cannot silently default to 1)
+    with pytest.raises(ValidationError) as exc_info:
+        WorkerSessionItem(
+            worker_id=0,
+            session_id="101",
+            node_label="worker-node-0",
+            state="READY",
+            connected_at=now,
+        )
+    assert "protocol_version" in str(exc_info.value)
+
+    # 3. Missing connected_at must raise ValidationError (cannot silently default to None)
+    with pytest.raises(ValidationError) as exc_info:
+        WorkerSessionItem(
+            worker_id=0,
+            session_id="101",
+            node_label="worker-node-0",
+            state="READY",
+            protocol_version=1,
+        )
+    assert "connected_at" in str(exc_info.value)
+
+    # 4. connected_at=None must raise ValidationError
+    with pytest.raises(ValidationError) as exc_info:
+        WorkerSessionItem(
+            worker_id=0,
+            session_id="101",
+            node_label="worker-node-0",
+            state="READY",
+            protocol_version=1,
+            connected_at=None,
+        )
+    assert "connected_at" in str(exc_info.value)

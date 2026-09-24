@@ -88,7 +88,6 @@ def complete_checkpoint(
     metadata_path: str,
     model_sha256: str,
     metadata_sha256: str,
-    artifact_size_bytes: int,
     completed_at: datetime,
 ) -> dict | None:
     with conn.cursor(row_factory=dict_row) as cur:
@@ -100,7 +99,6 @@ def complete_checkpoint(
                 metadata_path = %s,
                 model_sha256 = %s,
                 metadata_sha256 = %s,
-                artifact_size_bytes = %s,
                 completed_at = %s
             WHERE checkpoint_id = %s AND state = 'WRITING'
             RETURNING *
@@ -110,7 +108,6 @@ def complete_checkpoint(
                 metadata_path,
                 model_sha256,
                 metadata_sha256,
-                artifact_size_bytes,
                 completed_at,
                 checkpoint_id,
             ),

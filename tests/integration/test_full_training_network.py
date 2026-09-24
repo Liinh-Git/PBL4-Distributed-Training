@@ -11,7 +11,7 @@ from torch.nn import functional
 from pbl4.adapter.base import TensorBundle
 from pbl4.adapter.models.small_cnn import SmallCNN
 from pbl4.adapter.pytorch_adapter import PyTorchAdapter
-from pbl4.protocol.messages import DatasetAssignment, ShardReady, StepStart
+from pbl4.protocol.messages import DatasetAssignment, ShardReady, StepStart, Stop
 from pbl4.runtime.batch_scheduler import BatchScheduler, RecoveryCursor
 from pbl4.runtime.canonical_model import CanonicalModel, ModelSnapshot
 from pbl4.runtime.checkpoint import CheckpointManager
@@ -74,6 +74,50 @@ def _wait_until(predicate, timeout: float = 5.0) -> None:
         if time.monotonic() >= deadline:
             raise AssertionError("Timed out waiting for distributed state")
         time.sleep(0.005)
+
+
+def test_terminal_stop_disconnect_is_clean(caplog) -> None:
+    manifest = _adapter().manifest
+    registry = WorkerRegistry("attempt-stop", 1)
+    server = ParameterServer(
+        "127.0.0.1",
+        0,
+        attempt_id="attempt-stop",
+        job_id="job-stop",
+        expected_workers=1,
+        manifest=manifest,
+        registry=registry,
+    )
+    server.start()
+    holder: dict[str, WorkerClient] = {}
+
+    def on_message(message, _operation_id):
+        if isinstance(message, Stop):
+            holder["client"].disconnect()
+
+    try:
+        host, port = server.bound_address or ("", 0)
+        client = WorkerClient(
+            host, port, node_label="worker-stop", manifest=manifest, message_handler=on_message
+        )
+        holder["client"] = client
+        client.connect()
+        assert server.wait_for_workers(1, 3.0)
+        server.send_stop(
+            attempt_state="COMPLETED",
+            reason_code="ATTEMPT_COMPLETED",
+            reason="Schedule complete.",
+        )
+        _wait_until(lambda: server.worker_ids() == ())
+        assert not any(
+            record.name == "pbl4.transport.tcp_server"
+            and "Connection handler failed" in record.getMessage()
+            for record in caplog.records
+        )
+    finally:
+        if "client" in holder:
+            holder["client"].disconnect()
+        server.stop()
 
 
 def test_three_worker_real_dtp_strict_bsp_numerical_oracle_and_three_steps(tmp_path) -> None:
@@ -220,6 +264,10 @@ def test_three_worker_real_dtp_strict_bsp_numerical_oracle_and_three_steps(tmp_p
 
         assert server.wait_for_workers(3, 3.0)
         assert [client.worker_id for client in clients] == [0, 1, 2]
+        session_snapshots = server.worker_snapshots()
+        assert all(item["protocol_version"] == 1 for item in session_snapshots)
+        assert all(item["connected_at"] for item in session_snapshots)
+        assert all(item["last_heartbeat_at"] for item in session_snapshots)
 
         for worker_id, client in enumerate(clients):
             server.send_dataset_assignment(

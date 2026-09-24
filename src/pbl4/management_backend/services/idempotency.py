@@ -54,6 +54,10 @@ class RequestInProgressError(Exception):
         self.code = code
 
 
+class IdempotencyRecordNotFoundError(RuntimeError):
+    """Raised when an operation targets an idempotency record that does not exist."""
+
+
 def compute_request_hash(
     operation: str,
     path: str,
@@ -270,3 +274,38 @@ def record_failure(
             """,
             (operator_identity, endpoint_semantic_scope, idempotency_key),
         )
+
+
+def bind_command_to_record(
+    conn: psycopg.Connection,
+    *,
+    operator_identity: str = "default",
+    endpoint_semantic_scope: str,
+    idempotency_key: str,
+    command_id: str,
+    resource_id: str | None = None,
+) -> None:
+    """Atomically link durable command_id and resource_id to idempotency record in TX1."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE idempotency_records
+            SET command_id = %s::uuid,
+                resource_id = COALESCE(%s, resource_id)
+            WHERE operator_identity = %s
+              AND endpoint_semantic_scope = %s
+              AND idempotency_key = %s
+            """,
+            (
+                command_id,
+                resource_id,
+                operator_identity,
+                endpoint_semantic_scope,
+                idempotency_key,
+            ),
+        )
+        if cur.rowcount == 0:
+            raise IdempotencyRecordNotFoundError(
+                f"Idempotency record not found for key '{idempotency_key}' "
+                f"(scope='{endpoint_semantic_scope}', operator='{operator_identity}')."
+            )

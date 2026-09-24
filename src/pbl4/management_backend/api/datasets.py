@@ -23,12 +23,13 @@ from __future__ import annotations
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Header, HTTPException, Query, status
+from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 
 from pbl4.management_backend import db
-from pbl4.management_backend.schemas.common import ItemResponse, ListResponse, PageInfo
+from pbl4.management_backend.schemas.common import ItemResponse, ListResponse, Meta, PageInfo
 from pbl4.management_backend.schemas.dataset import (
     BuildCommandResponse,
+    BuildReference,
     DatasetBuildCreateRequest,
     DatasetBuildDeleteRequest,
     DatasetBuildDeprecateRequest,
@@ -40,6 +41,7 @@ from pbl4.management_backend.schemas.dataset import (
     DatasetDetail,
     DatasetItem,
     ManifestSummary,
+    RebuildCommandResponse,
 )
 from pbl4.management_backend.services import dataset_service, idempotency
 
@@ -47,7 +49,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Datasets"])
 
 
-def _build_row_to_detail(row: dict) -> DatasetBuildDetail:
+def _build_row_to_detail(
+    row: dict,
+    references: list[dict] | list[BuildReference] | None = None,
+) -> DatasetBuildDetail:
     manifest_uri = row.get("manifest_uri") or ""
     hash_val = row.get("dataset_manifest_hash") or ""
     artifact_url = row.get("artifact_base_url") or ""
@@ -60,6 +65,10 @@ def _build_row_to_detail(row: dict) -> DatasetBuildDetail:
         if hash_val
         else None
     )
+    ref_list = [
+        r if isinstance(r, BuildReference) else BuildReference(**r)
+        for r in (references if references is not None else row.get("references") or [])
+    ]
     return DatasetBuildDetail(
         dataset_build_id=row["dataset_build_id"],
         dataset_id=row["dataset_id"],
@@ -72,7 +81,8 @@ def _build_row_to_detail(row: dict) -> DatasetBuildDetail:
         partition_seed=row["partition_seed"],
         sample_count=row["sample_count"],
         manifest_summary=manifest_summary,
-        references=[],
+        references=ref_list,
+        error=row.get("error") or row.get("error_message"),
         created_at=row["created_at"],
         ready_at=row.get("ready_at"),
     )
@@ -83,7 +93,7 @@ def _build_row_to_detail(row: dict) -> DatasetBuildDetail:
 
 @router.post(
     "/api/v1/datasets",
-    response_model=ItemResponse[DatasetDetail],
+    response_model=ItemResponse[DatasetItem],
     status_code=status.HTTP_201_CREATED,
     summary="Create a dataset source",
 )
@@ -118,11 +128,7 @@ def create_dataset(
             cached_body = cached_record.get("response_body_jsonb") or {}
             if isinstance(cached_body, str):
                 cached_body = json.loads(cached_body)
-            d_id = cached_body.get("dataset_id")
-            if d_id:
-                detail = dataset_service.get_dataset(conn, d_id)
-                return ItemResponse(data=DatasetDetail(**detail))
-            return ItemResponse(data=DatasetDetail(**cached_body))
+            return ItemResponse(data=DatasetItem(**cached_body))
 
         row = dataset_service.create_dataset(
             conn,
@@ -131,25 +137,23 @@ def create_dataset(
             source_type=body.source_type,
             source_reference=body.source_reference,
         )
-        detail = dataset_service.get_dataset(conn, row["dataset_id"])
-        res_detail = DatasetDetail(
-            dataset_id=detail["dataset_id"],
-            name=detail["name"],
-            task_type=detail["task_type"],
-            source_type=detail["source_type"],
-            source_reference=detail["source_reference"],
-            created_at=detail["created_at"],
-            build_counts=detail["build_counts"],
+        res_item = DatasetItem(
+            dataset_id=row["dataset_id"],
+            name=row["name"],
+            task_type=row["task_type"],
+            source_type=row["source_type"],
+            source_reference=row["source_reference"],
+            created_at=row["created_at"],
         )
         idempotency.complete_record(
             conn,
             endpoint_semantic_scope="DATASET_CREATE",
             idempotency_key=idempotency_key,
             response_status_code=201,
-            response_body=res_detail.model_dump(mode="json"),
+            response_body=res_item.model_dump(mode="json"),
             resource_id=row["dataset_id"],
         )
-        return ItemResponse(data=res_detail)
+        return ItemResponse(data=res_item)
 
 
 @router.get(
@@ -163,10 +167,19 @@ def list_datasets(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     cursor: Annotated[str | None, Query()] = None,
 ):
-    with db.get_connection() as conn:
-        rows = dataset_service.list_datasets(
-            conn, task_type=task_type, q=q, limit=limit + 1, cursor=cursor
-        )
+    try:
+        with db.get_connection() as conn:
+            rows = dataset_service.list_datasets(
+                conn, task_type=task_type, q=q, limit=limit + 1, cursor=cursor
+            )
+    except dataset_service.InvalidCursorError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "INVALID_CURSOR",
+                "message": str(exc),
+            },
+        ) from exc
     has_more = len(rows) > limit
     items = [
         DatasetItem(
@@ -182,7 +195,7 @@ def list_datasets(
     next_cursor = None
     if has_more:
         last = rows[limit - 1]
-        next_cursor = f"{last['created_at'].isoformat()}|{last['dataset_id']}"
+        next_cursor = dataset_service.encode_cursor(last["created_at"], last["dataset_id"])
     return ListResponse(data=items, page=PageInfo(next_cursor=next_cursor))
 
 
@@ -262,15 +275,24 @@ def list_builds(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     cursor: Annotated[str | None, Query()] = None,
 ):
-    with db.get_connection() as conn:
-        rows = dataset_service.list_builds(
-            conn,
-            dataset_id=dataset_id,
-            state=state,
-            profile=profile,
-            limit=limit + 1,
-            cursor=cursor,
-        )
+    try:
+        with db.get_connection() as conn:
+            rows = dataset_service.list_builds(
+                conn,
+                dataset_id=dataset_id,
+                state=state,
+                profile=profile,
+                limit=limit + 1,
+                cursor=cursor,
+            )
+    except dataset_service.InvalidCursorError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "INVALID_CURSOR",
+                "message": str(exc),
+            },
+        ) from exc
     has_more = len(rows) > limit
     items = [
         DatasetBuildListItem(
@@ -289,7 +311,7 @@ def list_builds(
     next_cursor = None
     if has_more:
         last = rows[limit - 1]
-        next_cursor = f"{last['created_at'].isoformat()}|{last['dataset_build_id']}"
+        next_cursor = dataset_service.encode_cursor(last["created_at"], last["dataset_build_id"])
     return ListResponse(data=items, page=PageInfo(next_cursor=next_cursor))
 
 
@@ -301,17 +323,21 @@ def list_builds(
 def get_build(dataset_build_id: str):
     with db.get_connection() as conn:
         row = dataset_service.get_build(conn, dataset_build_id)
-    return ItemResponse(data=_build_row_to_detail(row))
+        references = dataset_service.get_build_references(conn, dataset_build_id)
+    if row["state"] not in {"READY", "FAILED", "DEPRECATED", "DELETED"}:
+        row = dataset_service.refresh_build_from_dataset_manager(db, dataset_build_id)
+    return ItemResponse(data=_build_row_to_detail(row, references=references))
 
 
 @router.post(
     "/api/v1/dataset-builds/{dataset_build_id}/rebuild",
-    response_model=ItemResponse[BuildCommandResponse],
+    response_model=ItemResponse[RebuildCommandResponse],
     status_code=status.HTTP_202_ACCEPTED,
     summary="Rebuild a dataset build",
 )
 def rebuild_build(
     dataset_build_id: str,
+    request: Request,
     body: DatasetBuildRebuildRequest | None = None,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ):
@@ -329,21 +355,25 @@ def rebuild_build(
         dataset_build_id,
         batch_size=req.batch_size,
         partition_seed=req.partition_seed,
-        preprocessing=req.preprocessing.model_dump() if req.preprocessing else None,
+        preprocessing=(
+            req.preprocessing.model_dump(exclude_none=True) if req.preprocessing else None
+        ),
         idempotency_key=idempotency_key,
     )
+    req_id = getattr(request.state, "request_id", None) or request.headers.get("X-Request-ID")
+    meta = Meta(request_id=req_id) if req_id else Meta()
     return ItemResponse(
-        data=BuildCommandResponse(
+        data=RebuildCommandResponse(
             command_id=str(cmd_row["command_id"]),
             command_type=cmd_row.get("command_type", "REBUILD_DATASET_BUILD"),
             command_state=cmd_row["state"],
             target_type=cmd_row.get("target_type", "DATASET_BUILD"),
             target_id=str(cmd_row.get("target_id") or new_build["dataset_build_id"]),
-            dataset_build_id=new_build["dataset_build_id"],
             dataset_build_state=new_build["state"],
             source_dataset_build_id=dataset_build_id,
             new_dataset_build_id=new_build["dataset_build_id"],
-        )
+        ),
+        meta=meta,
     )
 
 
@@ -386,6 +416,7 @@ def deprecate_build(
 )
 def delete_build(
     dataset_build_id: str,
+    request: Request,
     body: DatasetBuildDeleteRequest | None = None,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ):
@@ -401,14 +432,19 @@ def delete_build(
     build_row, cmd_row = dataset_service.execute_delete_build(
         db, dataset_build_id, reason=req.reason, idempotency_key=idempotency_key
     )
+    req_id = getattr(request.state, "request_id", None) or request.headers.get("X-Request-ID")
+    meta = Meta(request_id=req_id) if req_id else Meta()
+    cmd_state = cmd_row.get("state") or cmd_row.get("command_state") or "ACCEPTED"
+    build_state = build_row.get("state") or build_row.get("dataset_build_state") or "DELETING"
     return ItemResponse(
         data=BuildCommandResponse(
             command_id=str(cmd_row["command_id"]),
             command_type=cmd_row.get("command_type", "DELETE_DATASET_BUILD"),
-            command_state=cmd_row["state"],
+            command_state=cmd_state,
             target_type=cmd_row.get("target_type", "DATASET_BUILD"),
             target_id=str(cmd_row.get("target_id") or dataset_build_id),
-            dataset_build_id=build_row["dataset_build_id"],
-            dataset_build_state=build_row["state"],
-        )
+            dataset_build_id=build_row.get("dataset_build_id") or dataset_build_id,
+            dataset_build_state=build_state,
+        ),
+        meta=meta,
     )

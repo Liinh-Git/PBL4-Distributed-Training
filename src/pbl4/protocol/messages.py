@@ -467,6 +467,11 @@ class Error(DtpControlMessage):
         "severity": frozenset({"INFO", "WARNING", "ERROR", "CRITICAL"}),
     }
 
+    @property
+    def is_fatal(self) -> bool:
+        """Evaluate whether the error requires session/connection teardown."""
+        return self.scope in {"SESSION", "ATTEMPT"} and self.severity in {"ERROR", "CRITICAL"}
+
 
 CONTROL_MESSAGE_CLASSES: dict[int, type[DtpControlMessage]] = {
     cls.MESSAGE_TYPE: cls
