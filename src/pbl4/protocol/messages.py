@@ -12,6 +12,7 @@ from types import MappingProxyType
 from typing import ClassVar
 
 from pbl4.common.errors import ProtocolError
+from pbl4.common.work_unit import WorkUnitRef
 from pbl4.protocol.codec import DTPFrame
 from pbl4.protocol.constants import (
     DTP_PROTOCOL_VERSION,
@@ -66,6 +67,8 @@ def _is_type(value: object, expected: object) -> bool:
         return type(value) is bool
     if expected == "object":
         return isinstance(value, dict)
+    if expected == "array":
+        return isinstance(value, list)
     if expected == "string_list":
         return (
             isinstance(value, list)
@@ -360,7 +363,56 @@ class StepStart(DtpControlMessage):
         "training_strategy": "string",
         "parameter_manifest_hash": "string",
     }
+    OPTIONAL = {
+        "work_units": "array",
+    }
     ENUMS = {"training_strategy": frozenset({"strict_bsp"})}
+
+    def _validate(self, data: dict[str, object]) -> None:
+        if "work_units" in data:
+            units = data["work_units"]
+            if not isinstance(units, list) or not units:
+                raise ProtocolError("STEP_START work_units must be a non-empty array")
+            total_samples = 0
+            for idx, u in enumerate(units):
+                if not isinstance(u, dict):
+                    raise ProtocolError(f"STEP_START work_units[{idx}] must be a dict")
+                for key in ("shard_id", "batch_id"):
+                    val = u.get(key)
+                    if not isinstance(val, int) or val < 0:
+                        raise ProtocolError(
+                            f"STEP_START work_units[{idx}].{key} must be a non-negative int"
+                        )
+                sc = u.get("sample_count")
+                if not isinstance(sc, int) or sc <= 0:
+                    raise ProtocolError(
+                        f"STEP_START work_units[{idx}].sample_count must be a positive int"
+                    )
+                total_samples += sc
+
+            if total_samples != data["expected_sample_count"]:
+                raise ProtocolError(
+                    f"STEP_START sum(work_units.sample_count) {total_samples} "
+                    f"does not match expected_sample_count {data['expected_sample_count']}"
+                )
+            first = units[0]
+            if first["shard_id"] != data["shard_id"] or first["batch_id"] != data["batch_id"]:
+                raise ProtocolError(
+                    "STEP_START first work unit must match compatibility shard_id/batch_id"
+                )
+
+    @property
+    def work_units(self) -> tuple[WorkUnitRef, ...]:
+        units = self.values.get("work_units")
+        if units is not None:
+            return tuple(WorkUnitRef.from_dict(u) for u in units)  # type: ignore[arg-type]
+        return (
+            WorkUnitRef(
+                shard_id=int(self.values["shard_id"]),  # type: ignore[arg-type]
+                batch_id=int(self.values["batch_id"]),  # type: ignore[arg-type]
+                sample_count=int(self.values["expected_sample_count"]),  # type: ignore[arg-type]
+            ),
+        )
 
 
 class GradientMeta(DtpControlMessage):
@@ -383,6 +435,19 @@ class GradientMeta(DtpControlMessage):
     def _validate(self, data: dict[str, object]) -> None:
         if data["tensor_encoding"] != TENSOR_ENCODING_FP32_LE_V1:
             raise ProtocolError("GRADIENT_META tensor_encoding must be fp32_le_v1")
+        if "compute_ms" in data:
+            compute_ms = data["compute_ms"]
+            if (
+                not isinstance(compute_ms, (int, float))
+                or compute_ms <= 0
+                or not math.isfinite(compute_ms)
+            ):
+                raise ProtocolError("GRADIENT_META compute_ms must be a positive finite number")
+
+    @property
+    def compute_ms(self) -> float:
+        val = self.values.get("compute_ms")
+        return float(val) if val is not None else 0.0
 
 
 class GradientEnd(DtpControlMessage):

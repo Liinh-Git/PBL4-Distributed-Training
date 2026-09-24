@@ -493,9 +493,9 @@ DONE WHEN: 100% tests pass, architecture check passes, ruff check passes with ze
 | **Phase 2** | `T2.2` | Implement global Work Unit BatchScheduler | `src/pbl4/runtime/batch_scheduler.py` | `DONE` |
 | **Phase 3** | `T3.1` | Implement worker DatasetCache | `src/pbl4/worker/dataset_cache.py` | `DONE` |
 | **Phase 3** | `T3.2` | Worker multi-shard provisioning flow | `src/pbl4/protocol/messages.py`, `src/pbl4/worker/process.py` | `DONE` |
-| **Phase 4** | `T4.1` | Expand StepStart & GradientMeta wire fields | `src/pbl4/protocol/messages.py` | `PLANNED` |
-| **Phase 4** | `T4.2` | Multi-unit execution in TrainingLoop | `src/pbl4/worker/training_loop.py` | `PLANNED` |
-| **Phase 4** | `T4.3` | Measure pure compute_ms in worker | `src/pbl4/worker/process.py`, `src/pbl4/worker/worker_client.py` | `PLANNED` |
+| **Phase 4** | `T4.1` | Expand StepStart & GradientMeta wire fields | `src/pbl4/protocol/messages.py` | `DONE` |
+| **Phase 4** | `T4.2` | Multi-unit execution in TrainingLoop | `src/pbl4/worker/training_loop.py` | `DONE` |
+| **Phase 4** | `T4.3` | Measure pure compute_ms in worker | `src/pbl4/worker/process.py`, `src/pbl4/worker/worker_client.py` | `DONE` |
 | **Phase 5** | `T5.1` | Ingest compute_ms into Contribution | `contribution.py`, `parameter_server.py` | `PLANNED` |
 | **Phase 5** | `T5.2` | StrictBSP multi-unit assignment admission | `src/pbl4/runtime/synchronization/strict_bsp.py` | `PLANNED` |
 | **Phase 5** | `T5.3` | Implement WorkloadScheduler runtime state | `src/pbl4/runtime/workload_scheduler.py` | `PLANNED` |

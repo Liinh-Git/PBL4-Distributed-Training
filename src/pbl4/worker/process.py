@@ -207,7 +207,11 @@ class WorkerProcess:
             dataset_cache.verify_all()
 
         with self._lock:
-            self._loop = TrainingLoop(self._adapter, result.shard, 0)
+            self._loop = TrainingLoop(
+                self._adapter,
+                dataset_cache if dataset_cache is not None else result.shard,
+                0,
+            )
             self._shard_key = key
             self._dataset_cache = dataset_cache
         shard_manifest = result.shard.shard_manifest
@@ -256,12 +260,13 @@ class WorkerProcess:
                 operation_id=operation_id,
                 step_id=int(message.step_id),
                 input_model_version=int(message.model_version),
-                shard_id=int(message.shard_id),
-                batch_id=int(message.batch_id),
                 batch_ordinal=int(message.batch_ordinal),
+                work_units=message.work_units,
                 expected_sample_count=int(message.expected_sample_count),
             )
+            t_start = time.perf_counter()
             computed = loop.compute(assignment)
+            compute_ms = max((time.perf_counter() - t_start) * 1000.0, 0.001)
             with self._lock:
                 self._pending = assignment
                 self._epoch = int(message.epoch)
@@ -276,6 +281,7 @@ class WorkerProcess:
                 sample_count=computed.local_gradient.sample_count,
                 tensor_id=self._client.worker_id,
                 loss=computed.local_gradient.loss,
+                compute_ms=compute_ms,
             )
         except Exception:
             self._busy.clear()
