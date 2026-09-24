@@ -104,22 +104,24 @@ class WorkloadScheduler:
         samples = self._epoch_samples.get(prev_epoch, {})
         times = self._epoch_compute_ms.get(prev_epoch, {})
 
-        # Verify all workers have valid stats
-        has_all_workers = len(samples) == len(self._worker_ids) and len(times) == len(
-            self._worker_ids
-        )
-        if has_all_workers:
-            try:
-                stats = [
-                    WorkerEpochStats(w, samples[w], times[w])
-                    for w in self._worker_ids
-                ]
-                return DbsWorkloadPolicy.plan(epoch, self._worker_ids, self._k, stats)
-            except Exception:
-                # If stats calculation fails (e.g. non-positive or non-finite throughput), fall back
-                pass
+        missing_workers = set(self._worker_ids) - set(samples.keys())
+        if missing_workers:
+            raise ValueError(
+                f"Cannot compute DBS plan for epoch {epoch}: missing sample stats "
+                f"for workers {sorted(missing_workers)}"
+            )
+        missing_times = set(self._worker_ids) - set(times.keys())
+        if missing_times:
+            raise ValueError(
+                f"Cannot compute DBS plan for epoch {epoch}: missing compute_ms stats "
+                f"for workers {sorted(missing_times)}"
+            )
 
-        return EqualWorkloadPolicy.plan(epoch, self._worker_ids, self._k)
+        stats = [
+            WorkerEpochStats(w, samples[w], times[w])
+            for w in self._worker_ids
+        ]
+        return DbsWorkloadPolicy.plan(epoch, self._worker_ids, self._k, stats)
 
     def record_committed(
         self,
@@ -200,6 +202,9 @@ class WorkloadScheduler:
         self._current_epoch = epoch
         # Resumed epoch always uses Equal plan
         self._plans[epoch] = EqualWorkloadPolicy.plan(epoch, self._worker_ids, self._k)
+
+        self._epoch_samples[epoch].clear()
+        self._epoch_compute_ms[epoch].clear()
 
         if ordinal == 0:
             # Boundary resume: full epoch ahead, enable stats collection

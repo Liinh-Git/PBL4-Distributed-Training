@@ -500,8 +500,8 @@ DONE WHEN: 100% tests pass, architecture check passes, ruff check passes with ze
 | **Phase 5** | `T5.2` | StrictBSP multi-unit assignment admission | `src/pbl4/runtime/synchronization/strict_bsp.py` | `DONE` |
 | **Phase 5** | `T5.3` | Implement WorkloadScheduler runtime state | `src/pbl4/runtime/workload_scheduler.py` | `DONE` |
 | **Phase 5** | `T5.4` | Integrate Coordinator & RuntimeProcess | `coordinator.py`, `process.py` | `DONE` |
-| **Phase 6** | `T6.1` | Checkpoint resume warm-up logic | `workload_scheduler.py`, `coordinator.py` | `PLANNED` |
-| **Phase 6** | `T6.2` | Emit workload.plan_changed event | `src/pbl4/runtime/coordinator.py` | `PLANNED` |
+| **Phase 6** | `T6.1` | Checkpoint resume warm-up logic | `workload_scheduler.py`, `coordinator.py` | `DONE` |
+| **Phase 6** | `T6.2` | Emit workload.plan_changed event | `src/pbl4/runtime/coordinator.py` | `DONE` |
 | **Phase 7** | `T7.1` | Heterogeneous speed cluster test | `tests/integration/test_dbs_heterogeneous_cluster.py` | `PLANNED` |
 | **Phase 7** | `T7.2` | Negative & failure semantics tests | `tests/integration/test_dbs_failure_semantics.py` | `PLANNED` |
 | **Phase 7** | `T7.3` | Final verification gate (tests, arch, ruff) | `scripts/check_architecture.py`, full suite | `PLANNED` |

@@ -183,3 +183,21 @@ def test_workload_scheduler_mid_epoch_resume() -> None:
     plan3 = scheduler.on_epoch_completed(2)
     assert plan3.policy == "dbs"
     assert plan3.units_per_worker == {0: 1, 1: 3}
+
+
+def test_workload_scheduler_missing_worker_stats_at_boundary_raises() -> None:
+    scheduler = WorkloadScheduler(
+        policy="dbs",
+        worker_ids=[0, 1],
+        work_units_per_step=4,
+    )
+    scheduler.plan_for_epoch(0)
+
+    # Only worker 0 recorded stats in epoch 0; worker 1 is missing
+    scheduler.record_committed([
+        _dummy_contribution(0, 100, 100.0, epoch=0),
+    ])
+
+    # Transitioning to epoch 1 must raise ValueError because DBS stats are incomplete
+    with pytest.raises(ValueError, match="missing sample stats for workers \\[1\\]"):
+        scheduler.on_epoch_completed(0)

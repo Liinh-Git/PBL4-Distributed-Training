@@ -1,5 +1,6 @@
 """Attempt/Step progression with separate synchronization and durability gates."""
 
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime
 from threading import RLock
@@ -29,6 +30,9 @@ from pbl4.runtime.workload_scheduler import WorkloadScheduler
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+logger = logging.getLogger(__name__)
 
 
 class Coordinator:
@@ -76,6 +80,8 @@ class Coordinator:
         self._checkpoint_context = checkpoint_context
         self._events = events
         self._cursor = cursor if cursor is not None else RecoveryCursor(0, 0)
+        if self._workload_scheduler is not None and cursor is not None:
+            self._workload_scheduler.reset_after_resume(self._cursor)
         self._lock = RLock()
         self._state = "CREATED"
         self._step_state: str | None = None
@@ -348,15 +354,18 @@ class Coordinator:
                 if next_cursor.epoch > operation.epoch and self._workload_scheduler is not None:
                     new_plan = self._workload_scheduler.on_epoch_completed(operation.epoch)
                     if new_plan is not None:
-                        self._event(
-                            "workload.plan_changed",
-                            {
-                                "epoch": new_plan.epoch,
-                                "policy": new_plan.policy,
-                                "units_per_worker": new_plan.units_per_worker,
-                                "target_ratios": new_plan.target_ratios,
-                            },
-                        )
+                        try:
+                            self._event(
+                                "workload.plan_changed",
+                                {
+                                    "epoch": new_plan.epoch,
+                                    "policy": new_plan.policy,
+                                    "units_per_worker": new_plan.units_per_worker,
+                                    "target_ratios": new_plan.target_ratios,
+                                },
+                            )
+                        except Exception:
+                            logger.exception("Failed to emit workload.plan_changed event")
                 self._plan = None
                 self._store.discard(self._context.attempt_id, operation.operation_id)
                 self._event(
