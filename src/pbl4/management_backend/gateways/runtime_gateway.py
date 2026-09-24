@@ -318,7 +318,8 @@ class RuntimeGateway:
                 attempt = attempt_repository.get_attempt(conn, attempt_id)
                 if attempt is None:
                     logger.warning(
-                        "Unknown attempt '%s' in STATE_SNAPSHOT; rejecting reconciliation and broadcast.",
+                        "Unknown attempt '%s' in STATE_SNAPSHOT; "
+                        "rejecting reconciliation and broadcast.",
                         attempt_id,
                     )
                     return
@@ -401,23 +402,24 @@ class RuntimeGateway:
                             connected_at=connected_at,
                             last_heartbeat_at=heartbeat,
                         )
-        except (psycopg.OperationalError, psycopg_pool.PoolTimeout, RuntimeError) as exc:
-            logger.error(
-                "Database operational error reconciling STATE_SNAPSHOT for attempt '%s': %s",
+        except (psycopg.OperationalError, psycopg_pool.PoolTimeout) as exc:
+            logger.warning(
+                "PostgreSQL temporarily unavailable during STATE_SNAPSHOT reconciliation "
+                "for attempt '%s' (persistence degraded): %s",
                 attempt_id,
                 exc,
             )
-            return
         except Exception as exc:
             logger.error(
-                "Programming or data-integrity error during STATE_SNAPSHOT reconciliation for attempt '%s': %s",
+                "Programming or data-integrity error during STATE_SNAPSHOT reconciliation "
+                "for attempt '%s': %s",
                 attempt_id,
                 exc,
                 exc_info=True,
             )
             return
 
-        # DB reconciliation succeeded — update in-memory cache and advance authoritative cursor:
+        # DB succeeded or degraded: update in-memory cache and advance authoritative cursor:
         self._attempt_snapshots[attempt_id] = reconciled
         self._cached_snapshot.update(reconciled)
         cursor = self.get_cursor(attempt_id)

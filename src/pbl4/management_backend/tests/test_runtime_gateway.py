@@ -3,6 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -307,8 +308,35 @@ def test_snapshot_creation_uses_runtime_owned_session_metadata() -> None:
     assert upsert.call_args.kwargs["connected_at"] == datetime.fromisoformat(connected_at)
 
 
+def _valid_snapshot_dict(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "runtime_instance_id": "runtime-1",
+        "active_job_id": "job-1",
+        "active_attempt_id": "attempt-1",
+        "attempt_state": "RUNNING",
+        "training_strategy": "strict_bsp",
+        "checkpoint_policy": "after_each_model_update_blocking",
+        "epoch": 0,
+        "current_operation_id": None,
+        "current_batch_ordinal": 0,
+        "model_version": 0,
+        "workers": [],
+        "strategy_state": {"type": "strict_bsp"},
+        "checkpoint_state": None,
+        "latest_checkpoint_id": None,
+        "recovery_cursor": {"epoch": 0, "next_batch_ordinal": 0},
+        "dataset_build_id": "build-1",
+        "dataset_manifest_hash": "d" * 64,
+        "last_runtime_event_seq": 10,
+        "management_event_gap_count": 0,
+        "captured_at": datetime.now(UTC).isoformat(),
+    }
+    base.update(overrides)
+    return base
+
+
 def test_state_snapshot_unknown_attempt_does_not_update_cache_or_broadcast() -> None:
-    """Verify that an unknown attempt in STATE_SNAPSHOT rejects reconciliation and never broadcasts."""
+    """Verify unknown attempt in STATE_SNAPSHOT rejects reconciliation and never broadcasts."""
     gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
     transaction = MagicMock()
 
@@ -320,22 +348,7 @@ def test_state_snapshot_unknown_attempt_does_not_update_cache_or_broadcast() -> 
         ),
         patch("pbl4.management_backend.websocket.hub.broadcast_sync") as mock_broadcast,
     ):
-        gateway.handle_state_snapshot(
-            {
-                "runtime_instance_id": "runtime-1",
-                "active_job_id": "job-1",
-                "active_attempt_id": "unknown-attempt-999",
-                "attempt_state": "RUNNING",
-                "training_strategy": "strict_bsp",
-                "checkpoint_policy": "after_each_model_update_blocking",
-                "epoch": 0,
-                "current_operation_id": None,
-                "current_batch_ordinal": 0,
-                "model_version": 0,
-                "workers": [],
-                "last_runtime_event_seq": 10,
-            }
-        )
+        gateway.handle_state_snapshot(_valid_snapshot_dict(active_attempt_id="unknown-attempt-999"))
 
     # Invariants:
     # 1. No snapshot cache entry created for unknown attempt
@@ -347,8 +360,8 @@ def test_state_snapshot_unknown_attempt_does_not_update_cache_or_broadcast() -> 
     mock_broadcast.assert_not_called()
 
 
-def test_state_snapshot_db_outage_does_not_broadcast_or_advance_cursor() -> None:
-    """Verify that DB operational failure during STATE_SNAPSHOT does not advance authoritative cursor or broadcast."""
+def test_state_snapshot_db_outage_preserves_live_telemetry_and_broadcasts() -> None:
+    """Verify DB operational failure during STATE_SNAPSHOT maintains live telemetry."""
     import psycopg
 
     gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
@@ -360,31 +373,81 @@ def test_state_snapshot_db_outage_does_not_broadcast_or_advance_cursor() -> None
         patch("pbl4.management_backend.websocket.hub.broadcast_sync") as mock_broadcast,
     ):
         gateway.handle_state_snapshot(
-            {
-                "runtime_instance_id": "runtime-1",
-                "active_job_id": "job-1",
-                "active_attempt_id": "attempt-db-fail",
-                "attempt_state": "RUNNING",
-                "training_strategy": "strict_bsp",
-                "checkpoint_policy": "after_each_model_update_blocking",
-                "epoch": 0,
-                "current_operation_id": None,
-                "current_batch_ordinal": 0,
-                "model_version": 0,
-                "workers": [],
-                "last_runtime_event_seq": 10,
-            }
+            _valid_snapshot_dict(
+                active_attempt_id="attempt-db-fail",
+                last_runtime_event_seq=10,
+            )
         )
 
-    # Invariants:
-    # 1. Authoritative snapshot seq not recorded
-    assert gateway.get_authoritative_snapshot("attempt-db-fail") is None
-    # 2. Never broadcast to websocket
+    # Invariants for degraded mode (DB down != training down):
+    # 1. Authoritative snapshot seq recorded in memory
+    snap = gateway.get_authoritative_snapshot("attempt-db-fail")
+    assert snap is not None
+    assert snap["attempt_id"] == "attempt-db-fail"
+    assert snap["authoritative_snapshot_seq"] == 10
+    assert snap["stale"] is False
+
+    # 2. Live cursor advances
+    cursor = gateway.get_cursor("attempt-db-fail")
+    assert cursor.authoritative_snapshot_seq == 10
+    assert cursor.highest_contiguous_seq == 10
+    assert cursor.max_seen_seq == 10
+    assert cursor.stale is False
+
+    # 3. Broadcast to websocket succeeded
+    mock_broadcast.assert_called_once()
+    args, _ = mock_broadcast.call_args
+    assert args[0] == "attempt-db-fail"
+    assert args[1]["kind"] == "SNAPSHOT"
+    assert args[1]["runtime_event_seq"] == 10
+
+
+def test_state_snapshot_pool_timeout_preserves_live_telemetry() -> None:
+    """Verify that connection pool timeout maintains degraded live telemetry."""
+    import psycopg_pool
+
+    gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
+    transaction = MagicMock()
+    transaction.side_effect = psycopg_pool.PoolTimeout("Pool exhausted")
+
+    with (
+        patch("pbl4.management_backend.db.transaction", transaction),
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync") as mock_broadcast,
+    ):
+        gateway.handle_state_snapshot(
+            _valid_snapshot_dict(
+                active_attempt_id="attempt-pool-timeout",
+                epoch=1,
+                current_batch_ordinal=5,
+                model_version=1,
+                last_runtime_event_seq=25,
+            )
+        )
+
+    snap = gateway.get_authoritative_snapshot("attempt-pool-timeout")
+    assert snap is not None
+    assert snap["authoritative_snapshot_seq"] == 25
+    mock_broadcast.assert_called_once()
+
+
+def test_state_snapshot_runtime_error_treated_as_programming_error() -> None:
+    """Verify that generic RuntimeError is NOT treated as DB outage and rejects snapshot."""
+    gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
+    transaction = MagicMock()
+    transaction.side_effect = RuntimeError("Some internal bug")
+
+    with (
+        patch("pbl4.management_backend.db.transaction", transaction),
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync") as mock_broadcast,
+    ):
+        gateway.handle_state_snapshot(_valid_snapshot_dict(active_attempt_id="attempt-runtime-err"))
+
+    assert gateway.get_authoritative_snapshot("attempt-runtime-err") is None
     mock_broadcast.assert_not_called()
 
 
 def test_state_snapshot_programming_error_does_not_broadcast() -> None:
-    """Verify that programming/data-integrity error during STATE_SNAPSHOT aborts before broadcast."""
+    """Verify that programming/data-integrity error during STATE_SNAPSHOT aborts."""
     gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
     transaction = MagicMock()
 
@@ -400,22 +463,7 @@ def test_state_snapshot_programming_error_does_not_broadcast() -> None:
         ),
         patch("pbl4.management_backend.websocket.hub.broadcast_sync") as mock_broadcast,
     ):
-        gateway.handle_state_snapshot(
-            {
-                "runtime_instance_id": "runtime-1",
-                "active_job_id": "job-1",
-                "active_attempt_id": "attempt-bug",
-                "attempt_state": "RUNNING",
-                "training_strategy": "strict_bsp",
-                "checkpoint_policy": "after_each_model_update_blocking",
-                "epoch": 0,
-                "current_operation_id": None,
-                "current_batch_ordinal": 0,
-                "model_version": 0,
-                "workers": [],
-                "last_runtime_event_seq": 10,
-            }
-        )
+        gateway.handle_state_snapshot(_valid_snapshot_dict(active_attempt_id="attempt-bug"))
 
     # Invariants:
     assert gateway.get_authoritative_snapshot("attempt-bug") is None

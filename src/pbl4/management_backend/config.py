@@ -73,9 +73,21 @@ class BackendSettings(BaseSettings):
             return 8000
         return v
 
-    @field_validator("runtime_management_port", "dataset_manager_port", mode="before")
+    @field_validator("runtime_dtp_port", mode="before")
     @classmethod
-    def parse_empty_optional_port(cls, v: object) -> object:
+    def parse_runtime_dtp_port(cls, v: object) -> object:
+        if v == "" or v is None:
+            return 9000
+        return v
+
+    @field_validator(
+        "runtime_management_port",
+        "dataset_manager_port",
+        "runtime_advertised_host",
+        mode="before",
+    )
+    @classmethod
+    def parse_empty_optional_fields(cls, v: object) -> object:
         if v == "" or v is None:
             return None
         return v
