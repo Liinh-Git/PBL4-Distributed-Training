@@ -227,6 +227,16 @@ class DatasetAssignment(DtpControlMessage):
         "expected_shard_count": "positive_int",
         "profile": "string",
     }
+    OPTIONAL = {
+        "cache_scope": "string",
+    }
+    ENUMS = {
+        "cache_scope": frozenset({"assigned_shard", "all_shards"}),
+    }
+
+    @property
+    def cache_scope(self) -> str:
+        return str(self.values.get("cache_scope", "assigned_shard"))
 
 
 class ShardReady(DtpControlMessage):

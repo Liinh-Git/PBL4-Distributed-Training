@@ -4,6 +4,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from pbl4.common.work_unit import WorkUnitRef
+
 
 @dataclass(frozen=True, slots=True)
 class Member:
@@ -15,22 +17,6 @@ class Member:
             raise ValueError("Invalid Worker rank")
         if type(self.session_id) is not int or not 0 < self.session_id < 2**63:
             raise ValueError("Invalid active session")
-
-
-@dataclass(frozen=True, slots=True)
-class WorkUnitRef:
-    """Immutable identity and metadata of a physical batch Work Unit."""
-
-    shard_id: int
-    batch_id: int
-    sample_count: int
-
-    def __post_init__(self) -> None:
-        for val in (self.shard_id, self.batch_id):
-            if type(val) is not int or val < 0:
-                raise ValueError("shard_id and batch_id must be non-negative integers")
-        if type(self.sample_count) is not int or self.sample_count <= 0:
-            raise ValueError("sample_count must be a positive integer")
 
 
 @dataclass(frozen=True, slots=True, init=False)

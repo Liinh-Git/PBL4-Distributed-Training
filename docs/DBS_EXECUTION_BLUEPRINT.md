@@ -491,8 +491,8 @@ DONE WHEN: 100% tests pass, architecture check passes, ruff check passes with ze
 | **Phase 1** | `T1.2` | Expand job contract schemas & resolver | `schemas/job.py`, `services/contract_resolver.py` | `DONE` |
 | **Phase 2** | `T2.1` | Implement WorkUnitRef & BatchAssignment | `src/pbl4/runtime/synchronization/context.py` | `DONE` |
 | **Phase 2** | `T2.2` | Implement global Work Unit BatchScheduler | `src/pbl4/runtime/batch_scheduler.py` | `DONE` |
-| **Phase 3** | `T3.1` | Implement worker DatasetCache | `src/pbl4/worker/dataset_cache.py` | `PLANNED` |
-| **Phase 3** | `T3.2` | Worker multi-shard provisioning flow | `src/pbl4/protocol/messages.py`, `src/pbl4/worker/process.py` | `PLANNED` |
+| **Phase 3** | `T3.1` | Implement worker DatasetCache | `src/pbl4/worker/dataset_cache.py` | `DONE` |
+| **Phase 3** | `T3.2` | Worker multi-shard provisioning flow | `src/pbl4/protocol/messages.py`, `src/pbl4/worker/process.py` | `DONE` |
 | **Phase 4** | `T4.1` | Expand StepStart & GradientMeta wire fields | `src/pbl4/protocol/messages.py` | `PLANNED` |
 | **Phase 4** | `T4.2` | Multi-unit execution in TrainingLoop | `src/pbl4/worker/training_loop.py` | `PLANNED` |
 | **Phase 4** | `T4.3` | Measure pure compute_ms in worker | `src/pbl4/worker/process.py`, `src/pbl4/worker/worker_client.py` | `PLANNED` |
