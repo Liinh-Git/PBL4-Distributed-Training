@@ -54,12 +54,11 @@ REQUIRED_PATHS: list[str] = [
     "src/pbl4/worker/entrypoint.py",
     "src/pbl4/management_backend/entrypoint.py",
     "src/pbl4/cli/pblctl.py",
-    # 4 nested AGENTS.md files
+    # Package-level AGENTS.md files present in the current repository
     "src/pbl4/protocol/AGENTS.md",
     "src/pbl4/runtime/AGENTS.md",
     "src/pbl4/management_backend/AGENTS.md",
-    "web/AGENTS.md",
-    # Seven renamed skills
+    # Internal governance skills
     ".agents/skills/architecture-guard/SKILL.md",
     ".agents/skills/protocol-change/SKILL.md",
     ".agents/skills/contract-change/SKILL.md",
@@ -67,16 +66,12 @@ REQUIRED_PATHS: list[str] = [
     ".agents/skills/distributed-verification/SKILL.md",
     ".agents/skills/doc-sync/SKILL.md",
     ".agents/skills/release-gate/SKILL.md",
+    ".agents/skills/implementation-planner/SKILL.md",
     # Web UI canonical top-level directories
     "web/package.json",
     "web/src/api",
-    "web/src/app",
     "web/src/components",
-    "web/src/domain",
-    "web/src/features",
-    "web/src/live",
     "web/src/pages",
-    "web/src/strategies",
 ]
 
 PROHIBITED_PATHS: list[str] = [

@@ -1,8 +1,8 @@
 ---
 name: protocol-change
 description: >
-  Primary workflow for modifying DTP/1, MCP/1, binary wire framing,
-  headers, message payloads, and tensor transfer representations.
+  Primary workflow for modifying DTP/1, MCP/1, Agent control wire messages,
+  binary framing, headers, message payloads, and tensor transfer representations.
 ---
 
 # Protocol Change
@@ -12,6 +12,7 @@ description: >
 Use this skill as the **PRIMARY WORKFLOW** when modifying:
 - DTP/1 wire framing, header formats, flags, or binary message schemas
 - MCP/1 command and telemetry message formats
+- Backend ↔ Node Agent WSS/JSON control messages in `agent_protocol`
 - Tensor wire streaming, chunking, or serialization codecs
 - Constants in `src/pbl4/protocol/constants.py` or `src/pbl4/management_protocol/constants.py`
 - Wire correlation semantics (`operation_id`, `message_id`, `correlation_id`, `command_id`, `runtime_event_seq`)
@@ -50,12 +51,30 @@ Before writing code or changing constants, determine the protocol kind and resol
     - `runtime_event_seq`: Monotonic runtime telemetry sequence counter
   - **Ownership Separation**: MCP wire format owner (`[MCP1]`) ≠ Backend business logic owner (`[BACKEND]`).
 
+### C. Agent Control Wire Changes (Backend ↔ Node Agent)
+- **Primary Canonical Owner**: `[NODE_AGENT]` (`NODE_AGENT_DESIGN.md`, whole document)
+- **Transport**: Outbound Agent-initiated WSS with JSON messages; do not call this MCP/1 unless a future approved design explicitly does so.
+- **Message awareness**: `AGENT_HELLO`, `HELLO_ACK`, `HEARTBEAT`, `RESOURCE_SNAPSHOT`, `COMMAND`, `COMMAND_ACK`, and `WORKER_STATUS`.
+- **Correlation and idempotency**:
+  - `message_id` identifies a message instance;
+  - `command_id` is correlation/tracing for a command;
+  - `allocation_id` is the Worker lifecycle idempotency key in V1.
+- **Security**: redact `node_secret` and `worker_join_token`; never log raw command payloads containing credentials; never place tensor/gradient/parameter content on this wire.
+- **Boundary**: `agent_protocol` is shared wire schema only and cannot import either process implementation.
+
+### D. DBS and managed-admission DTP/1 awareness
+- DTP remains version 1 with the current fixed framing; do not invent DTP/2 for DBS or Node admission.
+- Approved Work Unit mode may extend `STEP_START` with `work_units[]` and may extend `DATASET_ASSIGNMENT` with optional `cache_scope`; absent `cache_scope` retains legacy assigned-shard meaning and Work Unit mode uses `all_shards`.
+- Reuse existing `GRADIENT_META.compute_ms`; do not add an assignment hash or echo the full assignment merely for convenience.
+- Managed `HELLO` fields are an all-or-none control-payload extension. Runtime must verify admission and duplicate `allocation_id` before `WorkerRegistry.register()`.
+- Admission tokens never enter the DTP tensor header, resolved training contract, or tensor metadata.
+
 ---
 
 ## 3. Drive Unavailable Fail-Safe
 
 > [!WARNING]
-> If a protocol or wire change requires resolving wire layout, field types, or error codes, and the primary canonical source (`[DTP1]` or `[MCP1]`) is inaccessible (HTTP 401, network failure, etc.):
+> If a protocol or wire change requires resolving wire layout, field types, or error codes, and its primary canonical source (`[DTP1]`, `[MCP1]`, or `[NODE_AGENT]`) is inaccessible (HTTP 401, network failure, etc.):
 > - **HALT** immediately.
 > - **DO NOT** guess field layouts or pad byte sizes from local code or tab `Nháp`.
 > - **Report**:
@@ -77,6 +96,8 @@ When modifying wire-level definitions, every PR/change must address:
 - [ ] **Truncated Frame Handling**: Tests verify that partial header or payload reads do not hang or desync framing (`recv_exact` contract).
 - [ ] **Exact-Byte Golden Vectors**: Encode and decode tests using verified binary golden byte sequences directly from canonical specifications.
 - [ ] **Sender & Receiver Impact**: Synchronize both sender and receiver implementations across process boundaries.
+- [ ] **Secret Redaction**: Wire DTO repr/logging and error paths never expose Node credentials or Worker join tokens.
+- [ ] **Training Data-Plane Isolation**: Agent control and MCP messages never carry raw gradient/parameter/tensor payloads.
 
 ---
 
@@ -85,7 +106,7 @@ When modifying wire-level definitions, every PR/change must address:
 Following `.agents/SKILL_ROUTING.md`:
 1. `protocol-change` is the **PRIMARY WORKFLOW**.
 2. Reuses the `resolved canonical source set` across supporting skills.
-3. Passes to `architecture-guard` to verify that `protocol` and `transport` have zero invalid imports.
+3. Passes to `architecture-guard` to verify that `protocol`, `management_protocol`, `agent_protocol`, and `transport` have zero invalid imports.
 4. Passes to `distributed-verification` if gradient transfer or parameter synchronization is affected.
 5. Passes to `doc-sync` for repository projection synchronization.
 6. Passes to `release-gate` for protocol-specific verification.

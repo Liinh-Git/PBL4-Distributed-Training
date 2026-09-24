@@ -16,11 +16,20 @@ def python_files(relative: str) -> list[Path]:
 def imported_modules(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     modules: set[str] = set()
+    package_parts = list(path.parent.relative_to(ROOT / "src").parts)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             modules.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            modules.add(node.module)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                keep = len(package_parts) - (node.level - 1)
+                resolved = package_parts[: max(keep, 0)]
+                if node.module:
+                    resolved.extend(node.module.split("."))
+                if resolved:
+                    modules.add(".".join(resolved))
+            elif node.module:
+                modules.add(node.module)
     return modules
 
 
@@ -30,6 +39,8 @@ class ProtocolArchitectureTest(unittest.TestCase):
             "pbl4.runtime",
             "pbl4.worker",
             "pbl4.management_backend",
+            "pbl4.node_agent",
+            "pbl4.agent_protocol",
             "pbl4.dataset_manager",
             "torch",
             "psycopg",
@@ -45,6 +56,8 @@ class ProtocolArchitectureTest(unittest.TestCase):
             "pbl4.runtime",
             "pbl4.worker",
             "pbl4.management_backend",
+            "pbl4.node_agent",
+            "pbl4.agent_protocol",
             "pbl4.dataset_manager",
             "torch",
             "psycopg",
@@ -56,10 +69,51 @@ class ProtocolArchitectureTest(unittest.TestCase):
                 self.assertFalse(module.startswith(forbidden), f"{path}: {module}")
 
     def test_transport_has_no_protocol_or_training_imports(self) -> None:
-        forbidden = ("pbl4.protocol", "pbl4.runtime", "pbl4.worker")
+        forbidden = (
+            "pbl4.protocol",
+            "pbl4.runtime",
+            "pbl4.worker",
+            "pbl4.node_agent",
+            "pbl4.agent_protocol",
+        )
         for path in python_files("src/pbl4/transport"):
             for module in imported_modules(path):
                 self.assertFalse(module.startswith(forbidden), f"{path}: {module}")
+
+    def test_future_agent_packages_respect_control_plane_boundaries(self) -> None:
+        agent_protocol_forbidden = (
+            "pbl4.node_agent",
+            "pbl4.management_backend",
+            "pbl4.runtime",
+            "pbl4.worker",
+            "pbl4.protocol",
+            "pbl4.transport",
+            "torch",
+            "fastapi",
+            "psycopg",
+            "asyncpg",
+            "sqlalchemy",
+        )
+        for path in python_files("src/pbl4/agent_protocol"):
+            for module in imported_modules(path):
+                self.assertFalse(module.startswith(agent_protocol_forbidden), f"{path}: {module}")
+
+        node_agent_forbidden = (
+            "pbl4.runtime",
+            "pbl4.worker",
+            "pbl4.management_backend",
+            "pbl4.protocol",
+            "pbl4.transport",
+            "pbl4.management_protocol",
+            "torch",
+            "fastapi",
+            "psycopg",
+            "asyncpg",
+            "sqlalchemy",
+        )
+        for path in python_files("src/pbl4/node_agent"):
+            for module in imported_modules(path):
+                self.assertFalse(module.startswith(node_agent_forbidden), f"{path}: {module}")
 
     def test_generic_code_has_no_worker_count_three_or_training_semantics(self) -> None:
         generic = python_files("src/pbl4/protocol") + python_files("src/pbl4/transport")

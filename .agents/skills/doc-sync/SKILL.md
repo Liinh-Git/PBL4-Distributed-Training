@@ -15,6 +15,7 @@ description: >
    - Tab `Nháp` = **Non-normative working material**. Tab `Nháp` is **IGNORED** and must never be synced into local projections as established architecture.
 3. **Projections Never Override Canonical Architecture**: Repository documents (`docs/IMPLEMENTATION_CONTRACT.md`, `README.md`, `AGENTS.md`, docstrings, and existing code) are projections. If a local projection diverges from the canonical Drive owner, **the canonical document wins** and the projection must be updated.
 4. **No Bulk Rewrites**: Make surgical, localized updates to affected projection sections only.
+5. **Design vs. Implementation Guidance**: `[NODE_AGENT]` and `[DBS_WORKLOAD]` Design documents own semantics for their scopes. Their registered Implementation Plans are approved implementation guidance only, and comparison documents are supporting history only. Never sync plan-only mechanics or historical rationale into a canonical architecture projection as if it were a higher semantic authority.
 
 ---
 
@@ -39,7 +40,9 @@ Step 7: Verify Zero Semantic Invention Outside Owner Scope
 ```
 
 ### Step 1: Classify Semantic Contract
-Identify what domain is changing (wire protocol, domain lifecycle, DB schema, REST endpoint, checkpoint format).
+Identify what domain is changing (wire protocol, domain lifecycle, DB schema, REST endpoint,
+checkpoint format, Node/WAN orchestration, or DBS/Work Unit workload policy). Use
+`[NODE_AGENT]` and `[DBS_WORKLOAD]` where those scopes apply.
 
 ### Step 2: Resolve Stable Source Key
 Look up the primary owner key (e.g., `[DTP1]`, `[BACKEND_API]`, `[POSTGRESQL]`) in [`.agents/SOURCE_REGISTRY.md`](../../SOURCE_REGISTRY.md).

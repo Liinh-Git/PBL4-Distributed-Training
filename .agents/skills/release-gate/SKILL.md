@@ -21,6 +21,8 @@ Use this skill as **PHASE 5 OF THE STANDARD PIPELINE** before:
 Consult the canonical technical documents registered in [`.agents/SOURCE_REGISTRY.md`](../../SOURCE_REGISTRY.md):
 - `[TESTING]`: Canonical test taxonomy (unit, integration, distributed, failure, architecture, benchmark)
 - `[CODE_STRUCTURE]`: Package layouts and boundary constraints
+- `[NODE_AGENT]`: Node control-plane, WorkerAllocation, and admission gates when affected
+- `[DBS_WORKLOAD]`: Work Unit and adaptive workload gates when affected
 
 ---
 
@@ -92,7 +94,7 @@ When persistence, durability, or recovery paths are altered:
 - [ ] **Uninterrupted Reference Alignment**: Resumed distributed training continues and produces $\theta$ matching uninterrupted execution.
 - [ ] **Failure Injection**: Simulated write failure leaves previous durable checkpoint valid and intact.
 
-### Gate 5: Backend & Database Changes (`backend`, `migrations/`)
+### Gate 5: Backend & Database Changes (`management_backend`, `migrations/`)
 When DB schemas, repositories, or REST/WebSocket APIs are altered:
 - [ ] **Migration Sanity**: Use the repository's canonical numbered migration mechanism/tool/script. Test migration from the previous supported schema; additive/backfill/constraint/destructive behavior; history preservation and compatibility; backup and destructive-change tests; fail-fast on unsupported schema versions. Test downgrade only when the canonical mechanism/project policy supports it.
 - [ ] **Repository Isolation**: Repositories operate via transactions using `psycopg`.
@@ -122,6 +124,36 @@ npm run typecheck
 npm run build
 cd ..
 ```
+
+### Gate 8: Node Agent / Managed Admission Changes
+
+- [ ] One-time enrollment, Node identity persistence, revoke behavior, and credential/token redaction are covered.
+- [ ] Agent initiates outbound WSS; heartbeat/resource snapshot and timeout-driven `ONLINE → OFFLINE` behavior are verified.
+- [ ] WSS or Management Backend disconnect/restart does not kill an already-running Worker or sever its DTP connection.
+- [ ] `START_WORKER` and `STOP_WORKER` are idempotent by `allocation_id`; duplicate START never spawns a second process and terminal Allocation is not resurrected.
+- [ ] Worker admission rejects tampered/expired/wrong-attempt/wrong-allocation/wrong-node/duplicate credentials before registration.
+- [ ] Existing DTP/StrictBSP/training tests remain green; Node Agent never proxies DTP or tensors.
+
+### Gate 9: DBS / Work Unit Changes
+
+- [ ] DBS remains a pure workload policy under `training_strategy = strict_bsp`; no `dbs_bsp` or new synchronization state exists.
+- [ ] Integer projection is deterministic, preserves `sum(k_i) = K` and `k_i >= 1`, with approved Equal/DBS K constraints.
+- [ ] Equal and DBS consume the same global Work Unit set for equal dataset/seed/epoch/step inputs.
+- [ ] A Worker can process multiple Work Units but emits exactly one locally sample-weighted contribution; Runtime global weighting is correct.
+- [ ] Full N/N admission/barrier/parameter ACK semantics remain unchanged; no partial update or mid-step redistribution occurs.
+- [ ] Resume warm-up/re-measurement behavior is covered and checkpoint schema remains V1.
+- [ ] Controlled heterogeneous E2E evidence shows faster Worker(s) receive more units while correctness is preserved. A fixed performance-gain percentage is not a pass/fail requirement.
+
+### Gate 10: Execution Blueprint Accounting (when `implementation-planner` was used)
+
+- [ ] Every phase is accounted for and every task is `DONE`, or `SKIPPED`/`BLOCKED` with a concrete reason.
+- [ ] Every planned `ADD`, `MODIFY`, and `KEEP UNCHANGED` file/symbol is accounted for.
+- [ ] Every phase exit criterion and planned test is checked or explicitly unavailable/skipped with reason.
+- [ ] Drift discovered during implementation is reconciled into the blueprint before completion.
+- [ ] Every Derived Implementation Decision remains compatible with Frozen Decisions and the resolved canonical source set.
+
+Passing tests alone is insufficient when an approved blueprint still contains unaccounted
+phases, tasks, file impacts, or exit criteria.
 
 ---
 

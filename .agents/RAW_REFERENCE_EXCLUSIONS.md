@@ -4,6 +4,13 @@ Upstream snapshots preserve bytes and may link to unimported commands, build ass
 
 | Snapshot file | Disabled target |
 |---|---|
+| vendor/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/UPSTREAM_SKILL.md | references/streaming.md |
+| vendor/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/UPSTREAM_SKILL.md | references/streaming.md |
+| vendor/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/UPSTREAM_SKILL.md | references/other-tools.md |
+| vendor/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/UPSTREAM_SKILL.md | references/other-tools.md |
+| vendor/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/UPSTREAM_SKILL.md | references/streaming.md |
+| vendor/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/UPSTREAM_SKILL.md | references/other-tools.md |
+| vendor/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/UPSTREAM_SKILL.md | references/other-tools.md |
 | vendor/pbakaus/impeccable/4db7f6ba4b6ef661bc8a721261b691b40648c08a/UPSTREAM_SKILL.md | reference/new-work.md |
 | vendor/pbakaus/impeccable/4db7f6ba4b6ef661bc8a721261b691b40648c08a/UPSTREAM_SKILL.md | reference/new-work.md |
 | vendor/pbakaus/impeccable/4db7f6ba4b6ef661bc8a721261b691b40648c08a/UPSTREAM_SKILL.md | reference/craft.md |
@@ -37,10 +44,3 @@ Upstream snapshots preserve bytes and may link to unimported commands, build ass
 | vendor/pbakaus/impeccable/4db7f6ba4b6ef661bc8a721261b691b40648c08a/reference/layout.md | android.md |
 | vendor/pbakaus/impeccable/4db7f6ba4b6ef661bc8a721261b691b40648c08a/reference/layout.md | new-work.md |
 | vendor/pbakaus/impeccable/4db7f6ba4b6ef661bc8a721261b691b40648c08a/reference/layout.md | live.md |
-| vendor/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/UPSTREAM_SKILL.md | references/streaming.md |
-| vendor/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/UPSTREAM_SKILL.md | references/streaming.md |
-| vendor/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/UPSTREAM_SKILL.md | references/other-tools.md |
-| vendor/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/UPSTREAM_SKILL.md | references/other-tools.md |
-| vendor/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/UPSTREAM_SKILL.md | references/streaming.md |
-| vendor/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/UPSTREAM_SKILL.md | references/other-tools.md |
-| vendor/fastapi/fastapi/50113da16fec53b66b80d75e80a89296de4fa5a5/UPSTREAM_SKILL.md | references/other-tools.md |

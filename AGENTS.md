@@ -29,7 +29,7 @@ If a lower layer contradicts a higher layer, **the higher layer wins**.
 When implementation conflicts with approved design documents, the canonical document is authoritative. Do not guess — open an issue in `docs/OPEN_ISSUES.md` only if genuinely unresolved.
 
 ### 2. No cross-process object calls
-Processes (`pbl4-runtime`, `pbl4-worker`, `pbl4-dataset-manager`, `pbl4-backend`, `pblctl`, WebUI) communicate ONLY through defined network protocols (DTP/1, MCP/1, HTTP, WebSocket). No shared memory, no direct function calls across process boundaries.
+Processes (`pbl4-runtime`, `pbl4-worker`, `pbl4-dataset-manager`, `pbl4-backend`, `pbl4-agent`, `pblctl`, WebUI) communicate ONLY through defined network protocols (DTP/1, MCP/1, HTTP, WebSocket/WSS). No shared memory, no direct function calls across process boundaries.
 
 ### 3. Gradient/parameter traffic uses DTP/1 only
 Raw gradient tensors and canonical parameter tensors travel exclusively over DTP/1 persistent TCP connections between Worker ↔ Runtime. They MUST NOT traverse Management Backend, PostgreSQL, REST, WebSocket, or Dataset Manager.
@@ -73,6 +73,14 @@ Feature PRs must be scoped to the feature. Refactoring unrelated subsystems must
 ### 15. Feature tasks must not modify governance files
 Feature implementation tasks must not modify `AGENTS.md`, nested `AGENTS.md` files, or `.agents/skills/` content. Governance changes require explicit approval.
 
+### 16. Node Agent is control plane, never training data plane
+`pbl4-agent` connects outbound to the Management Backend over WSS, reports Node/resource state, and starts or stops Worker processes. Workers still connect directly to Runtime over DTP/1. Node Agent and Management Backend must never proxy gradients, parameters, or DTP traffic. Loss of Agent/Backend control connectivity must not automatically terminate an already-running Worker.
+
+Runtime must verify managed Worker admission before `WorkerRegistry.register()`. Runtime remains the owner of `worker_id`, `session_id`, Worker membership, StrictBSP, and training correctness. `allocation_id` is the Worker lifecycle idempotency key; admission credentials are execution data and must not enter the frozen training contract.
+
+### 17. DBS is workload scheduling under StrictBSP
+`training_strategy` remains `strict_bsp`. Adaptive DBS is a Runtime workload policy (`equal | dbs`), not a synchronization strategy. A Worker may receive multiple canonical Work Units in one step but sends exactly one logical contribution with `sample_count` equal to the total samples processed. StrictBSP remains N/N, aggregation remains sample-weighted, and workload scheduling does not own checkpoint semantics. Do not introduce `dbs_bsp`, DTP/2, DBS lifecycle states, or Checkpoint V2 for runtime-only WorkloadPlan/statistics.
+
 ---
 
 ## Process Boundaries
@@ -82,6 +90,7 @@ pbl4-runtime         — Parameter Server, training coordinator
 pbl4-worker          — Training worker (forward/backward/gradient export)
 pbl4-dataset-manager — Dataset ingestion/partitioning/serving
 pbl4-backend         — Management Backend (REST API, PostgreSQL, MCP/1 gateway)
+pbl4-agent           — Node control-plane agent (outbound WSS, Worker process lifecycle)
 pblctl               — CLI tool (talks to Management Backend)
 WebUI                — React frontend (talks to Management Backend only)
 ```
@@ -91,7 +100,9 @@ WebUI                — React frontend (talks to Management Backend only)
 ```
 runtime             → protocol, transport, management_protocol, common
 worker              → protocol, transport, adapter, common
-management_backend  → management_protocol, common
+management_backend  → management_protocol, agent_protocol, common
+node_agent          → agent_protocol, common
+agent_protocol      → common
 dataset_manager     → common
 all packages        → common
 ```
@@ -104,5 +115,9 @@ Explicitly Forbidden Directions:
 - `dataset_manager` → runtime training implementation
 - `runtime.synchronization` → checkpoint, transport, db, http
 - `runtime` → web frameworks (FastAPI), database drivers
+- `node_agent` → runtime implementation, worker internals, management_backend implementation, database libraries, torch
+- `agent_protocol` → node_agent, management_backend, runtime, worker, database libraries, torch
+
+The architectural component is called **Management Backend**. Its current canonical repository package path is `src/pbl4/management_backend/`; do not rename it or create a parallel `src/pbl4/backend/` package without a separately approved migration.
 
 Enforced statically by `scripts/check_architecture.py`.

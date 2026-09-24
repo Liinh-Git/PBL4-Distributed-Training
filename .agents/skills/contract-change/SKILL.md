@@ -1,8 +1,8 @@
 ---
 name: contract-change
 description: >
-  Primary workflow for modifying domain state, resolved contracts, DB schemas,
-  REST/WebSocket APIs, dataset/parameter manifests, and checkpoint/resume contracts.
+  Primary workflow for modifying domain state, resolved/workload contracts, Node and
+  WorkerAllocation contracts, DB schemas, REST/WebSocket APIs, manifests, and recovery.
 ---
 
 # Contract Change
@@ -17,8 +17,10 @@ Use this skill as the **PRIMARY WORKFLOW** when modifying:
 - Dataset manifest schemas or partition descriptors
 - Parameter manifest schemas or weight distribution descriptors
 - Checkpoint storage schemas, metadata structures, or recovery/resume contracts
+- Node identity/lifecycle, enrollment, WorkerAllocation, managed-admission projections, resource snapshots, or Node control APIs
+- Workload contract fields such as `workload_policy`, `work_units_per_step`, and resolved Work Unit projections
 
-*(Note: For DTP/1 or MCP/1 wire framing and binary message formats, delegate PRIMARY to `protocol-change`)*.
+*(Note: For DTP/1, MCP/1, or Backend ↔ Node Agent control-wire schemas and message formats, delegate PRIMARY to `protocol-change`)*.
 
 ---
 
@@ -41,6 +43,8 @@ Map the proposed change to its specific canonical owner from [`.agents/SOURCE_RE
 | **10a. Checkpoint artifact schema** | `[DATA_MODEL]` (`tab: Chính`) | `[CHECKPOINT]`, `[RECOVERY]` |
 | **10b. Checkpoint cadence / durability mechanics** | `[CHECKPOINT]` (`tab: Chính`) | `[DATA_MODEL]`, `[RECOVERY]` |
 | **10c. Resume flow / recovery compatibility** | `[RECOVERY]` (`tab: Chính`) | `[CHECKPOINT]`, `[DATA_MODEL]` |
+| **11. Node / WorkerAllocation / enrollment contract** | `[NODE_AGENT]` (whole document) | `[DOMAIN_MODEL]`, `[DATA_MODEL]`, `[BACKEND_API]`, `[POSTGRESQL]` |
+| **12. DBS / Work Unit workload contract** | `[DBS_WORKLOAD]` (whole document) | `[DOMAIN_MODEL]`, `[TRAINING_RUNTIME]`, `[SYNC_STRICT_BSP]`, `[DTP1]` |
 
 ---
 
@@ -60,12 +64,35 @@ Map the proposed change to its specific canonical owner from [`.agents/SOURCE_RE
 ## 4. Multi-Boundary Projection Synchronization
 
 When a contract changes, update all affected consumers across process boundaries:
-1. **PostgreSQL & Migrations**: Update the repository's canonical numbered migration mechanism/tool/script (preflight its actual location) and repository projection classes in `src/pbl4/backend/repositories/`.
-2. **API Schemas**: Update FastAPI Pydantic models in `src/pbl4/backend/schemas/`.
-3. **Frontend Projections**: Update TypeScript types in `web/src/domain/` or `web/src/api/`.
+1. **PostgreSQL & Migrations**: Update the repository's canonical numbered migration mechanism/tool/script (preflight its actual location) and repository projection classes in `src/pbl4/management_backend/repositories/`.
+2. **API Schemas**: Update FastAPI Pydantic models in `src/pbl4/management_backend/schemas/`.
+3. **Frontend Projections**: Update TypeScript types in current owners under `web/src/types/` and API consumers under `web/src/api/`.
 4. **Documentation**: Surgically update `docs/IMPLEMENTATION_CONTRACT.md` without altering unrelated sections.
 
-*(Terminology Guide: Refer to the architectural component as `Management Backend`. The canonical Python package path is strictly `src/pbl4/backend/` [occurrences of `management_backend` are only acceptable if explicitly labeled historical, legacy examples, or anti-examples]).*
+The architectural component is `Management Backend`; the current repository package is
+`src/pbl4/management_backend/`. Do not create a second backend package or rename it as a
+side effect of a feature task.
+
+### Node contract guards
+
+- Keep Node identity/lifecycle, one-time enrollment, `WorkerAllocation`, resource
+  persistence, and Backend API/schema changes under `[NODE_AGENT]` plus the appropriate
+  data/API owner.
+- Keep admission credentials out of `resolved_contract` and `contract_hash`; Runtime
+  still assigns Worker session/rank after verification.
+- Do not make Node Agent, Management Backend, or PostgreSQL part of the gradient/update
+  critical path.
+
+### DBS contract guards
+
+- `training_strategy` remains `strict_bsp`; do not introduce `dbs_bsp` or a DBS-specific
+  synchronization class.
+- Workload contract is limited to approved fields such as `policy: equal | dbs` and
+  `work_units_per_step`; derive Work Unit size/global sample count from existing dataset
+  and contract values instead of duplicating them.
+- Do not create DBS-specific Attempt, WorkerSession, or Step states.
+- Do not create Checkpoint V2 or persist runtime-only WorkloadPlan/statistics solely for
+  DBS; preserve the approved resume warm-up behavior.
 
 ---
 

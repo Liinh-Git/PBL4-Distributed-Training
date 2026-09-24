@@ -15,16 +15,61 @@
 
 ---
 
-## 2. Primary Workflow Selection
+## 2. Approved Plan-Driven Implementation
 
-Before triggering any skill, classify the task. The diagram below applies only to semantic changes; non-semantic implementation and visual work use Section 5:
+When the user supplies or names an approved implementation plan, or a large feature must
+be decomposed from approved Design/Plan before coding, start with
+[`implementation-planner`](skills/implementation-planner/SKILL.md):
+
+```text
+Approved plan-driven implementation
+        ↓
+implementation-planner
+        ↓
+resolve Design owner + implementation guidance + current branch/HEAD
+        ↓
+audit code, tests, and drift from the plan audit anchor
+        ↓
+Execution Blueprint
+        ↓
+if an unresolved semantic delta is discovered:
+    protocol-change OR contract-change (exactly one primary per delta)
+        ↓
+    resolve canonical semantics
+        ↓
+    RETURN TO implementation-planner
+        ↓
+    update affected phases, tasks, decisions, tests, and exit criteria
+        ↓
+implementation
+        ↓
+architecture-guard
+        ↓
+distributed-verification if training correctness/admission is affected
+        ↓
+doc-sync if a repository projection changed
+        ↓
+release-gate
+```
+
+`implementation-planner` is planning/orchestration only. It does not become a semantic
+primary, does not compete with `contract-change` or `protocol-change`, and does not ask
+the user to choose mechanics derivable from approved sources and current code. If no
+semantic delta exists, implementation proceeds directly from the blueprint. If a real
+canonical conflict exists, only the affected blueprint branch blocks.
+
+---
+
+## 3. Primary Workflow Selection
+
+Before triggering any skill, classify the task. The diagram below applies only to semantic changes; non-semantic implementation and visual work use Section 6:
 
 ```
                                   [ Incoming Task / Delta ]
                                               │
                       ┌───────────────────────┴───────────────────────┐
-                      │ Wire-level DTP/1 or MCP/1 change?             │
-                      │ (framing, header, binary payload, codec)      │
+                      │ DTP/1, MCP/1, or Agent control wire change?   │
+                      │ (framing, header, payload/schema, codec)      │
                       └───────────────────────┬───────────────────────┘
                                               │
                               YES ────────────┴──────────── NO
@@ -40,6 +85,7 @@ Before triggering any skill, classify the task. The diagram below applies only t
 Use `protocol-change` as PRIMARY when modifying:
 - DTP/1 binary framing, header layout, flags, tensor wire format
 - MCP/1 message framing, control commands, telemetry wire format
+- Backend ↔ Node Agent WSS/JSON envelope or message payload schemas owned by `[NODE_AGENT]`
 - Wire-level correlation fields (`operation_id`, `message_id`, `correlation_id`, `runtime_event_seq`)
 - Packet serialization/deserialization codecs in `protocol` or `management_protocol`
 *Supporting role*: `contract-change` acts strictly as a supporting skill if high-level projections (e.g. documentation or manifest references) require synchronization.
@@ -56,7 +102,7 @@ Use `contract-change` as PRIMARY when modifying:
 
 ---
 
-## 3. The Standard 5-Phase Pipeline
+## 4. The Standard 5-Phase Pipeline
 
 Once the Primary Workflow is established, execution proceeds sequentially through the following pipeline:
 
@@ -110,7 +156,7 @@ Once the Primary Workflow is established, execution proceeds sequentially throug
 
 ---
 
-## 4. Standalone Diagnostic Mode (`distributed-debug`)
+## 5. Standalone Diagnostic Mode (`distributed-debug`)
 
 `distributed-debug` operates outside the standard feature development pipeline:
 - **Trigger**: Invoked **ONLY** when actively investigating bugs, hangs, deadlocks, discrepancies, or test failures in distributed execution.
@@ -142,7 +188,7 @@ Once the Primary Workflow is established, execution proceeds sequentially throug
 
 ---
 
-## 5. Non-Semantic / Local Implementation Workflows
+## 6. Non-Semantic / Local Implementation Workflows
 
 Third-party helpers operate only after any required semantic resolution. Read the exact normative locator declared in SOURCE_REGISTRY, not a universal tab name. Reuse the resolved source set. Supporting skills return to the current workflow; no circular re-entry or second primary. Canonical source → exact normative locator → internal semantic/governance skills → approved local projections → third-party helpers → current code. PBL4 instructions win conflicts outright.
 
@@ -151,7 +197,7 @@ Third-party helpers operate only after any required semantic resolution. Read th
 - Semantics unchanged: architecture context → vendor-fastapi when applicable → relevant tests → release-gate → vendor-verification-before-completion.
 - API semantics changed: contract-change PRIMARY → architecture-guard as relevant → vendor-fastapi → tests → doc-sync → release-gate → vendor-verification-before-completion.
 - Persisted table/field/identity/data-shape constraints resolve to DATA_MODEL; repository/Unit of Work/transaction/migration operations resolve to POSTGRESQL. Supporting Contracts sheets cannot override either owner.
-- Preflight actual package paths. The historical scaffold may differ from canonical backend naming; do not rename it or create a second package as a helper side effect.
+- Use the current `src/pbl4/management_backend/` package path; do not rename it or create a parallel `src/pbl4/backend/` package as a helper side effect.
 
 ### WebUI design and implementation
 
@@ -183,7 +229,7 @@ A scoped differential review may be useful after implementation and before relea
 
 For explicitly authorized .agents maintenance, preserve existing corrections; inspect the internal semantic invariants, local links, discovery boundary, provenance, routing scenarios and supply-chain findings. Use architecture-guard and release-gate proportionally. Production suites unrelated to instruction changes may be SKIPPED with reason. Vendor tools cannot independently edit source ownership or routing.
 
-## 6. Installed helper entrypoints
+## 7. Installed helper entrypoints
 
 - [pbl4-ui-direction](skills/pbl4-ui-direction/SKILL.md): PBL4 visual implementation direction.
 - [vendor-impeccable](skills/vendor-impeccable/SKILL.md): scoped design craft.

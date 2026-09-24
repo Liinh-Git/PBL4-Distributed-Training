@@ -58,7 +58,7 @@ The fail-safe rule applies selectively based on the nature of the task:
 - **URL**: `https://docs.google.com/document/d/1g_s9cc0nnoIx_p7NgU10IBqx17bJlPKqutJ-Rhsv4hM/edit`
 - **Normative Locator**: Tab `Chính`
 - **Semantic Ownership**:
-  - Global system topology and process boundaries (`pbl4-runtime`, `pbl4-worker`, `pbl4-dataset-manager`, `pbl4-backend`, `pblctl`, `WebUI`)
+  - Global system topology and process boundaries (`pbl4-runtime`, `pbl4-worker`, `pbl4-dataset-manager`, `pbl4-backend`, `pbl4-agent`, `pblctl`, `WebUI`), with Node/WAN specifics delegated to `[NODE_AGENT]`
   - The Three Communication Paths (Path 1: Training Correctness / DTP, Path 2: Dataset Provisioning, Path 3: Management & Telemetry / MCP)
   - Critical path invariants (Management Backend down ≠ training down, DB down ≠ training down, Dataset Manager down post-provisioning ≠ training down)
   - Physical vs. logical network boundaries
@@ -99,14 +99,42 @@ The fail-safe rule applies selectively based on the nature of the task:
 - **Semantic Ownership**:
   - Python package layout, module ownership, entrypoints
   - Dependency directions and import boundaries
-  - Package naming (Python package `backend` for `Management Backend`)
+  - Package and module ownership. The current repository package for the Management Backend is `src/pbl4/management_backend/`; no parallel `src/pbl4/backend/` package is canonical without an approved migration.
   - Anti-dumping rules for `common/`
 - **When to Read**: When adding packages, moving files, modifying module dependencies, or restructuring code.
 - **Supporting Sources**: `[ARCH_SYSTEM]`. Supporting sources cannot override `[CODE_STRUCTURE]`.
 
+#### `[NODE_AGENT]`
+- **Title**: `NODE_AGENT_DESIGN.md`
+- **URL**: `https://docs.google.com/document/d/1ADHTM0VzUkgcY6JLaMlBCayc0MAvbTr1E0fzeoW1IIs/edit`
+- **Normative Locator**: Whole document
+- **Semantic Ownership**:
+  - Node Agent, WAN, Node enrollment/identity/lifecycle, resource reporting, and WorkerAllocation orchestration
+  - Backend ↔ Node Agent outbound WSS control messages and their identity/idempotency/failure semantics
+  - Worker admission boundary and the separation of Node control plane from Worker ↔ Runtime DTP/1
+  - Agent/Backend disconnect and restart behavior for already-running Workers
+- **When to Read**: When changing Node/WAN orchestration, `node_agent`, `agent_protocol`, Node/Allocation persistence or APIs, Worker process supervision, or managed Worker admission.
+- **Implementation Guidance**: `NODE_AGENT_IMPLEMENTATION_PLAN.md` — `https://docs.google.com/document/d/1hgqvLqMgxLqVTmk3luUlY7oLKeAgIhSAZGgfD_mIl64/edit`. This plan is an approved projection onto an audited code snapshot; it does not override Design and must be adapted to current HEAD.
+- **Supporting History**: `So sánh thay đổi Node Agent` — `https://docs.google.com/document/d/1XrvRLaEVKT88bPbsl57M0qh7b_MuNxEubaKj6-YV7K4/edit`. Historical/rationale only; never a semantic owner.
+- **Supporting Sources**: `[ARCH_SYSTEM]`, `[DOMAIN_MODEL]`, `[DATA_MODEL]`, `[CODE_STRUCTURE]`, `[DTP1]`, `[BACKEND]`, `[BACKEND_API]`, `[POSTGRESQL]`. Supporting sources cannot override `[NODE_AGENT]` inside its approved scope; report a genuine owner conflict instead of reconciling it by invention.
+
 ---
 
 ### Training Runtime & Synchronization
+
+#### `[DBS_WORKLOAD]`
+- **Title**: `DBS_DESIGN.md`
+- **URL**: `https://docs.google.com/document/d/1dGP5PAFq__FEXJhvq3fS8X1i_MtuwLziapXcajPWuTw/edit`
+- **Normative Locator**: Whole document
+- **Semantic Ownership**:
+  - DBS adaptive workload policy and Work Unit semantics
+  - Runtime-owned WorkloadPlan/statistics, deterministic integer projection, and epoch-boundary planning
+  - Multiple Work Units per Worker contribution, canonical global Work Unit set, cache/readiness behavior, and resume warm-up
+  - Constraint that DBS remains workload scheduling under `strict_bsp`, with DTP/1 and Checkpoint V1 retained
+- **When to Read**: When changing workload contracts, Work Unit scheduling/assignment, multi-unit Worker compute, DBS statistics, cache scope, or DBS resume behavior.
+- **Implementation Guidance**: `DBS_IMPLEMENTATION_PLAN.md` — `https://docs.google.com/document/d/1CD_0k2bHaIyBnVUacIRa2vdXq3ZQkYOFO3CAdRRpyqg/edit`. This plan is an approved projection onto an audited code snapshot; it does not override Design and must be adapted to current HEAD.
+- **Supporting History**: `So sánh thay đổi Runtime Adaptive algorithm` — `https://docs.google.com/document/d/1KIieKitvL7Av1hDXDYdpgLjNHrfS-IjgfepZQAkG_nA/edit`. Historical/rationale only; never a semantic owner.
+- **Supporting Sources**: `[TRAINING_RUNTIME]`, `[SYNC_STRICT_BSP]`, `[DTP1]`, `[CHECKPOINT]`, `[RECOVERY]`, `[DATA_MODEL]`, `[DATASET_MANAGER]`. Supporting sources cannot override `[DBS_WORKLOAD]` inside its approved scope; report a genuine owner conflict instead of inventing a hybrid algorithm.
 
 #### `[TRAINING_RUNTIME]`
 - **Title**: `02. Runtime huấn luyện`
@@ -210,7 +238,7 @@ The fail-safe rule applies selectively based on the nature of the task:
 - **Semantic Ownership**:
   - Public REST API endpoint definitions, request/response JSON schemas, error codes
   - WebSocket protocol for real-time telemetry streaming to CLI and WebUI
-- **When to Read**: When modifying FastAPI routers, Pydantic schemas in `src/pbl4/backend/schemas/`, or WebSocket events.
+- **When to Read**: When modifying FastAPI routers, Pydantic schemas in `src/pbl4/management_backend/schemas/`, or WebSocket events.
 - **Supporting Sources**: `[CONTRACTS]` (tab `Backend REST & WebSocket`), `[BACKEND]`. Supporting sources cannot override `[BACKEND_API]`.
 
 #### `[POSTGRESQL]`

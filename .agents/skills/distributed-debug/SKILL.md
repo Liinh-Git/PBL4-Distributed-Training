@@ -1,8 +1,8 @@
 ---
 name: distributed-debug
 description: >
-  Diagnostic workflow for investigating distributed execution failures,
-  hangs, deadlocks, and discrepancies using structured correlation tracing.
+  Diagnostic workflow for Node/Agent orchestration and distributed training failures,
+  hangs, deadlocks, Work Unit issues, and discrepancies using correlation tracing.
 ---
 
 # Distributed Debug
@@ -29,6 +29,8 @@ Consult the canonical technical documents registered in [`.agents/SOURCE_REGISTR
 - `[MCP1]`: MCP/1 telemetry stream and event sequence
 - `[CHECKPOINT]`: Checkpoint durability contracts
 - `[RECOVERY]`: Failure classification, retry boundaries, and resume into NEW Attempt
+- `[NODE_AGENT]`: Node enrollment, Agent WSS, WorkerAllocation/process supervision, and admission
+- `[DBS_WORKLOAD]`: Work Unit assignment/cache/compute and epoch-plan statistics
 
 ---
 
@@ -44,6 +46,9 @@ Consult the canonical technical documents registered in [`.agents/SOURCE_REGISTR
 Align multi-process logs across Runtime, Workers, and Backend using canonical correlation fields:
 - `job_id`: Top-level training job UUID
 - `attempt_id`: Specific execution attempt UUID (attempts are immutable)
+- `node_id`: Long-lived enrolled Node identity
+- `allocation_id`: Backend WorkerAllocation and Agent lifecycle idempotency identity
+- `command_id`: Agent control command correlation identifier
 - `session_id`: Unique uint64 worker connection session ID
 - `worker_id`: Logical worker rank assigned by Runtime
 - `operation_id`: DTP/1 neutral 8-byte operation correlation identifier
@@ -55,18 +60,24 @@ Align multi-process logs across Runtime, Workers, and Backend using canonical co
 
 ---
 
-## 5. Eight-Stage Root-Cause Taxonomy
+## 5. Root-Cause Taxonomy
 
-Classify any observed divergence into one of the 8 canonical failure stages:
+Classify the first divergence into the owning stage; do not collapse Agent control
+failures into DTP framing merely because a Worker eventually fails to connect:
 
-1. **Transport**: Socket reset/closure, TCP buffer stall, partial frame read/write (`recv_exact` breach).
-2. **DTP / MCP Framing & Protocol**: Magic bytes mismatch, unsupported protocol version, invalid message type, corrupted header length.
-3. **Identity & Session Validation**: Attempt ID mismatch, expired/invalid session ID, unregistered worker, assigned shard/batch mismatch.
-4. **Synchronization Policy & Admission**: Contribution barrier race, rejected stale/future model version, duplicate contribution rejection.
-5. **Aggregation & Parameter Update**: Sample count calculation mismatch, tensor shape/dtype incompatibility, numerical instability (NaN/Inf), double update attempt.
-6. **Broadcast & `PARAMETER_APPLIED`**: Parameter chunk broadcast desync, worker local model update failure, missing or dropped ACK frame.
-7. **Checkpoint Durability & Resume**: Disk I/O failure, checkpoint manifest hash verification mismatch, state restoration desync into new attempt.
-8. **Management Projection & Reconnect**: WebSocket drop, backend MCP client reconnect backoff, database telemetry write contention.
+1. **Node Enrollment & Authentication**: one-time enrollment code, persisted Node identity, node-secret verification, revoke state, or secret redaction failure.
+2. **Agent WSS Control Connection**: outbound connect/auth, `AGENT_HELLO`, heartbeat/resource reporting, ONLINE/OFFLINE timeout, or reconnect/reconciliation failure.
+3. **Worker Command Dispatch**: `START_WORKER`/`STOP_WORKER`, `command_id` correlation, `allocation_id` idempotency, command ACK, or Backend allocation transition failure.
+4. **Local Process Supervisor**: spawn, PID/create-time verification, restart reconciliation, graceful/forced stop, or Worker status reporting failure.
+5. **Worker Admission**: managed HELLO token/scope/expiry/duplicate-allocation validation before registration. Do not classify these as tensor-framing failures.
+6. **Transport and DTP/MCP Framing**: socket reset/closure, partial exact-byte read/write, magic/version/type/header corruption on the protocol actually in use.
+7. **Identity, Session, and Canonical Assignment**: attempt/session/worker mismatch, stale connection, batch cursor, or legacy/Work Unit assignment mismatch.
+8. **Work Unit Cache & Compute**: provisioning readiness, multi-shard cache verification, assigned Work Unit load, local weighted gradient, or `compute_ms` measurement failure.
+9. **Synchronization, Aggregation, and Update**: contribution barrier race, stale/future/duplicate rejection, sample weighting, tensor shape/dtype, or double update.
+10. **Broadcast & `PARAMETER_APPLIED`**: parameter chunk broadcast desync, Worker local model update failure, or missing/dropped ACK.
+11. **Checkpoint Durability & Resume**: durable-write/hash failure, cursor restoration, DBS warm-up mode, or new-Attempt recovery desynchronization.
+12. **DBS Epoch Statistics & Plan**: incomplete/invalid committed statistics, epoch-boundary plan freeze, integer projection, or equal/DBS global-set mismatch.
+13. **Management Projection & Reconnect**: Backend MCP reconnect, database projection, or telemetry reconciliation failure that does not itself imply training failure.
 
 ---
 
@@ -80,7 +91,7 @@ Classify any observed divergence into one of the 8 canonical failure stages:
 
 ## 7. Resolution & Handoff Pipeline
 
-1. **Root Cause Classification**: Categorize using the 8-stage taxonomy.
+1. **Root Cause Classification**: Categorize using the 13-stage taxonomy.
 2. **Automated Regression Test**: Write an automated reproduction test demonstrating the failure condition.
 3. **Three-way handoff**:
    - **Route A**: Protocol/wire semantic defect → `protocol-change` PRIMARY.

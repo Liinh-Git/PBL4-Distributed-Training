@@ -94,6 +94,48 @@
      - Offer to review or critique the draft proposal if requested, but label all analysis strictly `NON-NORMATIVE`.
 - **Outcome**: Completely prevents unapproved draft pollution and keeps production architecture canonical.
 
+## Approved plan and current-HEAD planning scenarios
+
+| ID | Request / stimulus | Expected route and decision |
+|---|---|---|
+| P1 | “Implement `NODE_AGENT_IMPLEMENTATION_PLAN.md`.” | `implementation-planner` resolves `[NODE_AGENT]`, records plan audit anchor and current HEAD, audits actual code/tests, then emits an Execution Blueprint before implementation. Planner is not a semantic primary. |
+| P2 | The approved plan audited an older commit and current HEAD changed named files/symbols. | Planner diffs the audit anchor to HEAD, inspects current definitions/callers, classifies drift, and adapts paths/tasks. It never applies the old file map blindly. |
+| P3 | The plan does not say which existing helper/service should own a mechanical step. | Planner derives the smallest compatible placement from dependency direction, current ownership, tests, and repository convention; it records a Derived Implementation Decision and does not ask the user. |
+| P4 | Drift exposes a genuinely unresolved wire or persisted/public semantic delta. | Planner marks affected tasks blocked, hands that delta to exactly one primary (`protocol-change` or `contract-change`), then returns to planner to update dependent blueprint nodes after resolution. |
+| P5 | “Implement `DBS_IMPLEMENTATION_PLAN.md`.” | Planner freezes `training_strategy = strict_bsp`, routes DBS as `workload.policy = equal | dbs`, preserves N/N and Checkpoint V1, and rejects `dbs_bsp`, DTP/2, DBS state, or checkpoint-schema invention. |
+| P6 | “Implement Node Agent orchestration.” | Planner preserves direct Worker → Runtime DTP/1, keeps Agent/Backend out of tensor traffic, verifies admission before registration, and preserves running Worker lifetime across Agent/Backend control disconnect. |
+| P7 | Two primary canonical owners contain a real unresolved contradiction affecting public behavior/state/wire/persistence/failure/correctness. | Planner reports `CANONICAL_CONFLICT_DETECTED` with sources and impacted tasks, blocks that branch, and does not invent a compromise. Independent resolved branches may continue. |
+
+### P1/P2 — Blueprint and drift behavior
+
+The planner must include Source Snapshot, Frozen Decisions, Drift Analysis, Impact Map,
+Phase DAG, full task checklists, Derived Implementation Decisions, risk/conflict checks,
+verification matrix, and completion accounting. A renamed or moved symbol is adapted to
+the current owner; an implementation change with unchanged semantics reshapes tasks; a
+semantic conflict routes to one resolver.
+
+### P3 — Derive mechanics, do not re-open architecture
+
+Questions such as phase order, reuse of an existing class, helper location, stale-path
+adaptation, interface preservation, and missing regression tests are implementation
+mechanics. The planner decides them from evidence. It must not ask whether to create
+`dbs_bsp`, proxy DTP through Agent, or persist DBS statistics in Checkpoint V2 because
+approved Design already rejects those options.
+
+### P4/P7 — Semantic handoff and return
+
+`protocol-change` owns an unresolved wire delta; `contract-change` owns an unresolved
+domain/API/DB/checkpoint delta. The resolver returns the approved result to the planner;
+the planner updates affected phases and does not create a second primary. If owners truly
+conflict, report exact evidence and stop the affected branch rather than blending sources.
+
+### P5/P6 — Frozen architecture assertions
+
+DBS changes the quantity and assignment of Work Units only: each Worker may process more
+than one unit but emits one sample-counted contribution, while StrictBSP remains N/N.
+Node Agent is control plane only: it supervises Worker processes over outbound WSS
+control, while each Worker independently uses the normal DTP/1 TCP path to Runtime.
+
 
 ## External routing conflict scenarios
 

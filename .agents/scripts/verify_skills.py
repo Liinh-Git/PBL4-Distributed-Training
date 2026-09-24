@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CORE = {
     "architecture-guard",
     "contract-change",
+    "implementation-planner",
     "protocol-change",
     "distributed-debug",
     "distributed-verification",

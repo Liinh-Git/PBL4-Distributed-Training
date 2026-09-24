@@ -37,12 +37,21 @@ def extract_imports(filepath: Path) -> tuple[list[str], str | None]:
         return [], f"AST parse failure in {filepath}: {e}"
 
     imports: list[str] = []
+    package_parts = list(filepath.parent.relative_to(SRC_ROOT.parent).parts)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 imports.append(alias.name)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imports.append(node.module)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                keep = len(package_parts) - (node.level - 1)
+                resolved_parts = package_parts[: max(keep, 0)]
+                if node.module:
+                    resolved_parts.extend(node.module.split("."))
+                if resolved_parts:
+                    imports.append(".".join(resolved_parts))
+            elif node.module:
+                imports.append(node.module)
     return imports, None
 
 
@@ -92,6 +101,8 @@ def main() -> int:
                 "pbl4.runtime",
                 "pbl4.worker",
                 "pbl4.management_backend",
+                "pbl4.node_agent",
+                "pbl4.agent_protocol",
                 "pbl4.dataset_manager",
                 "torch",
                 "torchvision",
@@ -113,6 +124,8 @@ def main() -> int:
                 "pbl4.runtime",
                 "pbl4.worker",
                 "pbl4.management_backend",
+                "pbl4.node_agent",
+                "pbl4.agent_protocol",
                 "pbl4.dataset_manager",
                 "torch",
                 "torchvision",
@@ -136,6 +149,8 @@ def main() -> int:
                 "pbl4.worker",
                 "pbl4.adapter",
                 "pbl4.management_backend",
+                "pbl4.node_agent",
+                "pbl4.agent_protocol",
                 "pbl4.dataset_manager",
                 "pbl4.cli",
                 "pbl4.management_protocol",
@@ -159,6 +174,8 @@ def main() -> int:
             "worker",
             [
                 "pbl4.management_backend",
+                "pbl4.node_agent",
+                "pbl4.agent_protocol",
                 "pbl4.dataset_manager",
                 "psycopg",
                 "psycopg_pool",
@@ -176,6 +193,7 @@ def main() -> int:
             [
                 "pbl4.runtime",
                 "pbl4.worker",
+                "pbl4.node_agent",
                 "pbl4.dataset_manager",
                 "torch",
                 "torchvision",
@@ -197,6 +215,8 @@ def main() -> int:
                 "asyncpg",
                 "sqlalchemy",
                 "pbl4.management_backend",
+                "pbl4.node_agent",
+                "pbl4.agent_protocol",
                 "pbl4.dataset_manager",
                 "torch",
                 "torchvision",
@@ -219,6 +239,8 @@ def main() -> int:
                 "sqlalchemy",
                 "fastapi",
                 "pbl4.management_backend",
+                "pbl4.node_agent",
+                "pbl4.agent_protocol",
                 "pbl4.dataset_manager",
             ],
             "synchronization must not import checkpoint, transport, DB, HTTP, backend, or DM",
@@ -232,6 +254,8 @@ def main() -> int:
             [
                 "pbl4.runtime",
                 "pbl4.management_backend",
+                "pbl4.node_agent",
+                "pbl4.agent_protocol",
                 "pbl4.dataset_manager",
                 "pbl4.worker",
                 "psycopg",
@@ -245,12 +269,64 @@ def main() -> int:
         )
     )
 
-    # 10. Adapter isolation
+    # 9. Agent Protocol isolation (shared control-plane wire schema only)
+    violations.extend(
+        check_forbidden_imports(
+            "agent_protocol",
+            [
+                "pbl4.node_agent",
+                "pbl4.management_backend",
+                "pbl4.runtime",
+                "pbl4.worker",
+                "pbl4.dataset_manager",
+                "pbl4.protocol",
+                "pbl4.transport",
+                "torch",
+                "torchvision",
+                "fastapi",
+                "psycopg",
+                "psycopg_pool",
+                "asyncpg",
+                "sqlalchemy",
+            ],
+            "agent_protocol is shared control wire schema: "
+            "no process, DTP, framework, or DB imports",
+        )
+    )
+
+    # 10. Node Agent isolation (control plane and local process supervision only)
+    violations.extend(
+        check_forbidden_imports(
+            "node_agent",
+            [
+                "pbl4.runtime",
+                "pbl4.worker",
+                "pbl4.management_backend",
+                "pbl4.dataset_manager",
+                "pbl4.protocol",
+                "pbl4.transport",
+                "pbl4.management_protocol",
+                "torch",
+                "torchvision",
+                "fastapi",
+                "psycopg",
+                "psycopg_pool",
+                "asyncpg",
+                "sqlalchemy",
+            ],
+            "node_agent is control-plane only: "
+            "no training, Backend implementation, framework, or DB imports",
+        )
+    )
+
+    # 11. Adapter isolation
     violations.extend(
         check_forbidden_imports(
             "adapter",
             [
                 "pbl4.management_backend",
+                "pbl4.node_agent",
+                "pbl4.agent_protocol",
                 "pbl4.dataset_manager",
                 "pbl4.runtime",
                 "psycopg",
@@ -262,12 +338,14 @@ def main() -> int:
         )
     )
 
-    # 11. CLI isolation
+    # 12. CLI isolation
     violations.extend(
         check_forbidden_imports(
             "cli",
             [
                 "pbl4.runtime",
+                "pbl4.node_agent",
+                "pbl4.agent_protocol",
                 "pbl4.dataset_manager",
                 "pbl4.worker",
                 "psycopg",
@@ -276,6 +354,32 @@ def main() -> int:
                 "sqlalchemy",
             ],
             "cli must control through Management Backend: no direct runtime, DM, worker, or DB",
+        )
+    )
+
+    # 13. Dataset Manager isolation
+    violations.extend(
+        check_forbidden_imports(
+            "dataset_manager",
+            [
+                "pbl4.runtime",
+                "pbl4.worker",
+                "pbl4.management_backend",
+                "pbl4.node_agent",
+                "pbl4.agent_protocol",
+                "pbl4.protocol",
+                "pbl4.transport",
+                "pbl4.management_protocol",
+                "torch",
+                "torchvision",
+                "fastapi",
+                "psycopg",
+                "psycopg_pool",
+                "asyncpg",
+                "sqlalchemy",
+            ],
+            "dataset_manager owns artifacts only: "
+            "no training, control-plane, framework, or DB imports",
         )
     )
 

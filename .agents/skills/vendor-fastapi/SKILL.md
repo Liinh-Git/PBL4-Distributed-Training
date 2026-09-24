@@ -17,7 +17,7 @@ Normal use must not edit SOURCE_REGISTRY, SKILL_ROUTING, internal skills, or can
 
 ## Use
 
-Scope: canonical `src/pbl4/backend/api/` and `src/pbl4/backend/schemas/`. Preflight actual checkout paths; the historical scaffold may still expose the legacy `management_backend` package. Do not create a second backend or migrate package structure as a side effect of framework advice.
+Scope: current canonical repository paths `src/pbl4/management_backend/api/` and `src/pbl4/management_backend/schemas/`. Do not create a second `src/pbl4/backend/` package or migrate package structure as a side effect of framework advice.
 
 `[BACKEND_API]` and relevant `[CONTRACTS]` exact named sheets own API semantics; `[DATA_MODEL]` owns persisted shape and `[POSTGRESQL]` owns repository/Unit of Work/transaction policy. Resolve API changes through contract-change first, then architecture-guard as relevant.
 

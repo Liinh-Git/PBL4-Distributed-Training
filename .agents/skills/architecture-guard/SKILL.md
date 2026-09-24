@@ -26,6 +26,8 @@ Consult the canonical technical documents registered in [`.agents/SOURCE_REGISTR
 - `[TRAINING_RUNTIME]`: Parameter Server responsibilities and single-writer rule
 - `[SYNC_STRICT_BSP]`: SynchronizationPolicy abstraction and barrier isolation
 - `[CHECKPOINT]`: Separation of durability from synchronization
+- `[NODE_AGENT]`: Node/WAN control plane, WorkerAllocation, and managed admission boundaries
+- `[DBS_WORKLOAD]`: Work Unit and adaptive workload ownership under StrictBSP
 
 > [!WARNING]
 > **Drive Unavailable Fail-safe**: If an architectural boundary or invariant decision is unresolved and the canonical Drive source is inaccessible, **STOP** and report `BLOCKED_CANONICAL_SOURCE_UNAVAILABLE`. Do not guess from local code or tab `Nháp`.
@@ -39,27 +41,33 @@ Verify that imports strictly adhere to the canonical dependency graph:
 ```
 runtime             → protocol, transport, management_protocol, common
 worker              → protocol, transport, adapter, common
-backend             → management_protocol, common
+management_backend  → management_protocol, agent_protocol, common
+node_agent          → agent_protocol, common
+agent_protocol      → common
 dataset_manager     → common
 all packages        → common
 ```
 
-*(Note: The architectural component is `Management Backend`; the canonical Python package path is strictly `backend` [occurrences of `management_backend` are only acceptable if explicitly labeled historical, legacy examples, or anti-examples]).*
+The architectural component is `Management Backend`; its current repository package is
+`src/pbl4/management_backend/`. Do not rename it or create `src/pbl4/backend/` unless a
+separate approved canonical migration explicitly requires that change.
 
 ### Forbidden Dependency Directions
-- `protocol` → `runtime`, `worker`, `backend`, `dataset_manager`, `torch`, database libraries
+- `protocol` → `runtime`, `worker`, `management_backend`, `dataset_manager`, `torch`, database libraries
 - `transport` → `runtime`, `synchronization`, training semantics, `protocol`
-- `worker` → `backend`, `PostgreSQL`, `dataset_manager` implementation
-- `backend` → `runtime` training implementation internals
-- `dataset_manager` → `runtime` training implementation, `backend`
+- `worker` → `management_backend`, `PostgreSQL`, `dataset_manager` implementation
+- `management_backend` → `runtime` training implementation internals
+- `dataset_manager` → `runtime` training implementation, `management_backend`
 - `runtime.synchronization` → `checkpoint`, `transport`, database, HTTP
-- `runtime` → `backend`, web frameworks (`fastapi`), database drivers (`psycopg`, `asyncpg`, `sqlalchemy`)
+- `runtime` → `management_backend`, web frameworks (`fastapi`), database drivers (`psycopg`, `asyncpg`, `sqlalchemy`)
+- `node_agent` → `runtime`, `worker` internals, `management_backend`, `dataset_manager`, DTP/transport internals, database libraries, `torch`
+- `agent_protocol` → `node_agent`, `management_backend`, `runtime`, `worker`, DTP/transport internals, database libraries, `torch`, web frameworks
 
 ---
 
 ## 4. Core Architectural Invariants
 
-Every change must rigorously maintain the following 11 canonical invariants:
+Every change must rigorously maintain the following canonical invariants:
 
 1. **Strict BSP Behind `SynchronizationPolicy`**: Strict BSP must remain an implementation behind the abstract `SynchronizationPolicy` interface. Generic runtime layers must not couple directly to Strict BSP semantics.
 2. **No Hard-Coded Generic Worker Count / Membership**: Do not hard-code worker count or membership semantics (`expected_workers == 3`) in generic layers:
@@ -82,7 +90,13 @@ Every change must rigorously maintain the following 11 canonical invariants:
     - Shared error types and error value objects
     - Time and clock helpers
     - **Prohibited in `common/`**: Domain models (`Job`, `Attempt`, `Worker`, `Step`, `DatasetBuild`), repositories, domain state machines, and Runtime metrics (`runtime/metrics.py` belongs strictly in `runtime`). They must not be moved into `common/` merely because multiple packages consume them.
-11. **Strict Cross-Process Boundaries**: Direct object calls across process boundaries are prohibited. Processes (`runtime`, `worker`, `backend`, `dataset_manager`, `cli`, `web`) communicate exclusively over defined network protocols (DTP/1, MCP/1, REST, WebSocket, HTTP). Within the same process or package composition, standard in-memory object calls remain valid provided they respect allowed dependency directions.
+11. **Strict Cross-Process Boundaries**: Direct object calls across process boundaries are prohibited. Processes (`runtime`, `worker`, `management_backend`, `node_agent`, `dataset_manager`, `cli`, `web`) communicate exclusively over defined network protocols (DTP/1, MCP/1, REST, WebSocket/WSS, HTTP). Within the same process or package composition, standard in-memory object calls remain valid provided they respect allowed dependency directions.
+12. **Node Agent Is Control Plane Only**: Initial Node enrollment uses the approved Backend HTTP endpoint; after enrollment, Node Agent initiates outbound WSS for hello, heartbeat/resource reporting, commands, acknowledgments, and Worker status. It never transports gradient, parameter, tensor, or DTP frames. Workers retain a direct DTP/1 TCP connection to Runtime.
+13. **Control-Plane Loss Does Not Kill Training Data Plane**: Agent or Management Backend disconnect/restart must not automatically terminate an already-running Worker or sever its DTP connection. Explicit `STOP_WORKER` controls process lifetime; Attempt abort remains a separate Runtime management action.
+14. **Worker Admission Precedes Registration**: In managed mode, Runtime verifies the admission token and its `attempt_id`/`allocation_id`/`node_id` scope and duplicate-allocation rule before `WorkerRegistry.register()`. Runtime alone assigns `session_id` and `worker_id`; admission data is not part of the frozen training contract.
+15. **DBS Is Workload Scheduling**: DBS belongs to Runtime workload scheduling, never `SynchronizationPolicy`. `training_strategy` remains `strict_bsp`; StrictBSP keeps full N/N contribution admission, barrier, parameter acknowledgment, and failure semantics.
+16. **Workload Does Not Own Durability**: Workload scheduling may change Work Unit counts only at approved epoch boundaries. It cannot decide checkpoint cadence, create checkpoint schema state, or advance the recovery cursor before the existing durability/commit gate.
+17. **Shard Identity Is Storage Identity**: Under Work Unit mode, `shard_id` identifies stored data and is not universally equal to `worker_id`. A Worker may receive canonical Work Units from multiple shards while emitting exactly one contribution for the step.
 
 ---
 
@@ -100,4 +114,4 @@ Every change must rigorously maintain the following 11 canonical invariants:
    Document in PR / task output:
    - Affected process boundaries
    - Any modifications to generic interfaces vs. strategy implementations
-   - Confirmation that all 11 core architectural invariants remain intact
+   - Confirmation that all applicable core architectural invariants remain intact
