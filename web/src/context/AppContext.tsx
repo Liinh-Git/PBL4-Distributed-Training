@@ -25,12 +25,12 @@ export interface AppContextType {
 
   // Transient Diagnostics / Protocol indicators
   isRuntimeStale: boolean;
-  toggleRuntimeStale: () => void;
+  setIsRuntimeStale: (stale: boolean) => void;
   hasEventHistoryGap: boolean;
-  toggleEventHistoryGap: () => void;
+  setHasEventHistoryGap: (gap: boolean) => void;
 }
 
-const AppContext = createContext<AppContextType | undefined>(undefined);
+export const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   // Inspector drawer selections
@@ -41,17 +41,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [selectedDatasetBuild, setSelectedDatasetBuild] = useState<DatasetBuild | null>(null);
   const [rawContractModalJob, setRawContractModalJob] = useState<Job | null>(null);
 
-  // Transient diagnostic flags
+  // Transient diagnostic flags (driven by live attempt event stream)
   const [isRuntimeStale, setIsRuntimeStale] = useState<boolean>(false);
   const [hasEventHistoryGap, setHasEventHistoryGap] = useState<boolean>(false);
-
-  const toggleRuntimeStale = () => {
-    setIsRuntimeStale(prev => !prev);
-  };
-
-  const toggleEventHistoryGap = () => {
-    setHasEventHistoryGap(prev => !prev);
-  };
 
   return (
     <AppContext.Provider
@@ -69,9 +61,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         rawContractModalJob,
         setRawContractModalJob,
         isRuntimeStale,
-        toggleRuntimeStale,
+        setIsRuntimeStale,
         hasEventHistoryGap,
-        toggleEventHistoryGap,
+        setHasEventHistoryGap,
       }}
     >
       {children}

@@ -117,20 +117,44 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
     if errors or build is None or model_meta is None:
         raise ContractResolutionError("Contract resolution failed", errors)
 
-    input_shape = build.get("input_shape_json") or []
-    if isinstance(input_shape, str):
-        try:
-            input_shape = json.loads(input_shape)
-        except (json.JSONDecodeError, TypeError):
-            input_shape = []
+    raw_input_shape = build.get("input_shape_json")
+    if raw_input_shape is not None and raw_input_shape != "":
+        if isinstance(raw_input_shape, str):
+            try:
+                input_shape = json.loads(raw_input_shape)
+            except (json.JSONDecodeError, TypeError) as e:
+                raise ContractResolutionError(
+                    f"Malformed input_shape_json for dataset build "
+                    f"'{build['dataset_build_id']}': {e}"
+                ) from e
+        else:
+            input_shape = raw_input_shape
+        if not isinstance(input_shape, list):
+            raise ContractResolutionError(
+                f"input_shape_json for dataset build '{build['dataset_build_id']}' "
+                f"must decode to a list, got {type(input_shape).__name__}."
+            )
+    else:
+        input_shape = []
 
-    preprocessing = build.get("preprocessing_json") or {}
-    if isinstance(preprocessing, str):
-        try:
-            preprocessing = json.loads(preprocessing)
-        except (json.JSONDecodeError, TypeError):
-            preprocessing = {}
-    if not isinstance(preprocessing, dict):
+    raw_preprocessing = build.get("preprocessing_json")
+    if raw_preprocessing is not None and raw_preprocessing != "":
+        if isinstance(raw_preprocessing, str):
+            try:
+                preprocessing = json.loads(raw_preprocessing)
+            except (json.JSONDecodeError, TypeError) as e:
+                raise ContractResolutionError(
+                    f"Malformed preprocessing_json for dataset build "
+                    f"'{build['dataset_build_id']}': {e}"
+                ) from e
+        else:
+            preprocessing = raw_preprocessing
+        if not isinstance(preprocessing, dict):
+            raise ContractResolutionError(
+                f"preprocessing_json for dataset build '{build['dataset_build_id']}' "
+                f"must decode to an object/dict, got {type(preprocessing).__name__}."
+            )
+    else:
         preprocessing = {}
 
     if not preprocessing and build.get("manifest_snapshot_jsonb"):
@@ -138,10 +162,24 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
         if isinstance(snap, str):
             try:
                 snap = json.loads(snap)
-            except (json.JSONDecodeError, TypeError):
-                snap = {}
-        if isinstance(snap, dict) and isinstance(snap.get("preprocessing"), dict):
+            except (json.JSONDecodeError, TypeError) as e:
+                raise ContractResolutionError(
+                    f"Malformed manifest_snapshot_jsonb for dataset build "
+                    f"'{build['dataset_build_id']}': {e}"
+                ) from e
+        if not isinstance(snap, dict):
+            raise ContractResolutionError(
+                f"manifest_snapshot_jsonb for dataset build '{build['dataset_build_id']}' "
+                f"must decode to an object/dict, got {type(snap).__name__}."
+            )
+        if isinstance(snap.get("preprocessing"), dict):
             preprocessing = snap["preprocessing"]
+        elif "preprocessing" in snap and snap["preprocessing"] is not None:
+            raise ContractResolutionError(
+                f"manifest_snapshot_jsonb.preprocessing for dataset build "
+                f"'{build['dataset_build_id']}' must decode to an object/dict, "
+                f"got {type(snap['preprocessing']).__name__}."
+            )
 
     resolved_preprocessing: dict[str, Any] = dict(preprocessing)
 

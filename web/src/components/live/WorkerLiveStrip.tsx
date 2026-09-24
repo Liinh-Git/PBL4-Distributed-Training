@@ -10,6 +10,29 @@ interface WorkerLiveStripProps {
   onViewDetails: () => void;
 }
 
+interface WorkerVisualState {
+  dotClass: string;
+  label: string;
+}
+
+const WORKER_STATE_VISUALS: Record<string, WorkerVisualState> = {
+  CONNECTING: { dotClass: 'bg-zinc-400 animate-pulse', label: 'Connecting' },
+  REGISTERING: { dotClass: 'bg-blue-400 animate-pulse', label: 'Registering' },
+  PROVISIONING: { dotClass: 'bg-blue-400', label: 'Provisioning' },
+  SHARD_READY: { dotClass: 'bg-cyan-400', label: 'Shard Ready' },
+  MODEL_SYNCING: { dotClass: 'bg-indigo-400 animate-pulse', label: 'Model Syncing' },
+  READY: { dotClass: 'bg-emerald-400', label: 'Ready' },
+  RUNNING: { dotClass: 'bg-emerald-400', label: 'Running' },
+  DISCONNECTED: { dotClass: 'bg-zinc-500', label: 'Disconnected' },
+  FAILED: { dotClass: 'bg-rose-500', label: 'Failed' },
+};
+
+function getWorkerVisual(state: string | undefined): WorkerVisualState {
+  if (!state) return { dotClass: 'bg-zinc-500', label: 'Unknown' };
+  const key = state.toUpperCase();
+  return WORKER_STATE_VISUALS[key] || { dotClass: 'bg-zinc-400', label: state };
+}
+
 export const WorkerLiveStrip: React.FC<WorkerLiveStripProps> = ({
   currentStep,
   workers,
@@ -60,21 +83,24 @@ export const WorkerLiveStrip: React.FC<WorkerLiveStripProps> = ({
         {workers.map((worker) => {
           const contrib = contributions.find(c => c.workerId === worker.workerId);
           const hasReceived = isCommitted || contrib?.contributionAccepted;
+          const visual = getWorkerVisual(worker.state);
 
           return (
-            <div
+            <button
+              type="button"
               key={worker.workerId}
               onClick={() => onSelectWorker(worker)}
-              className="p-2.5 rounded bg-[#171719] hover:bg-[#1f1f23] transition-colors cursor-pointer flex items-center justify-between group"
+              aria-label={`Worker ${worker.workerId}, ${visual.label}, ${hasReceived ? 'contribution received' : 'waiting for contribution'}`}
+              className="p-2.5 rounded bg-[#171719] hover:bg-[#1f1f23] focus:outline-none focus:ring-1 focus:ring-blue-500/50 transition-colors cursor-pointer flex items-center justify-between group text-left w-full border-0"
             >
               <div className="flex items-center gap-2 min-w-0">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${visual.dotClass}`} />
                 <div className="min-w-0">
                   <div className="text-xs font-semibold text-[#f3f3f4] group-hover:text-white transition-colors">
                     Worker {worker.workerId}
                   </div>
                   <div className="text-[11px] text-[#73737c] truncate">
-                    Ready
+                    {visual.label}
                   </div>
                 </div>
               </div>
@@ -92,7 +118,7 @@ export const WorkerLiveStrip: React.FC<WorkerLiveStripProps> = ({
                   </span>
                 )}
               </div>
-            </div>
+            </button>
           );
         })}
       </div>

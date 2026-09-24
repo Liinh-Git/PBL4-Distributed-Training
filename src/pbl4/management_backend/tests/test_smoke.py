@@ -279,7 +279,8 @@ def test_websocket_route_registered(client):
 
 
 def test_list_dataset_builds_database_data_error_returns_500_without_leak(client):
-    """Verify that psycopg.DataError during dataset builds query returns 500 and does NOT leak DB internals."""
+    """Verify that psycopg.DataError during dataset builds query returns 500
+    and does NOT leak DB internals."""
     from unittest.mock import patch
 
     import psycopg
@@ -288,7 +289,9 @@ def test_list_dataset_builds_database_data_error_returns_500_without_leak(client
         patch("pbl4.management_backend.db.get_connection"),
         patch(
             "pbl4.management_backend.services.dataset_service.list_builds",
-            side_effect=psycopg.DataError("corrupted timestamp in table dataset_builds: 0000-00-00"),
+            side_effect=psycopg.DataError(
+                "corrupted timestamp in table dataset_builds: 0000-00-00"
+            ),
         ),
     ):
         res = client.get("/api/v1/dataset-builds")
@@ -306,7 +309,7 @@ def test_list_dataset_builds_database_data_error_returns_500_without_leak(client
 
 
 def test_list_dataset_builds_invalid_cursor_returns_400_invalid_cursor(client):
-    """Verify that a genuine client-side invalid cursor continues to return HTTP 400 INVALID_CURSOR."""
+    """Verify that a genuine client-side invalid cursor continues to return HTTP 400."""
     from unittest.mock import patch
 
     with patch("pbl4.management_backend.db.get_connection"):
@@ -323,6 +326,7 @@ def test_list_dataset_builds_invalid_cursor_returns_400_invalid_cursor(client):
 def test_join_spec_advertises_dtp_host_when_runtime_advertised_host_set():
     """Verify join-spec advertises RUNTIME_ADVERTISED_HOST as ps_host for multi-machine clusters."""
     from unittest.mock import MagicMock, patch
+
     from pbl4.management_backend.config import BackendSettings
     from pbl4.management_backend.services import attempt_service
 
@@ -348,7 +352,10 @@ def test_join_spec_advertises_dtp_host_when_runtime_advertised_host_set():
     mock_gw = MagicMock(connected=True)
 
     with (
-        patch("pbl4.management_backend.repositories.attempt_repository.get_attempt", return_value=mock_attempt),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.get_attempt",
+            return_value=mock_attempt,
+        ),
         patch("pbl4.management_backend.repositories.job_repository.get_job", return_value=mock_job),
         patch("pbl4.management_backend.services.attempt_service.get_gateway", return_value=mock_gw),
         patch("pbl4.management_backend.config.get_settings", return_value=custom_settings),
@@ -363,6 +370,7 @@ def test_join_spec_advertises_dtp_host_when_runtime_advertised_host_set():
 def test_join_spec_falls_back_to_runtime_host_when_advertised_host_not_set():
     """Verify join-spec falls back to RUNTIME_HOST when RUNTIME_ADVERTISED_HOST is not set."""
     from unittest.mock import MagicMock, patch
+
     from pbl4.management_backend.config import BackendSettings
     from pbl4.management_backend.services import attempt_service
 
@@ -387,7 +395,10 @@ def test_join_spec_falls_back_to_runtime_host_when_advertised_host_not_set():
     mock_gw = MagicMock(connected=True)
 
     with (
-        patch("pbl4.management_backend.repositories.attempt_repository.get_attempt", return_value=mock_attempt),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.get_attempt",
+            return_value=mock_attempt,
+        ),
         patch("pbl4.management_backend.repositories.job_repository.get_job", return_value=mock_job),
         patch("pbl4.management_backend.services.attempt_service.get_gateway", return_value=mock_gw),
         patch("pbl4.management_backend.config.get_settings", return_value=default_settings),

@@ -25,7 +25,7 @@ Before implementing any module, the responsible engineer or agent must consult t
 | `src/pbl4/runtime/*` | **02. Mô hình miền**, **03. Mô hình dữ liệu**, **04. Cấu trúc mã nguồn** |
 | `src/pbl4/worker/*` | **02. Mô hình miền**, **03. Mô hình dữ liệu**, **04. Cấu trúc mã nguồn** |
 | `src/pbl4/adapter/*` | **03. Mô hình dữ liệu**, **04. Cấu trúc mã nguồn** |
-| `src/pbl4/dataset_manager/*` | **02. Mô hình miền**, **03. Mô hình dữ liệu**, **04. Cấu trúc mã nguồn** |
+| Dataset Manager (external repo) | **02. Mô hình miền**, **03. Mô hình dữ liệu**, **04. Cấu trúc mã nguồn** |
 | `src/pbl4/management_backend/*` | **02. Mô hình miền**, **03. Mô hình dữ liệu**, **04. Cấu trúc mã nguồn** |
 | `web/*` | **02. Mô hình miền**, **04. Cấu trúc mã nguồn** |
 
@@ -37,7 +37,7 @@ Before implementing any module, the responsible engineer or agent must consult t
 |---|---|---|
 | `pbl4-runtime` | Parameter Server, training coordinator, DTP/1 server | DTP/1 (server), MCP/1 (endpoint) |
 | `pbl4-worker` | Training worker (forward/backward/gradient export) | DTP/1 (client), HTTP (shard download) |
-| `pbl4-dataset-manager` | Dataset ingestion, partitioning, shard serving | HTTP (server) |
+| Dataset Manager (external) | Standalone dataset ingestion, partitioning, shard serving | HTTP (server) |
 | `pbl4-backend` | Management Backend (REST API, PostgreSQL persistence, MCP/1 gateway) | HTTP/REST, WebSocket, MCP/1 (client) |
 | `pblctl` | CLI tool | HTTP/REST (to Management Backend) |
 | WebUI | React SPA | HTTP/REST, WebSocket (to Management Backend) |

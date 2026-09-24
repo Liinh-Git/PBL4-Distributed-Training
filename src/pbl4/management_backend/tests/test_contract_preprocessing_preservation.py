@@ -11,7 +11,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from pbl4.management_backend.app import create_app
-from pbl4.management_backend.services.contract_resolver import resolve
+from pbl4.management_backend.services.contract_resolver import (
+    ContractResolutionError,
+    resolve,
+)
 from pbl4.management_backend.services.model_catalog import (
     FakeModelMetadataProvider,
     get_model_metadata_provider,
@@ -267,3 +270,159 @@ def test_api_validate_job_preserves_custom_preprocessing(app_client):
         resolved_preview = data["resolved_preview"]
         assert resolved_preview is not None
         assert resolved_preview["dataset"]["preprocessing"] == custom_preprocessing
+
+
+# ─── Regression Tests: Malformed Contract Fields ──────────────────────────────
+
+
+def test_contract_resolver_malformed_input_shape_json_raises():
+    """Verify resolve() raises ContractResolutionError when input_shape_json is malformed JSON."""
+    conn = MagicMock()
+    mock_build = {
+        "dataset_build_id": "bad-shape-build",
+        "dataset_id": "ds-bad-shape",
+        "state": "READY",
+        "dataset_manifest_hash": "a" * 64,
+        "batch_size": 32,
+        "shard_count": 3,
+        "input_shape_json": "{not valid json",
+        "dtype": "float32",
+        "num_classes": 10,
+        "preprocessing_json": {},
+    }
+    req = {
+        "dataset_build_id": "bad-shape-build",
+        "model_id": "resnet18_groupnorm",
+        "training_strategy": "strict_bsp",
+        "epochs": 1,
+        "learning_rate": 0.01,
+        "training_seed": 42,
+    }
+
+    with (
+        patch(
+            "pbl4.management_backend.services.contract_resolver.dataset_build_repository.get_build",
+            return_value=mock_build,
+        ),
+        patch(
+            "pbl4.management_backend.services.contract_resolver._get_task_type",
+            return_value="image_classification",
+        ),
+        pytest.raises(ContractResolutionError, match="Malformed input_shape_json"),
+    ):
+        resolve(conn, req)
+
+
+def test_contract_resolver_non_list_input_shape_json_raises():
+    """Verify resolve() raises ContractResolutionError when input_shape_json is not a list."""
+    conn = MagicMock()
+    mock_build = {
+        "dataset_build_id": "bad-shape-build-2",
+        "dataset_id": "ds-bad-shape",
+        "state": "READY",
+        "dataset_manifest_hash": "a" * 64,
+        "batch_size": 32,
+        "shard_count": 3,
+        "input_shape_json": '{"not": "a list"}',
+        "dtype": "float32",
+        "num_classes": 10,
+        "preprocessing_json": {},
+    }
+    req = {
+        "dataset_build_id": "bad-shape-build-2",
+        "model_id": "resnet18_groupnorm",
+        "training_strategy": "strict_bsp",
+        "epochs": 1,
+        "learning_rate": 0.01,
+        "training_seed": 42,
+    }
+
+    with (
+        patch(
+            "pbl4.management_backend.services.contract_resolver.dataset_build_repository.get_build",
+            return_value=mock_build,
+        ),
+        patch(
+            "pbl4.management_backend.services.contract_resolver._get_task_type",
+            return_value="image_classification",
+        ),
+        pytest.raises(ContractResolutionError, match="must decode to a list"),
+    ):
+        resolve(conn, req)
+
+
+def test_contract_resolver_malformed_preprocessing_json_raises():
+    """Verify resolve() raises ContractResolutionError when preprocessing_json is malformed JSON."""
+    conn = MagicMock()
+    mock_build = {
+        "dataset_build_id": "bad-preproc-build",
+        "dataset_id": "ds-bad-preproc",
+        "state": "READY",
+        "dataset_manifest_hash": "b" * 64,
+        "batch_size": 32,
+        "shard_count": 3,
+        "input_shape_json": [3, 32, 32],
+        "dtype": "float32",
+        "num_classes": 10,
+        "preprocessing_json": "{broken json: true",
+    }
+    req = {
+        "dataset_build_id": "bad-preproc-build",
+        "model_id": "resnet18_groupnorm",
+        "training_strategy": "strict_bsp",
+        "epochs": 1,
+        "learning_rate": 0.01,
+        "training_seed": 42,
+    }
+
+    with (
+        patch(
+            "pbl4.management_backend.services.contract_resolver.dataset_build_repository.get_build",
+            return_value=mock_build,
+        ),
+        patch(
+            "pbl4.management_backend.services.contract_resolver._get_task_type",
+            return_value="image_classification",
+        ),
+        pytest.raises(ContractResolutionError, match="Malformed preprocessing_json"),
+    ):
+        resolve(conn, req)
+
+
+def test_contract_resolver_non_dict_preprocessing_json_raises():
+    """Verify resolve() raises ContractResolutionError when preprocessing_json is not a dict."""
+    conn = MagicMock()
+    mock_build = {
+        "dataset_build_id": "bad-preproc-build-2",
+        "dataset_id": "ds-bad-preproc",
+        "state": "READY",
+        "dataset_manifest_hash": "b" * 64,
+        "batch_size": 32,
+        "shard_count": 3,
+        "input_shape_json": [3, 32, 32],
+        "dtype": "float32",
+        "num_classes": 10,
+        "preprocessing_json": '["not", "a", "dict"]',
+    }
+    req = {
+        "dataset_build_id": "bad-preproc-build-2",
+        "model_id": "resnet18_groupnorm",
+        "training_strategy": "strict_bsp",
+        "epochs": 1,
+        "learning_rate": 0.01,
+        "training_seed": 42,
+    }
+
+    with (
+        patch(
+            "pbl4.management_backend.services.contract_resolver.dataset_build_repository.get_build",
+            return_value=mock_build,
+        ),
+        patch(
+            "pbl4.management_backend.services.contract_resolver._get_task_type",
+            return_value="image_classification",
+        ),
+        pytest.raises(ContractResolutionError, match="must decode to an object/dict"),
+    ):
+        resolve(conn, req)
+

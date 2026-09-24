@@ -23,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 
 
 def plan_topology(
@@ -30,6 +31,10 @@ def plan_topology(
     dtp_port: int | None,
     mcp_port: int | None,
     node_labels: list[str],
+    dataset_manager_url: str = "http://127.0.0.1:8001",
+    checkpoint_dir: str = "var/checkpoints",
+    parameter_manifest: str = "var/parameter-manifest.json",
+    initialization_seed: int = 42,
 ) -> None:
     """Print the intended multi-process cluster commands and topology."""
     dtp_display = str(dtp_port) if dtp_port is not None else "<configured-dtp-port>"
@@ -45,7 +50,10 @@ def plan_topology(
     print(f"  Management (MCP/1): {runtime_host}:{mcp_display}")
     print(
         f"  Command: uv run pbl4-runtime --host {runtime_host} "
-        f"--port {dtp_display} --management-port {mcp_display}"
+        f"--port {dtp_display} --management-port {mcp_display} "
+        f"--dataset-manager-url {dataset_manager_url} "
+        f"--checkpoint-dir {checkpoint_dir} "
+        f"--parameter-manifest {parameter_manifest}"
     )
     print("")
     print(f"Planned Workers ({len(node_labels)} nodes):")
@@ -56,7 +64,8 @@ def plan_topology(
         print(f"    Initial Identity: node_label='{label}' (worker_id assigned upon registration)")
         print(
             f"    Command: uv run pbl4-worker --node-label {label} "
-            f"--runtime-host {runtime_host} --runtime-port {dtp_display}"
+            f"--runtime-host {runtime_host} --runtime-port {dtp_display} "
+            f"--initialization-seed {initialization_seed}"
         )
         print("    Note: Uses identical DTP/1 TCP socket path regardless of assigned logical rank.")
 
@@ -102,6 +111,30 @@ def main() -> None:
         default=["node-a", "node-b", "node-c"],
         help="Node labels for planned workers (default: node-a node-b node-c)",
     )
+    parser.add_argument(
+        "--dataset-manager-url",
+        type=str,
+        default=os.environ.get("DATASET_MANAGER_URL", "http://127.0.0.1:8001"),
+        help="Dataset Manager HTTP service URL (default: DATASET_MANAGER_URL or http://127.0.0.1:8001)",
+    )
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=str,
+        default="var/checkpoints",
+        help="Directory path for canonical model checkpoints (default: var/checkpoints)",
+    )
+    parser.add_argument(
+        "--parameter-manifest",
+        type=str,
+        default="var/parameter-manifest.json",
+        help="Path to authoritative parameter manifest JSON (default: var/parameter-manifest.json)",
+    )
+    parser.add_argument(
+        "--initialization-seed",
+        type=int,
+        default=42,
+        help="Worker weight initialization seed (default: 42)",
+    )
     args = parser.parse_args()
 
     plan_topology(
@@ -109,6 +142,10 @@ def main() -> None:
         dtp_port=args.dtp_port,
         mcp_port=args.mcp_port,
         node_labels=args.nodes,
+        dataset_manager_url=args.dataset_manager_url,
+        checkpoint_dir=args.checkpoint_dir,
+        parameter_manifest=args.parameter_manifest,
+        initialization_seed=args.initialization_seed,
     )
 
 

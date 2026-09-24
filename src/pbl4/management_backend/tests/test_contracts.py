@@ -153,10 +153,13 @@ def test_contract_resolver_rejections():
 def test_worker_session_item_schema_strictness():
     """Verify that WorkerSessionItem strictly requires protocol_version and connected_at.
 
-    Neither field may be omitted or defaulted to prevent fabricating metadata or masking data corruption.
+    Neither field may be omitted or defaulted to prevent fabricating metadata
+    or masking data corruption.
     """
     from datetime import UTC, datetime
+
     from pydantic import ValidationError
+
     from pbl4.management_backend.schemas.attempt import WorkerSessionItem
 
     now = datetime.now(UTC)

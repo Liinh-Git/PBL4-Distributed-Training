@@ -14,8 +14,8 @@ The system uses a Parameter Server architecture organized around three distinct 
 
 ```
                           ┌───────────────────────────┐
-                          │   pbl4-dataset-manager    │
-                          │   (Partitioning & Serving)│
+                          │      Dataset Manager      │
+                          │   (Standalone Service)    │
                           └─────────────┬─────────────┘
                                ▲        │
             Verify Root Manifest        │ HTTP Shards
@@ -54,8 +54,8 @@ The system uses a Parameter Server architecture organized around three distinct 
    - Invariants: Management Backend down ≠ training down; Database down ≠ training down.
 
 2. **Dataset Provisioning Path:**
-   - Before an attempt enters `RUNNING`, Management Backend initiates partitioning on `pbl4-dataset-manager`.
-   - `pbl4-runtime` directly reads and verifies the root dataset manifest and content hash from `pbl4-dataset-manager`.
+   - Before an attempt enters `RUNNING`, Management Backend initiates partitioning on the standalone Dataset Manager service.
+   - `pbl4-runtime` directly reads and verifies the root dataset manifest and content hash from Dataset Manager.
    - Workers download their assigned shards via HTTP before training begins.
    - Once all workers confirm `SHARD_READY`, training commences and Dataset Manager is not contacted during training steps.
 
@@ -71,7 +71,7 @@ The system uses a Parameter Server architecture organized around three distinct 
 |---|---|---|
 | Runtime | `pbl4-runtime` | Parameter Server, coordinator, DTP/1 server, update engine |
 | Worker | `pbl4-worker` | Forward/backward pass, gradient export, parameter application |
-| Dataset Manager | `pbl4-dataset-manager` | Dataset ingestion, sharding, and artifact HTTP serving |
+| Dataset Manager | External Service | Standalone dataset ingestion, sharding, and artifact HTTP serving (configured via `DATASET_MANAGER_URL`) |
 | Management Backend | `pbl4-backend` | REST API, WebSocket gateway, PostgreSQL persistence |
 | CLI | `pblctl` | Command-line management tool (talks to Management Backend) |
 | WebUI | (in `web/`) | React monitoring dashboard (talks to Management Backend only) |

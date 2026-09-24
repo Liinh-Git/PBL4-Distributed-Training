@@ -67,7 +67,11 @@ def capabilities() -> ItemResponse[CapabilitiesResponse]:
         SupportedModel(
             model_id=str(m["model_id"]),
             display_name=str(m["display_name"]),
-            task_type=str(m["supported_tasks"][0]) if m.get("supported_tasks") else "image_classification",
+            task_type=(
+                str(m["supported_tasks"][0])
+                if m.get("supported_tasks")
+                else "image_classification"
+            ),
         )
         for m in model_catalog.list_models()
     ]

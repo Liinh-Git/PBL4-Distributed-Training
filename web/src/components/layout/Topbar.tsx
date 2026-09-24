@@ -4,6 +4,7 @@ import { ChevronRight, RefreshCw } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { systemService } from '../../api';
 import { HealthData } from '../../types/api';
+import { deriveHealthState } from '../../utils/health';
 
 export const Topbar: React.FC = () => {
   const location = useLocation();
@@ -31,11 +32,12 @@ export const Topbar: React.FC = () => {
     return () => clearInterval(timer);
   }, []);
 
-  // Contract: 'ok' | 'degraded' | 'down'. Also handle backend discrepancy 'healthy'.
-  const isHealthy = !healthError && !isRuntimeStale && (
-    health?.status === 'ok' || (health?.status as unknown as string) === 'healthy'
-  );
-  const isDegraded = !healthError && (health?.status === 'degraded' || isRuntimeStale);
+  const overallHealth = deriveHealthState(health, {
+    isRuntimeStale,
+    hasNetworkError: healthError,
+  });
+  const isHealthy = overallHealth === 'healthy';
+  const isDegraded = overallHealth === 'degraded';
 
   // Generate breadcrumb items
   const pathSegments = location.pathname.split('/').filter(Boolean);

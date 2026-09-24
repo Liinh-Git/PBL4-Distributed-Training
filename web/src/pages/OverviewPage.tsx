@@ -32,6 +32,7 @@ import {
   systemService,
 } from '../api';
 import { AttemptListItemData, HealthData } from '../types/api';
+import { deriveHealthState } from '../utils/health';
 
 interface ResourceState<T> {
   loading: boolean;
@@ -146,8 +147,7 @@ export const OverviewPage: React.FC = () => {
   }, []);
 
   const isHealthy =
-    !healthState.error &&
-    (healthState.data?.status === 'ok' || (healthState.data?.status as unknown as string) === 'healthy');
+    deriveHealthState(healthState.data, { hasNetworkError: healthState.error }) === 'healthy';
 
   const isTrainingActive = runningAttempt.data !== null && runningAttempt.data.state === 'RUNNING';
 

@@ -399,13 +399,18 @@ def test_init_client_wires_timeout_from_settings():
 def test_create_build_slow_dataset_manager_within_configured_timeout():
     """create_build succeeds with slow Dataset Manager within configured timeout."""
     import time
+
     from pbl4.management_backend.clients.dataset_manager import DatasetManagerClient
 
     def slow_handler(request: httpx.Request) -> httpx.Response:
         time.sleep(0.05)
         return httpx.Response(
             202,
-            json={"request_id": "req-slow", "data": {"dataset_build_id": "build-slow", "state": "CREATED"}, "error": None},
+            json={
+                "request_id": "req-slow",
+                "data": {"dataset_build_id": "build-slow", "state": "CREATED"},
+                "error": None,
+            },
         )
 
     client = DatasetManagerClient(
@@ -456,11 +461,12 @@ def test_create_build_timeout_enforcement_raises_unavailable():
 
 
 def test_idempotency_timeout_and_retry_flow_preserves_command_and_single_build(monkeypatch):
-    """Verify canonical 2-phase idempotency: timeout keeps command PENDING; retry reuses command_id."""
+    """Verify canonical 2-phase idempotency: timeout keeps command PENDING;
+    retry reuses command_id."""
+    import pbl4.management_backend.services.dataset_service as ds_mod
     from pbl4.management_backend.clients.dataset_manager import (
         DatasetManagerUnavailableError,
     )
-    import pbl4.management_backend.services.dataset_service as ds_mod
 
     created_commands = []
     updated_command_states = []
@@ -522,7 +528,9 @@ def test_idempotency_timeout_and_retry_flow_preserves_command_and_single_build(m
     monkeypatch.setattr(ds_mod.dataset_repository, "get_dataset", mock_get_dataset)
     monkeypatch.setattr(ds_mod.command_repository, "create_command", mock_create_command)
     monkeypatch.setattr(ds_mod.command_repository, "get_command", mock_get_command)
-    monkeypatch.setattr(ds_mod.command_repository, "update_command_state", mock_update_command_state)
+    monkeypatch.setattr(
+        ds_mod.command_repository, "update_command_state", mock_update_command_state
+    )
     monkeypatch.setattr(ds_mod.dataset_build_repository, "create_build", mock_create_build)
     monkeypatch.setattr(ds_mod.dataset_build_repository, "get_build", mock_get_build)
 
@@ -557,7 +565,7 @@ def test_idempotency_timeout_and_retry_flow_preserves_command_and_single_build(m
     assert len(persisted_builds) == 0  # No build created yet
 
     # 2. Second attempt: same idempotency key and same body
-    build_row, cmd_row = ds_mod.execute_create_build(
+    _build_row, _cmd_row = ds_mod.execute_create_build(
         FakeDB,
         dataset_id="ds_test",
         profile="CNN_IMAGE_CLASSIFICATION_V1",

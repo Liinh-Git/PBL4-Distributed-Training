@@ -54,7 +54,7 @@ export const CompactSyncViz: React.FC<CompactSyncVizProps> = ({
 
       {/* Flat worker rows with subtle separators */}
       <div className="divide-y divide-white/[0.04] pt-1">
-        {workers.map((w, idx) => {
+        {workers.map((w) => {
           const contrib = contributions.find(c => c.workerId === w.workerId);
           const received = isCommitted || contrib?.contributionAccepted;
 
@@ -63,7 +63,7 @@ export const CompactSyncViz: React.FC<CompactSyncVizProps> = ({
               key={w.workerId}
               className="flex items-center justify-between py-2 text-xs"
             >
-              <span className="text-[#f3f3f4]">Worker {idx}</span>
+              <span className="text-[#f3f3f4]">Worker {w.workerId}</span>
               <span className={received ? 'text-[#a1a1a8]' : 'text-amber-400'}>
                 {received ? 'Received' : 'Waiting'}
               </span>

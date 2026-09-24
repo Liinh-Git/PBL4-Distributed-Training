@@ -17,6 +17,7 @@ import { EventDetailDrawer } from '../components/drawers/EventDetailDrawer';
 import { DiagnosticEvent, WorkerSession } from '../types';
 import { systemService, eventsService, attemptsService, workersService } from '../api';
 import { HealthData, CapabilitiesData, EventListItemData, WorkerSessionItemData } from '../types/api';
+import { deriveHealthState, mapSubsystemStatus } from '../utils/health';
 import { config } from '../config';
 
 export const SystemPage: React.FC = () => {
@@ -81,27 +82,14 @@ export const SystemPage: React.FC = () => {
     fetchSystemData();
   }, []);
 
-  const isHealthy = !isRuntimeStale && (
-    healthData?.status === 'ok' || (healthData?.status as unknown as string) === 'healthy'
-  );
+  const isHealthy = deriveHealthState(healthData, { isRuntimeStale }) === 'healthy';
 
-  // Map dependencies from Health API with graceful fallbacks
+  // Map dependencies from real Health API fields
   const coreServices = useMemo(() => {
-    const deps = healthData?.dependencies || {};
-    const backendStatus: 'HEALTHY' | 'DEGRADED' | 'DOWN' =
-      healthData?.status === 'ok' || (healthData?.status as unknown as string) === 'healthy'
-        ? 'HEALTHY'
-        : healthData?.status === 'degraded'
-        ? 'DEGRADED'
-        : 'DOWN';
-
-    const getDepStatus = (depKey: string): 'HEALTHY' | 'DEGRADED' | 'DOWN' => {
-      const d = deps[depKey];
-      if (!d) return backendStatus;
-      if (d.status === 'ok' || (d.status as unknown as string) === 'healthy') return 'HEALTHY';
-      if (d.status === 'degraded') return 'DEGRADED';
-      return 'DOWN';
-    };
+    const backendStatus = mapSubsystemStatus(healthData?.backend);
+    const postgresStatus = mapSubsystemStatus(healthData?.postgres);
+    const runtimeStatus = isRuntimeStale ? 'DEGRADED' : mapSubsystemStatus(healthData?.runtime_mcp);
+    const dmStatus = mapSubsystemStatus(healthData?.dataset_manager);
 
     return [
       {
@@ -109,32 +97,32 @@ export const SystemPage: React.FC = () => {
         name: 'Backend API',
         status: backendStatus,
         lastSeen: 'now',
-        latency: deps.backend?.latency_ms ? `${deps.backend.latency_ms} ms` : '< 2 ms',
+        latency: '< 2 ms',
         protocol: 'HTTP/2 REST',
       },
       {
         id: 'runtime',
         name: 'Coordinator Runtime',
-        status: isRuntimeStale ? ('DEGRADED' as const) : getDepStatus('runtime'),
+        status: runtimeStatus,
         lastSeen: isRuntimeStale ? 'Stale' : 'now',
-        latency: deps.runtime?.latency_ms ? `${deps.runtime.latency_ms} ms` : '< 3 ms',
+        latency: '< 3 ms',
         protocol: 'WebSocket v1.2 / DTP/1',
       },
       {
         id: 'database',
         name: 'PostgreSQL Database',
-        status: getDepStatus('database'),
+        status: postgresStatus,
         lastSeen: 'now',
-        latency: deps.database?.latency_ms ? `${deps.database.latency_ms} ms` : '< 1 ms',
+        latency: '< 1 ms',
         protocol: 'PostgreSQL 16',
       },
       {
         id: 'dataset_mgr',
         name: 'Dataset Manager',
-        status: getDepStatus('dataset_manager'),
+        status: dmStatus,
         lastSeen: 'now',
-        latency: deps.dataset_manager?.latency_ms ? `${deps.dataset_manager.latency_ms} ms` : '< 4 ms',
-        protocol: 'POSIX / Local FS',
+        latency: '< 4 ms',
+        protocol: 'HTTP Service',
       },
     ];
   }, [healthData, isRuntimeStale]);

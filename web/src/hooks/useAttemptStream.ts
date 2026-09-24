@@ -4,7 +4,8 @@
  * Source of Truth: API_contract.md (24.0, 25.0, 27.0 - 31.0, 34.0, 35.0, 39.0)
  */
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useContext } from 'react';
+import { AppContext } from '../context/AppContext';
 import { config } from '../config';
 import {
   attemptsService,
@@ -47,6 +48,7 @@ export interface UseAttemptStreamResult {
 }
 
 export function useAttemptStream(attemptId: string | null): UseAttemptStreamResult {
+  const appContext = useContext(AppContext);
   const [connectionState, setConnectionState] = useState<StreamConnectionState>('IDLE');
   const [attempt, setAttempt] = useState<AttemptDetailData | null>(null);
   const [snapshot, setSnapshot] = useState<AttemptSnapshotData | null>(null);
@@ -57,6 +59,19 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
   const [gapDetected, setGapDetected] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Sync live stale/gap indicators into AppContext
+  useEffect(() => {
+    if (appContext) {
+      appContext.setIsRuntimeStale(isStale);
+    }
+  }, [isStale, appContext]);
+
+  useEffect(() => {
+    if (appContext) {
+      appContext.setHasEventHistoryGap(gapDetected);
+    }
+  }, [gapDetected, appContext]);
 
   // References for connection management
   const wsRef = useRef<WebSocket | null>(null);
@@ -357,7 +372,13 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
       setWorkers([]);
       setSteps([]);
       setEvents([]);
+      setIsStale(false);
+      setGapDetected(false);
       setLoading(false);
+      if (appContext) {
+        appContext.setIsRuntimeStale(false);
+        appContext.setHasEventHistoryGap(false);
+      }
     }
 
     return () => {
@@ -369,8 +390,12 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
         wsRef.current.close();
         wsRef.current = null;
       }
+      if (appContext) {
+        appContext.setIsRuntimeStale(false);
+        appContext.setHasEventHistoryGap(false);
+      }
     };
-  }, [attemptId, loadInitialRestState, connectWebSocket]);
+  }, [attemptId, loadInitialRestState, connectWebSocket, appContext]);
 
   /**
    * Action: Manual Checkpoint Request (API 34.0)
