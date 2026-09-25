@@ -45,10 +45,24 @@ def main() -> None:
     parser.add_argument("--initialization-seed", type=int, required=True)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--heartbeat-interval", type=float, default=5.0)
+    parser.add_argument("--attempt-id", default=None, help="Managed execution attempt ID.")
+    parser.add_argument("--allocation-id", default=None, help="Managed worker allocation ID.")
+    parser.add_argument("--node-id", default=None, help="Managed node ID.")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
     if args.runtime_port is None:
         parser.error("--runtime-port is required")
+
+    import os
+
+    join_token = os.getenv("PBL4_WORKER_JOIN_TOKEN")
+    managed_items = (args.attempt_id, args.allocation_id, args.node_id, join_token)
+    if any(item is not None for item in managed_items):
+        if not all(isinstance(item, str) and item for item in managed_items):
+            parser.error(
+                "When running with managed identity, --attempt-id, --allocation-id, "
+                "--node-id, and PBL4_WORKER_JOIN_TOKEN environment variable must all be provided"
+            )
 
     from pbl4.worker.config import WorkerConfig
     from pbl4.worker.process import WorkerProcess
@@ -65,6 +79,10 @@ def main() -> None:
             cache_dir=args.cache_dir,
             heartbeat_interval_seconds=args.heartbeat_interval,
             log_level=args.log_level,
+            attempt_id=args.attempt_id,
+            allocation_id=args.allocation_id,
+            node_id=args.node_id,
+            worker_join_token=join_token,
         ),
         initialization_seed=args.initialization_seed,
         device=args.device,

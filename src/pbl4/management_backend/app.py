@@ -10,6 +10,8 @@ Important boundary:
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import uuid
 from collections.abc import AsyncGenerator, Callable
@@ -28,6 +30,11 @@ from pbl4.management_backend.clients.dataset_manager import (
     DatasetManagerUnavailableError,
 )
 from pbl4.management_backend.gateways.runtime_gateway import DatabaseUnavailableError
+from pbl4.management_backend.services.allocation_service import (
+    AllocationNotFoundError,
+    AllocationStateError,
+    WorkerAdmissionConfigError,
+)
 from pbl4.management_backend.services.attempt_service import (
     AttemptConflictError,
     AttemptDataIntegrityError,
@@ -40,6 +47,9 @@ from pbl4.management_backend.services.attempt_service import (
     CommandRejectedError,
     JobNotReadyError,
     RuntimeUnavailableError,
+)
+from pbl4.management_backend.services.cluster_scheduler import (
+    NodeCapacityUnavailableError,
 )
 from pbl4.management_backend.services.command_service import CommandNotFoundError
 from pbl4.management_backend.services.contract_resolver import ContractResolutionError
@@ -60,15 +70,57 @@ from pbl4.management_backend.services.job_service import (
     JobStateError,
     JobValidationError,
 )
+from pbl4.management_backend.services.node_enrollment_service import (
+    NodeEnrollmentCodeExpiredError,
+    NodeEnrollmentCodeInvalidError,
+)
+from pbl4.management_backend.services.node_service import (
+    NodeNotFoundError,
+    NodeOfflineError,
+    NodeRevokedError,
+    NodeUnauthorizedError,
+)
 
 logger = logging.getLogger(__name__)
 
 
+async def _node_maintenance_loop(settings: Any) -> None:
+    """Periodic background maintenance loop for node heartbeat stale detection and worker start timeouts."""
+    interval = max(float(settings.node_heartbeat_interval_seconds), 1.0)
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            if settings.database_url:
+                try:
+                    from pbl4.management_backend import db
+                    from pbl4.management_backend.services import (
+                        allocation_service,
+                        node_service,
+                    )
+
+                    with db.transaction() as conn:
+                        node_service.mark_stale_nodes(
+                            conn,
+                            timeout_seconds=settings.node_heartbeat_timeout_seconds,
+                        )
+                        allocation_service.fail_timed_out_dispatched_allocations(
+                            conn,
+                            timeout_seconds=settings.worker_start_timeout_seconds,
+                        )
+                except Exception as exc:
+                    logger.error("Error in node maintenance loop: %s", exc)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.error("Unexpected error in node maintenance worker: %s", exc)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """FastAPI lifespan: initialize DB pool + runtime gateway on startup, clean up on shutdown."""
+    """FastAPI lifespan: initialize DB pool, gateways, maintenance tasks, and cleanup on shutdown."""
     from pbl4.management_backend import db
     from pbl4.management_backend.config import get_settings
+    from pbl4.management_backend.gateways.node_control_gateway import init_node_control_gateway
     from pbl4.management_backend.gateways.runtime_gateway import init_gateway
 
     settings = get_settings()
@@ -89,6 +141,12 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         port=settings.runtime_management_port,
     )
 
+    # Initialize node control gateway
+    node_control_gateway = init_node_control_gateway()
+
+    # Start periodic node & allocation maintenance loop
+    maintenance_task = asyncio.create_task(_node_maintenance_loop(settings))
+
     # Initialize Dataset Manager client
     from pbl4.management_backend.clients.dataset_manager import init_client
 
@@ -101,6 +159,12 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
 
     # Shutdown
+    maintenance_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await maintenance_task
+
+    await node_control_gateway.close_all_connections()
+
     from pbl4.management_backend.gateways.runtime_gateway import get_gateway
 
     get_gateway().port.disconnect()
@@ -504,6 +568,67 @@ def create_app() -> FastAPI:
             request,
         )
 
+    # ─── Node & Allocation Exception Handlers ─────────────────────────────────
+    @app.exception_handler(NodeEnrollmentCodeInvalidError)
+    async def node_enrollment_code_invalid_handler(
+        request: Request, exc: NodeEnrollmentCodeInvalidError
+    ) -> JSONResponse:
+        return _error_response(400, exc.code, str(exc), request)
+
+    @app.exception_handler(NodeEnrollmentCodeExpiredError)
+    async def node_enrollment_code_expired_handler(
+        request: Request, exc: NodeEnrollmentCodeExpiredError
+    ) -> JSONResponse:
+        return _error_response(400, exc.code, str(exc), request)
+
+    @app.exception_handler(NodeUnauthorizedError)
+    async def node_unauthorized_handler(
+        request: Request, exc: NodeUnauthorizedError
+    ) -> JSONResponse:
+        return _error_response(401, exc.code, str(exc), request)
+
+    @app.exception_handler(NodeRevokedError)
+    async def node_revoked_handler(
+        request: Request, exc: NodeRevokedError
+    ) -> JSONResponse:
+        return _error_response(409, exc.code, str(exc), request)
+
+    @app.exception_handler(NodeOfflineError)
+    async def node_offline_handler(
+        request: Request, exc: NodeOfflineError
+    ) -> JSONResponse:
+        return _error_response(409, exc.code, str(exc), request)
+
+    @app.exception_handler(NodeCapacityUnavailableError)
+    async def node_capacity_unavailable_handler(
+        request: Request, exc: NodeCapacityUnavailableError
+    ) -> JSONResponse:
+        return _error_response(409, exc.code, str(exc), request)
+
+    @app.exception_handler(NodeNotFoundError)
+    async def node_not_found_handler(
+        request: Request, exc: NodeNotFoundError
+    ) -> JSONResponse:
+        return _error_response(404, "NOT_FOUND", str(exc), request)
+
+    @app.exception_handler(AllocationNotFoundError)
+    async def allocation_not_found_handler(
+        request: Request, exc: AllocationNotFoundError
+    ) -> JSONResponse:
+        return _error_response(404, "NOT_FOUND", str(exc), request)
+
+    @app.exception_handler(AllocationStateError)
+    async def allocation_state_handler(
+        request: Request, exc: AllocationStateError
+    ) -> JSONResponse:
+        return _error_response(409, exc.code, str(exc), request)
+
+    @app.exception_handler(WorkerAdmissionConfigError)
+    async def worker_admission_config_handler(
+        request: Request, exc: WorkerAdmissionConfigError
+    ) -> JSONResponse:
+        return _error_response(500, exc.code, str(exc), request)
+
     # CORS — allow origins from settings
     app.add_middleware(
         CORSMiddleware,
@@ -520,6 +645,7 @@ def create_app() -> FastAPI:
     from pbl4.management_backend.api.datasets import router as datasets_router
     from pbl4.management_backend.api.events import router as events_router
     from pbl4.management_backend.api.jobs import router as jobs_router
+    from pbl4.management_backend.api.nodes import router as nodes_router
     from pbl4.management_backend.api.runtime import router as runtime_router
     from pbl4.management_backend.api.system import router as system_router
 
@@ -531,6 +657,7 @@ def create_app() -> FastAPI:
     app.include_router(checkpoints_router)
     app.include_router(events_router)
     app.include_router(commands_router)
+    app.include_router(nodes_router)
 
     # ─── WebSocket routes ─────────────────────────────────────────────────────
     from pbl4.management_backend.websocket import register_websocket_routes

@@ -202,11 +202,18 @@ class StateSnapshot(McpPayload):
             "shard_id": ("nullable", "nonnegative_int"),
             "local_model_version": ("nullable", "nonnegative_int"),
         }
+        optional_worker = {
+            "node_id": ("nullable", "string"),
+            "allocation_id": ("nullable", "string"),
+        }
         for worker in data["workers"]:
             if not isinstance(worker, dict) or not set(required_worker) <= set(worker):
                 raise ProtocolError("STATE_SNAPSHOT worker projection has invalid fields")
             if any(not _valid(worker[name], kind) for name, kind in required_worker.items()):
                 raise ProtocolError("STATE_SNAPSHOT worker projection has invalid field types")
+            for name, kind in optional_worker.items():
+                if name in worker and not _valid(worker[name], kind):
+                    raise ProtocolError(f"STATE_SNAPSHOT worker projection field '{name}' has invalid type")
             _validate_json(worker, "payload.workers")
 
 

@@ -29,6 +29,8 @@ def upsert_session(
     last_heartbeat_at: datetime | None = None,
     disconnected_at: datetime | None = None,
     failure_code: str | None = None,
+    node_id: str | None = None,
+    allocation_id: str | None = None,
 ) -> dict:
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -36,8 +38,9 @@ def upsert_session(
             INSERT INTO worker_sessions (
                 session_id, attempt_id, worker_id, node_label,
                 protocol_version, state, connected_at,
-                last_heartbeat_at, disconnected_at, failure_code
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                last_heartbeat_at, disconnected_at, failure_code,
+                node_id, allocation_id
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (session_id) DO UPDATE SET
                 state = EXCLUDED.state,
                 last_heartbeat_at = COALESCE(
@@ -48,6 +51,12 @@ def upsert_session(
                 ),
                 failure_code = COALESCE(
                     EXCLUDED.failure_code, worker_sessions.failure_code
+                ),
+                node_id = COALESCE(
+                    EXCLUDED.node_id, worker_sessions.node_id
+                ),
+                allocation_id = COALESCE(
+                    EXCLUDED.allocation_id, worker_sessions.allocation_id
                 )
             RETURNING *
             """,
@@ -62,6 +71,8 @@ def upsert_session(
                 last_heartbeat_at,
                 disconnected_at,
                 failure_code,
+                node_id,
+                allocation_id,
             ),
         )
         row = cur.fetchone()
@@ -122,6 +133,8 @@ def update_snapshot_projection(
     node_label: str,
     state: str,
     last_heartbeat_at: datetime | None,
+    node_id: str | None = None,
+    allocation_id: str | None = None,
 ) -> dict | None:
     """Update fields carried by canonical MCP without inventing session metadata.
 
@@ -134,11 +147,13 @@ def update_snapshot_projection(
             UPDATE worker_sessions
             SET node_label = %s,
                 state = %s,
-                last_heartbeat_at = COALESCE(%s, last_heartbeat_at)
+                last_heartbeat_at = COALESCE(%s, last_heartbeat_at),
+                node_id = COALESCE(%s, node_id),
+                allocation_id = COALESCE(%s, allocation_id)
             WHERE session_id = %s AND attempt_id = %s AND worker_id = %s
             RETURNING *
             """,
-            (node_label, state, last_heartbeat_at, session_id, attempt_id, worker_id),
+            (node_label, state, last_heartbeat_at, node_id, allocation_id, session_id, attempt_id, worker_id),
         )
         row = cur.fetchone()
     return _row_to_dict(row) if row else None

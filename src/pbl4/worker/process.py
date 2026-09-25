@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -74,15 +75,25 @@ class WorkerProcess:
         self._last_step: int | None = None
         self._epoch = 0
         self._next_batch_ordinal = 0
+        self._client_instance_id = str(uuid.uuid4())
         self._client = WorkerClient(
             config.runtime_host,
             config.runtime_port,
             node_label=config.node_label,
             manifest=self._adapter.manifest,
+            client_instance_id=self._client_instance_id,
+            attempt_id=config.attempt_id,
+            allocation_id=config.allocation_id,
+            node_id=config.node_id,
+            worker_join_token=config.worker_join_token,
             message_handler=self._on_message,
             parameter_handler=self._on_parameters,
             disconnect_handler=self._on_disconnect,
         )
+
+    @property
+    def client_instance_id(self) -> str:
+        return self._client_instance_id
 
     @property
     def manifest_hash(self) -> str:
