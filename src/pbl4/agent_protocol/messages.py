@@ -7,11 +7,11 @@ runtime, worker, database libraries, torch, or web frameworks.
 
 from __future__ import annotations
 
+import json
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-import json
 from typing import Any
-import uuid
 
 from pbl4.common.errors import ProtocolError
 
@@ -121,10 +121,13 @@ class ActiveAllocationItem:
             raise AgentMessageError("attempt_id must be a non-empty string")
         if self.local_state not in ACTIVE_ALLOCATION_LOCAL_STATES:
             raise AgentMessageError(
-                f"active_allocations local_state must be STARTING or RUNNING, got '{self.local_state}'. "
+                "active_allocations local_state must be STARTING or RUNNING, "
+                f"got '{self.local_state}'. "
                 "STOPPED/FAILED allocations must not be advertised as active."
             )
-        if self.pid is not None and (not isinstance(self.pid, int) or isinstance(self.pid, bool) or self.pid <= 0):
+        if self.pid is not None and (
+            not isinstance(self.pid, int) or isinstance(self.pid, bool) or self.pid <= 0
+        ):
             raise AgentMessageError("pid must be a positive integer or None")
 
     def to_dict(self) -> dict[str, Any]:
@@ -196,9 +199,15 @@ class HelloAckPayload:
     telemetry_interval_seconds: float
 
     def __post_init__(self) -> None:
-        if not isinstance(self.heartbeat_interval_seconds, (int, float)) or self.heartbeat_interval_seconds <= 0:
+        if (
+            not isinstance(self.heartbeat_interval_seconds, (int, float))
+            or self.heartbeat_interval_seconds <= 0
+        ):
             raise AgentMessageError("heartbeat_interval_seconds must be a positive number")
-        if not isinstance(self.telemetry_interval_seconds, (int, float)) or self.telemetry_interval_seconds <= 0:
+        if (
+            not isinstance(self.telemetry_interval_seconds, (int, float))
+            or self.telemetry_interval_seconds <= 0
+        ):
             raise AgentMessageError("telemetry_interval_seconds must be a positive number")
 
     def to_dict(self) -> dict[str, Any]:
@@ -256,14 +265,20 @@ class GpuSnapshotItem:
     def __post_init__(self) -> None:
         if not isinstance(self.index, int) or isinstance(self.index, bool) or self.index < 0:
             raise AgentMessageError("gpu index must be a non-negative integer")
-        if self.gpu_utilization_pct is not None and not isinstance(self.gpu_utilization_pct, (int, float)):
+        if self.gpu_utilization_pct is not None and not isinstance(
+            self.gpu_utilization_pct, (int, float)
+        ):
             raise AgentMessageError("gpu_utilization_pct must be numeric or None")
         if self.vram_used_bytes is not None and (
-            not isinstance(self.vram_used_bytes, int) or isinstance(self.vram_used_bytes, bool) or self.vram_used_bytes < 0
+            not isinstance(self.vram_used_bytes, int)
+            or isinstance(self.vram_used_bytes, bool)
+            or self.vram_used_bytes < 0
         ):
             raise AgentMessageError("vram_used_bytes must be a non-negative integer or None")
         if self.vram_total_bytes is not None and (
-            not isinstance(self.vram_total_bytes, int) or isinstance(self.vram_total_bytes, bool) or self.vram_total_bytes < 0
+            not isinstance(self.vram_total_bytes, int)
+            or isinstance(self.vram_total_bytes, bool)
+            or self.vram_total_bytes < 0
         ):
             raise AgentMessageError("vram_total_bytes must be a non-negative integer or None")
 
@@ -358,7 +373,9 @@ class StartWorkerPayload:
 
     def __post_init__(self) -> None:
         if self.command_type != COMMAND_TYPE_START_WORKER:
-            raise AgentMessageError(f"Expected command_type '{COMMAND_TYPE_START_WORKER}', got '{self.command_type}'")
+            raise AgentMessageError(
+                f"Expected command_type '{COMMAND_TYPE_START_WORKER}', got '{self.command_type}'"
+            )
         if not isinstance(self.command_id, str) or not self.command_id:
             raise AgentMessageError("command_id must be a non-empty string")
         if not isinstance(self.allocation_id, str) or not self.allocation_id:
@@ -367,11 +384,18 @@ class StartWorkerPayload:
             raise AgentMessageError("attempt_id must be a non-empty string")
         if not isinstance(self.runtime_host, str) or not self.runtime_host:
             raise AgentMessageError("runtime_host must be a non-empty string")
-        if not isinstance(self.runtime_port, int) or isinstance(self.runtime_port, bool) or self.runtime_port <= 0 or self.runtime_port > 65535:
+        if (
+            not isinstance(self.runtime_port, int)
+            or isinstance(self.runtime_port, bool)
+            or self.runtime_port <= 0
+            or self.runtime_port > 65535
+        ):
             raise AgentMessageError("runtime_port must be an integer between 1 and 65535")
         if not isinstance(self.device, str) or not self.device:
             raise AgentMessageError("device must be a non-empty string (e.g. 'cpu', 'cuda:0')")
-        if not isinstance(self.initialization_seed, int) or isinstance(self.initialization_seed, bool):
+        if not isinstance(self.initialization_seed, int) or isinstance(
+            self.initialization_seed, bool
+        ):
             raise AgentMessageError("initialization_seed must be an integer")
         if not isinstance(self.worker_join_token, str) or not self.worker_join_token:
             raise AgentMessageError("worker_join_token must be a non-empty string")
@@ -432,7 +456,9 @@ class StopWorkerPayload:
 
     def __post_init__(self) -> None:
         if self.command_type != COMMAND_TYPE_STOP_WORKER:
-            raise AgentMessageError(f"Expected command_type '{COMMAND_TYPE_STOP_WORKER}', got '{self.command_type}'")
+            raise AgentMessageError(
+                f"Expected command_type '{COMMAND_TYPE_STOP_WORKER}', got '{self.command_type}'"
+            )
         if not isinstance(self.command_id, str) or not self.command_id:
             raise AgentMessageError("command_id must be a non-empty string")
         if not isinstance(self.allocation_id, str) or not self.allocation_id:
@@ -528,7 +554,9 @@ class WorkerStatusPayload:
             raise AgentMessageError(
                 f"actual_state must be STARTED, ENDED, or FAILED, got '{self.actual_state}'"
             )
-        if self.exit_code is not None and (not isinstance(self.exit_code, int) or isinstance(self.exit_code, bool)):
+        if self.exit_code is not None and (
+            not isinstance(self.exit_code, int) or isinstance(self.exit_code, bool)
+        ):
             raise AgentMessageError("exit_code must be an integer or None")
         if self.failure_code is not None and not isinstance(self.failure_code, str):
             raise AgentMessageError("failure_code must be string or None")
@@ -614,9 +642,7 @@ class AgentEnvelope:
 
     def to_dict(self, *, redact: bool = False) -> dict[str, Any]:
         """Convert envelope to dictionary. Redacts secrets if redact=True."""
-        if isinstance(self.payload, StartWorkerPayload):
-            payload_dict = self.payload.to_dict(redact=redact)
-        elif isinstance(self.payload, StopWorkerPayload):
+        if isinstance(self.payload, (StartWorkerPayload, StopWorkerPayload)):
             payload_dict = self.payload.to_dict(redact=redact)
         elif hasattr(self.payload, "to_dict"):
             payload_dict = self.payload.to_dict()
@@ -645,7 +671,7 @@ class AgentEnvelope:
 
 
 def _check_forbidden_data_plane_fields(obj: Any) -> None:
-    """Recursively ensure that no gradient, parameter, or tensor fields exist on the control wire."""
+    """Reject gradient, parameter, and tensor fields on the control wire."""
     if isinstance(obj, dict):
         for k, v in obj.items():
             k_lower = str(k).lower()
@@ -677,7 +703,9 @@ def parse_agent_envelope(data: str | bytes | dict[str, Any]) -> AgentEnvelope:
     elif isinstance(data, dict):
         raw_dict = data
     else:
-        raise AgentMessageError(f"Expected str, bytes, or dict for agent envelope, got {type(data).__name__}")
+        raise AgentMessageError(
+            f"Expected str, bytes, or dict for agent envelope, got {type(data).__name__}"
+        )
 
     if not isinstance(raw_dict, dict):
         raise AgentMessageError("Agent envelope must be a JSON object")
@@ -685,7 +713,9 @@ def parse_agent_envelope(data: str | bytes | dict[str, Any]) -> AgentEnvelope:
     # Reject unknown root keys
     unknown_keys = set(raw_dict.keys()) - ALLOWED_ENVELOPE_ROOT_KEYS
     if unknown_keys:
-        raise AgentMessageError(f"Unknown root field(s) in agent envelope: {', '.join(sorted(unknown_keys))}")
+        raise AgentMessageError(
+            f"Unknown root field(s) in agent envelope: {', '.join(sorted(unknown_keys))}"
+        )
 
     # Check for forbidden tensor / gradient fields anywhere in the message
     _check_forbidden_data_plane_fields(raw_dict)

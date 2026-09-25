@@ -28,13 +28,25 @@ class NodeAgentConfig:
             raise ValueError("backend_url must be a non-empty string")
         if not isinstance(self.var_dir, str) or not self.var_dir.strip():
             raise ValueError("var_dir must be a non-empty string")
-        if not isinstance(self.heartbeat_interval_seconds, (int, float)) or self.heartbeat_interval_seconds <= 0:
+        if (
+            not isinstance(self.heartbeat_interval_seconds, (int, float))
+            or self.heartbeat_interval_seconds <= 0
+        ):
             raise ValueError("heartbeat_interval_seconds must be a positive number")
-        if not isinstance(self.telemetry_interval_seconds, (int, float)) or self.telemetry_interval_seconds <= 0:
+        if (
+            not isinstance(self.telemetry_interval_seconds, (int, float))
+            or self.telemetry_interval_seconds <= 0
+        ):
             raise ValueError("telemetry_interval_seconds must be a positive number")
-        if not isinstance(self.reconnect_min_seconds, (int, float)) or self.reconnect_min_seconds <= 0:
+        if (
+            not isinstance(self.reconnect_min_seconds, (int, float))
+            or self.reconnect_min_seconds <= 0
+        ):
             raise ValueError("reconnect_min_seconds must be a positive number")
-        if not isinstance(self.reconnect_max_seconds, (int, float)) or self.reconnect_max_seconds < self.reconnect_min_seconds:
+        if (
+            not isinstance(self.reconnect_max_seconds, (int, float))
+            or self.reconnect_max_seconds < self.reconnect_min_seconds
+        ):
             raise ValueError("reconnect_max_seconds must be >= reconnect_min_seconds")
         if self.log_level.upper() not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             raise ValueError(f"Invalid log_level: {self.log_level}")
@@ -42,7 +54,9 @@ class NodeAgentConfig:
     @classmethod
     def from_env(cls, **overrides: object) -> NodeAgentConfig:
         """Create NodeAgentConfig reading default values from environment variables."""
-        backend_url = overrides.get("backend_url") or os.getenv("PBL4_BACKEND_URL", "http://127.0.0.1:8000")
+        backend_url = overrides.get("backend_url") or os.getenv(
+            "PBL4_BACKEND_URL", "http://127.0.0.1:8000"
+        )
         var_dir = overrides.get("var_dir") or os.getenv("PBL4_VAR_DIR", "var/agent")
         heartbeat_interval = overrides.get("heartbeat_interval_seconds") or float(
             os.getenv("PBL4_HEARTBEAT_INTERVAL_SECONDS", "5.0")

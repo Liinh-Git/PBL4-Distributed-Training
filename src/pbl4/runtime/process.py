@@ -8,11 +8,13 @@ import re
 import threading
 import time
 import urllib.request
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
 
+from pbl4.common.artifact_origin import derive_root_manifest_path, resolve_artifact_url
 from pbl4.common.hashing import canonical_json_bytes, sha256_bytes
 from pbl4.common.work_unit import WorkUnitRef
 from pbl4.protocol.messages import DatasetAssignment, StepStart
@@ -265,6 +267,7 @@ class _AttemptRunner:
                 registry=registry,
                 worker_admission_secret=self._process._worker_admission_secret,
                 require_worker_admission=self._process._require_worker_admission,
+                require_compute_ms=True,
                 gradient_handler=self._on_gradient,
                 parameter_applied_handler=self._on_parameter_applied,
                 model_init_handler=self._on_model_init,
@@ -284,9 +287,16 @@ class _AttemptRunner:
                     "expected_dataset_manifest_hash": dataset_contract["dataset_manifest_hash"],
                 }
             )
+            artifact_base_url = str(resolved["artifact_base_url"])
+            root_manifest_path = derive_root_manifest_path(
+                artifact_base_url,
+                str(resolved["manifest_uri"]),
+            )
             dataset = DatasetManifestClient(self._process._dataset_manager_url).pin(
                 dataset_contract["dataset_build_id"],
                 dataset_contract["dataset_manifest_hash"],
+                artifact_base_url=artifact_base_url,
+                root_manifest_path=root_manifest_path,
             )
             self._dataset = dataset
             if dataset.shard_count != expected_workers:
@@ -296,7 +306,6 @@ class _AttemptRunner:
             if not server.wait_for_workers(expected_workers, 180.0):
                 raise TimeoutError("Timed out waiting for full DTP worker membership")
             self._set_state("PROVISIONING")
-            artifact_base_url = str(resolved["artifact_base_url"])
             for worker_id in server.worker_ids():
                 server.send_dataset_assignment(
                     worker_id,
@@ -306,7 +315,7 @@ class _AttemptRunner:
                             "dataset_manifest_hash": dataset.dataset_manifest_hash,
                             "shard_id": worker_id,
                             "artifact_base_url": artifact_base_url,
-                            "root_manifest_path": "manifest.json",
+                            "root_manifest_path": root_manifest_path,
                             "expected_shard_count": expected_workers,
                             "profile": dataset_contract.get(
                                 "profile", "CNN_IMAGE_CLASSIFICATION_V1"
@@ -326,17 +335,21 @@ class _AttemptRunner:
             self._set_state("INITIALIZING")
             if not server.wait_for_manifests(120.0):
                 raise TimeoutError("Timed out waiting for Parameter Manifests")
-            if not self._model_init.wait(120.0):
-                raise TimeoutError("Timed out waiting for worker-0 canonical initialization")
-            transfer = self._model_init_transfer
-            if transfer is None:
-                raise ValueError("Canonical initialization transfer is unavailable")
-            initial = np.frombuffer(transfer.data, dtype="<f4").astype(np.float32, copy=True)
-            if (
-                initial.size != self._process._manifest.total_numel
-                or not np.isfinite(initial).all()
-            ):
-                raise ValueError("Canonical initialization tensor is invalid")
+            execution_mode = str(self._payload["execution_mode"])
+            if execution_mode == "RESUME":
+                initial = np.zeros(self._process._manifest.total_numel, dtype=np.float32)
+            else:
+                if not self._model_init.wait(120.0):
+                    raise TimeoutError("Timed out waiting for worker-0 canonical initialization")
+                transfer = self._model_init_transfer
+                if transfer is None:
+                    raise ValueError("Canonical initialization transfer is unavailable")
+                initial = np.frombuffer(transfer.data, dtype="<f4").astype(np.float32, copy=True)
+                if (
+                    initial.size != self._process._manifest.total_numel
+                    or not np.isfinite(initial).all()
+                ):
+                    raise ValueError("Canonical initialization tensor is invalid")
 
             members = tuple(Member(item.worker_id, item.session_id) for item in registry.snapshot())
             context = StrategyContext(
@@ -353,7 +366,10 @@ class _AttemptRunner:
                 self._process._manifest.total_numel,
                 members,
             )
-            work_units = self._extract_work_units(shard_manifests)
+            work_units = self._extract_work_units(
+                shard_manifests,
+                unit_size=int(dataset_contract["batch_size"]),
+            )
 
             workload_config = contract.get("workload")
             if isinstance(workload_config, dict):
@@ -379,7 +395,6 @@ class _AttemptRunner:
                 worker_ids=worker_ids,
                 work_units_per_step=work_units_per_step,
             )
-            model = CanonicalModel(initial, 0, self._process._manifest.parameter_manifest_hash)
             events = EventEmitter(self.attempt_id, self.job_id)
             self._events = events
             checkpoint_template = CheckpointSnapshot(
@@ -404,6 +419,40 @@ class _AttemptRunner:
                 ),
                 recovery_cursor=RecoveryCursor(0, 0),
             )
+            resume_cursor: RecoveryCursor | None = None
+            model_version = 0
+            if execution_mode == "RESUME":
+                descriptor = self._payload.get("resume_checkpoint")
+                if not isinstance(descriptor, dict):
+                    raise ValueError("RESUME requires trusted checkpoint descriptor")
+                source_attempt_id = str(descriptor["source_attempt_id"])
+                source_manager = CheckpointManager.for_attempt(
+                    self._process._checkpoint_dir,
+                    source_attempt_id,
+                    CheckpointV1Serializer(),
+                )
+                complete = source_manager.load(
+                    str(descriptor["checkpoint_id"]),
+                    model_sha256=str(descriptor["model_sha256"]),
+                    metadata_sha256=str(descriptor["metadata_sha256"]),
+                )
+                restored = source_manager.restore(complete, checkpoint_template)
+                if restored.created_by_attempt_id != source_attempt_id:
+                    raise ValueError("Checkpoint source attempt identity mismatch")
+                initial = restored.model.parameters.astype(np.float32, copy=True)
+                model_version = restored.model.model_version
+                resume_cursor = restored.recovery_cursor
+                checkpoint_template = replace(
+                    checkpoint_template,
+                    model=restored.model,
+                    recovery_cursor=restored.recovery_cursor,
+                )
+
+            model = CanonicalModel(
+                initial,
+                model_version,
+                self._process._manifest.parameter_manifest_hash,
+            )
             coordinator = Coordinator(
                 context,
                 registry,
@@ -417,12 +466,14 @@ class _AttemptRunner:
                 ),
                 batch_scheduler,
                 CheckpointPolicy(str(contract["checkpoint_policy"]["type"])),
-                CheckpointManager(
-                    self._process._checkpoint_dir / self.attempt_id,
+                CheckpointManager.for_attempt(
+                    self._process._checkpoint_dir,
+                    self.attempt_id,
                     CheckpointV1Serializer(),
                 ),
                 checkpoint_template,
                 events,
+                cursor=resume_cursor,
                 workload_scheduler=workload_scheduler,
             )
             self._coordinator = coordinator
@@ -434,7 +485,7 @@ class _AttemptRunner:
                 initial.tobytes(),
                 operation_id=0,
                 source_step_id=0,
-                model_version=0,
+                model_version=model_version,
                 initialization=True,
             )
             self._wait_for(
@@ -680,7 +731,7 @@ class _AttemptRunner:
         update = contract.get("update_policy")
         protocols = contract.get("protocols")
         if (
-            self._payload.get("execution_mode") not in {"FRESH", "RETRY_FROM_START"}
+            self._payload.get("execution_mode") not in {"FRESH", "RETRY_FROM_START", "RESUME"}
             or not isinstance(model, dict)
             or model.get("model_id") != "resnet18_groupnorm"
             or model.get("profile") != "RESNET18_GROUPNORM_V1"
@@ -717,10 +768,12 @@ class _AttemptRunner:
         manifests = []
         for reference in root.value["shards"]:
             shard_id = int(reference["shard_id"])
-            url = (
-                f"{self._process._dataset_manager_url}/artifacts/v1/dataset-builds/"
-                f"{root.dataset_build_id}/shards/{shard_id}/manifest.json"
-            )
+            relative_path = reference.get("relative_shard_manifest_path")
+            if not isinstance(relative_path, str):
+                if root.root_manifest_path != "manifest.json":
+                    raise ValueError("Root Dataset Manifest lacks relative shard manifest path")
+                relative_path = f"shards/{shard_id}/manifest.json"
+            url = resolve_artifact_url(root.artifact_base_url, relative_path)
             with urllib.request.urlopen(url, timeout=30.0) as response:
                 content = response.read(4 * 1024 * 1024 + 1)
             if (
@@ -744,11 +797,17 @@ class _AttemptRunner:
         return tuple(manifests)
 
     @staticmethod
-    def _extract_work_units(manifests: tuple[dict[str, object], ...]) -> tuple[WorkUnitRef, ...]:
+    def _extract_work_units(
+        manifests: tuple[dict[str, object], ...], *, unit_size: int
+    ) -> tuple[WorkUnitRef, ...]:
+        if unit_size <= 0:
+            raise ValueError("Work Unit size must be positive")
         units = []
         for manifest in manifests:
             shard_id = int(manifest["shard_id"])
             for entry in manifest["batches"]:
+                if int(entry["sample_count"]) != unit_size:
+                    continue
                 units.append(
                     WorkUnitRef(
                         shard_id=shard_id,
@@ -760,7 +819,12 @@ class _AttemptRunner:
 
     @classmethod
     def _schedule(cls, manifests: tuple[dict[str, object], ...]) -> tuple[WorkUnitRef, ...]:
-        return cls._extract_work_units(manifests)
+        sample_counts = {
+            int(entry["sample_count"]) for manifest in manifests for entry in manifest["batches"]
+        }
+        if len(sample_counts) != 1:
+            raise ValueError("Legacy scheduler requires uniform physical batch sizes")
+        return cls._extract_work_units(manifests, unit_size=next(iter(sample_counts)))
 
     def _wait_for(self, predicate, timeout: float, description: str) -> None:
         deadline = time.monotonic() + timeout

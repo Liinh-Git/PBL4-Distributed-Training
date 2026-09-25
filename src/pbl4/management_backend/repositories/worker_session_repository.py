@@ -153,7 +153,16 @@ def update_snapshot_projection(
             WHERE session_id = %s AND attempt_id = %s AND worker_id = %s
             RETURNING *
             """,
-            (node_label, state, last_heartbeat_at, node_id, allocation_id, session_id, attempt_id, worker_id),
+            (
+                node_label,
+                state,
+                last_heartbeat_at,
+                node_id,
+                allocation_id,
+                session_id,
+                attempt_id,
+                worker_id,
+            ),
         )
         row = cur.fetchone()
     return _row_to_dict(row) if row else None

@@ -21,7 +21,7 @@ import logging
 import os
 import signal
 import sys
-from typing import Sequence
+from collections.abc import Sequence
 
 from pbl4 import PACKAGE_VERSION
 from pbl4.node_agent.client import NodeAgentClient
@@ -134,7 +134,8 @@ def cmd_enroll(args: argparse.Namespace) -> int:
 
     if not code or not code.strip():
         print(
-            "Error: Enrollment code is required. Provide --code <one-time-code> or set $PBL4_ENROLLMENT_CODE.",
+            "Error: Enrollment code is required. Provide --code <one-time-code> "
+            "or set $PBL4_ENROLLMENT_CODE.",
             file=sys.stderr,
         )
         return 1
@@ -148,7 +149,7 @@ def cmd_enroll(args: argparse.Namespace) -> int:
         )
         return 1
 
-    print(f"Collecting static hardware capabilities...")
+    print("Collecting static hardware capabilities...")
     caps = collect_static_capabilities()
 
     print(f"Enrolling with Management Backend at {backend_url}...")
@@ -204,8 +205,12 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     # Reconcile surviving workers on startup
     reconciled = supervisor.reconcile_on_startup()
-    active_count = sum(1 for r in reconciled if r.local_state in (LOCAL_STATE_STARTING, LOCAL_STATE_RUNNING))
-    logger.info("Startup reconciliation complete: %d active worker processes surviving", active_count)
+    active_count = sum(
+        1 for r in reconciled if r.local_state in (LOCAL_STATE_STARTING, LOCAL_STATE_RUNNING)
+    )
+    logger.info(
+        "Startup reconciliation complete: %d active worker processes surviving", active_count
+    )
 
     client = NodeAgentClient(config=config, identity=identity, supervisor=supervisor)
 
@@ -213,7 +218,9 @@ def cmd_start(args: argparse.Namespace) -> int:
         loop = asyncio.get_running_loop()
 
         def _signal_handler() -> None:
-            logger.info("Shutdown signal received; closing agent client without stopping workers...")
+            logger.info(
+                "Shutdown signal received; closing agent client without stopping workers..."
+            )
             client.stop()
 
         if os.name != "nt":

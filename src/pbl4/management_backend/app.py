@@ -84,29 +84,93 @@ from pbl4.management_backend.services.node_service import (
 logger = logging.getLogger(__name__)
 
 
+def _run_node_maintenance_once(settings: Any) -> None:
+    """Apply one durable liveness/worker-start maintenance cycle."""
+    from pbl4.management_backend import db
+    from pbl4.management_backend.gateways.node_control_gateway import (
+        get_node_control_gateway,
+    )
+    from pbl4.management_backend.gateways.runtime_gateway import get_gateway
+    from pbl4.management_backend.repositories import attempt_repository
+    from pbl4.management_backend.services import (
+        allocation_service,
+        attempt_service,
+        node_service,
+    )
+
+    with db.transaction() as conn:
+        node_service.mark_stale_nodes(
+            conn,
+            timeout_seconds=settings.node_heartbeat_timeout_seconds,
+        )
+        timed_out_ids = allocation_service.fail_timed_out_dispatched_allocations(
+            conn,
+            timeout_seconds=settings.worker_start_timeout_seconds,
+        )
+        affected_attempts = {
+            str(allocation_service.get_allocation(conn, allocation_id)["attempt_id"])
+            for allocation_id in timed_out_ids
+        }
+
+    runtime_gateway = get_gateway()
+    node_gateway = get_node_control_gateway()
+    for attempt_id in sorted(affected_attempts):
+        with db.transaction() as conn:
+            attempt = attempt_repository.get_attempt(conn, attempt_id)
+            if attempt is None or attempt.get("state") in (
+                attempt_repository.TERMINAL_ATTEMPT_STATES
+            ):
+                continue
+            abort_command = attempt_service.abort_attempt(
+                conn,
+                attempt_id,
+                reason="Worker start timeout",
+            )
+            active_allocations = allocation_service.list_for_attempt(
+                conn, attempt_id, active_only=True
+            )
+
+        try:
+            runtime_gateway.send_command_and_wait_result(
+                command_type="ABORT_ATTEMPT",
+                command_id=str(abort_command["command_id"]),
+                target_id=attempt_id,
+                payload=attempt_service._extract_command_payload(abort_command),
+                timeout=5.0,
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed best-effort ABORT_ATTEMPT after worker start timeout for %s: %s",
+                attempt_id,
+                exc,
+            )
+
+        for allocation in active_allocations:
+            try:
+                with db.transaction() as conn:
+                    allocation_service.stop_allocation(
+                        conn,
+                        str(allocation["allocation_id"]),
+                        gateway=node_gateway,
+                        force=True,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Failed best-effort STOP_WORKER for allocation %s: %s",
+                    allocation.get("allocation_id"),
+                    exc,
+                )
+
+
 async def _node_maintenance_loop(settings: Any) -> None:
-    """Periodic background maintenance loop for node heartbeat stale detection and worker start timeouts."""
+    """Run periodic node-heartbeat and worker-start timeout maintenance."""
     interval = max(float(settings.node_heartbeat_interval_seconds), 1.0)
     while True:
         try:
             await asyncio.sleep(interval)
             if settings.database_url:
                 try:
-                    from pbl4.management_backend import db
-                    from pbl4.management_backend.services import (
-                        allocation_service,
-                        node_service,
-                    )
-
-                    with db.transaction() as conn:
-                        node_service.mark_stale_nodes(
-                            conn,
-                            timeout_seconds=settings.node_heartbeat_timeout_seconds,
-                        )
-                        allocation_service.fail_timed_out_dispatched_allocations(
-                            conn,
-                            timeout_seconds=settings.worker_start_timeout_seconds,
-                        )
+                    _run_node_maintenance_once(settings)
                 except Exception as exc:
                     logger.error("Error in node maintenance loop: %s", exc)
         except asyncio.CancelledError:
@@ -117,7 +181,7 @@ async def _node_maintenance_loop(settings: Any) -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """FastAPI lifespan: initialize DB pool, gateways, maintenance tasks, and cleanup on shutdown."""
+    """Initialize and clean up the DB pool, gateways, and maintenance tasks."""
     from pbl4.management_backend import db
     from pbl4.management_backend.config import get_settings
     from pbl4.management_backend.gateways.node_control_gateway import init_node_control_gateway
@@ -588,15 +652,11 @@ def create_app() -> FastAPI:
         return _error_response(401, exc.code, str(exc), request)
 
     @app.exception_handler(NodeRevokedError)
-    async def node_revoked_handler(
-        request: Request, exc: NodeRevokedError
-    ) -> JSONResponse:
+    async def node_revoked_handler(request: Request, exc: NodeRevokedError) -> JSONResponse:
         return _error_response(409, exc.code, str(exc), request)
 
     @app.exception_handler(NodeOfflineError)
-    async def node_offline_handler(
-        request: Request, exc: NodeOfflineError
-    ) -> JSONResponse:
+    async def node_offline_handler(request: Request, exc: NodeOfflineError) -> JSONResponse:
         return _error_response(409, exc.code, str(exc), request)
 
     @app.exception_handler(NodeCapacityUnavailableError)
@@ -606,9 +666,7 @@ def create_app() -> FastAPI:
         return _error_response(409, exc.code, str(exc), request)
 
     @app.exception_handler(NodeNotFoundError)
-    async def node_not_found_handler(
-        request: Request, exc: NodeNotFoundError
-    ) -> JSONResponse:
+    async def node_not_found_handler(request: Request, exc: NodeNotFoundError) -> JSONResponse:
         return _error_response(404, "NOT_FOUND", str(exc), request)
 
     @app.exception_handler(AllocationNotFoundError)
@@ -618,9 +676,7 @@ def create_app() -> FastAPI:
         return _error_response(404, "NOT_FOUND", str(exc), request)
 
     @app.exception_handler(AllocationStateError)
-    async def allocation_state_handler(
-        request: Request, exc: AllocationStateError
-    ) -> JSONResponse:
+    async def allocation_state_handler(request: Request, exc: AllocationStateError) -> JSONResponse:
         return _error_response(409, exc.code, str(exc), request)
 
     @app.exception_handler(WorkerAdmissionConfigError)

@@ -146,6 +146,18 @@ def test_apply_updates_local_version_then_enables_exactly_one_ack(tmp_path):
         loop.consume_parameter_applied()
 
 
+def test_initial_canonical_parameters_accept_restored_model_version(tmp_path):
+    _, cached, _ = publish_cache(tmp_path)
+    model_adapter = adapter()
+    loop = TrainingLoop(model_adapter, cached, model_version=0)
+
+    loop.initialize_parameters(7, model_adapter.export_parameters())
+
+    assert loop.local_model_version == 7
+    computed = loop.compute(assignment(input_model_version=7))
+    assert computed.assignment.input_model_version == 7
+
+
 def test_application_failure_never_advances_version_or_ack(tmp_path, monkeypatch):
     _, cached, _ = publish_cache(tmp_path)
     model_adapter = adapter()

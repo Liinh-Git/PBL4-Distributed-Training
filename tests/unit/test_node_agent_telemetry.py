@@ -39,7 +39,9 @@ class TestNodeAgentTelemetry(unittest.TestCase):
 
         # Device 0
         h0 = MagicMock()
-        mock_pynvml.nvmlDeviceGetHandleByIndex.side_effect = lambda idx: h0 if idx == 0 else MagicMock()
+        mock_pynvml.nvmlDeviceGetHandleByIndex.side_effect = lambda idx: (
+            h0 if idx == 0 else MagicMock()
+        )
         mock_pynvml.nvmlDeviceGetName.return_value = b"NVIDIA GeForce RTX 4090"
 
         util_mock = MagicMock()
@@ -51,8 +53,9 @@ class TestNodeAgentTelemetry(unittest.TestCase):
         mem_mock.total = 24 * 1024**3
         mock_pynvml.nvmlDeviceGetMemoryInfo.return_value = mem_mock
 
-        with patch("pbl4.node_agent.telemetry.pynvml", mock_pynvml), patch(
-            "pbl4.node_agent.telemetry._HAS_PYNVML", True
+        with (
+            patch("pbl4.node_agent.telemetry.pynvml", mock_pynvml),
+            patch("pbl4.node_agent.telemetry._HAS_PYNVML", True),
         ):
             # Static capabilities
             caps = collect_static_capabilities()
@@ -73,8 +76,9 @@ class TestNodeAgentTelemetry(unittest.TestCase):
 
     def test_3_import_error_pynvml_absent(self) -> None:
         """When pynvml cannot be imported, telemetry falls back gracefully to gpus=[]."""
-        with patch("pbl4.node_agent.telemetry.pynvml", None), patch(
-            "pbl4.node_agent.telemetry._HAS_PYNVML", False
+        with (
+            patch("pbl4.node_agent.telemetry.pynvml", None),
+            patch("pbl4.node_agent.telemetry._HAS_PYNVML", False),
         ):
             caps = collect_static_capabilities()
             self.assertEqual(caps["gpus"], [])
@@ -88,8 +92,9 @@ class TestNodeAgentTelemetry(unittest.TestCase):
         mock_pynvml = MagicMock()
         mock_pynvml.nvmlInit.side_effect = Exception("NVML Shared Library Not Found")
 
-        with patch("pbl4.node_agent.telemetry.pynvml", mock_pynvml), patch(
-            "pbl4.node_agent.telemetry._HAS_PYNVML", True
+        with (
+            patch("pbl4.node_agent.telemetry.pynvml", mock_pynvml),
+            patch("pbl4.node_agent.telemetry._HAS_PYNVML", True),
         ):
             caps = collect_static_capabilities()
             self.assertEqual(caps["gpus"], [])
@@ -99,13 +104,14 @@ class TestNodeAgentTelemetry(unittest.TestCase):
             self.assertGreater(snapshot.ram_total_bytes, 0)
 
     def test_5_agent_never_crashes_on_partial_gpu_error(self) -> None:
-        """Even if query for a specific device fails, other metrics are returned without crashing."""
+        """A device query failure does not suppress other metrics."""
         mock_pynvml = MagicMock()
         mock_pynvml.nvmlDeviceGetCount.return_value = 1
         mock_pynvml.nvmlDeviceGetHandleByIndex.side_effect = RuntimeError("Device lost")
 
-        with patch("pbl4.node_agent.telemetry.pynvml", mock_pynvml), patch(
-            "pbl4.node_agent.telemetry._HAS_PYNVML", True
+        with (
+            patch("pbl4.node_agent.telemetry.pynvml", mock_pynvml),
+            patch("pbl4.node_agent.telemetry._HAS_PYNVML", True),
         ):
             caps = collect_static_capabilities()
             self.assertIsInstance(caps, dict)

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import base64
 import json
-import time
 import unittest
 
 from pbl4.common.worker_admission import (
@@ -80,7 +79,9 @@ class TestWorkerAdmission(unittest.TestCase):
         pad = (-len(payload_b64)) % 4
         payload_dict = json.loads(base64.urlsafe_b64decode(payload_b64 + "=" * pad).decode("utf-8"))
         payload_dict["attempt_id"] = "tampered-attempt"
-        tampered_bytes = json.dumps(payload_dict, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        tampered_bytes = json.dumps(payload_dict, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
         tampered_b64 = base64.urlsafe_b64encode(tampered_bytes).decode("ascii").rstrip("=")
 
         tampered_token = f"{tampered_b64}.{sig_b64}"
@@ -187,16 +188,15 @@ class TestWorkerAdmission(unittest.TestCase):
             "...",
         ]
         for case in malformed_cases:
-            with self.subTest(case=case):
-                with self.assertRaises(WorkerAdmissionError):
-                    verify_worker_join_token(
-                        self.secret,
-                        case,
-                        self.attempt_id,
-                        self.allocation_id,
-                        self.node_id,
-                        now=self.fixed_now,
-                    )
+            with self.subTest(case=case), self.assertRaises(WorkerAdmissionError):
+                verify_worker_join_token(
+                    self.secret,
+                    case,
+                    self.attempt_id,
+                    self.allocation_id,
+                    self.node_id,
+                    now=self.fixed_now,
+                )
 
     def test_malformed_base64_or_json(self) -> None:
         # Invalid base64 characters
@@ -213,9 +213,7 @@ class TestWorkerAdmission(unittest.TestCase):
         # Base64 that decodes to non-JSON bytes
         non_json_b64 = base64.urlsafe_b64encode(b"not json content").decode("ascii").rstrip("=")
         # Sign it with secret so signature passes
-        sig = base64.urlsafe_b64encode(
-            b"arbitrary-sig-that-matches"
-        ).decode("ascii").rstrip("=")
+        sig = base64.urlsafe_b64encode(b"arbitrary-sig-that-matches").decode("ascii").rstrip("=")
         with self.assertRaises(WorkerAdmissionError):
             verify_worker_join_token(
                 self.secret,
@@ -239,6 +237,7 @@ class TestWorkerAdmission(unittest.TestCase):
         payload_b64 = base64.urlsafe_b64encode(payload_bytes).decode("ascii").rstrip("=")
         import hashlib
         import hmac
+
         sig = hmac.new(self.secret.encode("utf-8"), payload_bytes, hashlib.sha256).digest()
         sig_b64 = base64.urlsafe_b64encode(sig).decode("ascii").rstrip("=")
 
@@ -265,10 +264,13 @@ class TestWorkerAdmission(unittest.TestCase):
                 "nonce": "1234567890abcdef",
             }
             del payload[missing_field]
-            payload_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            payload_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
             payload_b64 = base64.urlsafe_b64encode(payload_bytes).decode("ascii").rstrip("=")
             import hashlib
             import hmac
+
             sig = hmac.new(self.secret.encode("utf-8"), payload_bytes, hashlib.sha256).digest()
             sig_b64 = base64.urlsafe_b64encode(sig).decode("ascii").rstrip("=")
 
@@ -309,7 +311,9 @@ class TestWorkerAdmission(unittest.TestCase):
         with self.assertRaises(WorkerAdmissionError):
             issue_worker_join_token(self.secret, self.attempt_id, self.allocation_id, "")
         with self.assertRaises(WorkerAdmissionError):
-            issue_worker_join_token(self.secret, self.attempt_id, self.allocation_id, self.node_id, ttl_seconds=-10)
+            issue_worker_join_token(
+                self.secret, self.attempt_id, self.allocation_id, self.node_id, ttl_seconds=-10
+            )
 
 
 if __name__ == "__main__":

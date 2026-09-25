@@ -5,6 +5,7 @@ must supply the approved serializer once its canonical representation is resolve
 """
 
 import os
+import re
 import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -56,6 +57,52 @@ class CheckpointManager:
         self._root = Path(root).resolve()
         self._serializer = serializer
         self._lock = Lock()
+
+    @classmethod
+    def for_attempt(
+        cls, checkpoint_root: Path, attempt_id: str, serializer: CheckpointSerializer
+    ) -> "CheckpointManager":
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", attempt_id) is None:
+            raise ValueError("Invalid checkpoint source attempt identity")
+        root = Path(checkpoint_root).resolve()
+        attempt_root = (root / attempt_id).resolve()
+        if attempt_root.parent != root or (attempt_root.exists() and attempt_root.is_symlink()):
+            raise ValueError("Checkpoint attempt path escapes configured root")
+        return cls(attempt_root, serializer)
+
+    def load(
+        self,
+        checkpoint_id: str,
+        *,
+        model_sha256: str,
+        metadata_sha256: str,
+    ) -> CompleteCheckpoint:
+        """Load one descriptor-pinned checkpoint without trusting a supplied path."""
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", checkpoint_id) is None:
+            raise ValueError("Invalid checkpoint identity")
+        for digest in (model_sha256, metadata_sha256):
+            if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                raise ValueError("Invalid checkpoint descriptor hash")
+        directory = self._root / sha256_bytes(checkpoint_id.encode("utf-8"))
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError("Unknown checkpoint identity")
+        model_path = directory / "model.bin"
+        metadata_path = directory / "checkpoint.json"
+        model_size = model_path.stat().st_size if model_path.is_file() else -1
+        metadata_size = metadata_path.stat().st_size if metadata_path.is_file() else -1
+        self._verify_file(model_path, model_size, model_sha256)
+        self._verify_file(metadata_path, metadata_size, metadata_sha256)
+        snapshot = self._serializer.deserialize(model_path.read_bytes(), metadata_path.read_bytes())
+        if snapshot.checkpoint_id != checkpoint_id:
+            raise ValueError("Checkpoint metadata identity mismatch")
+        return CompleteCheckpoint(
+            snapshot,
+            directory,
+            model_sha256,
+            metadata_sha256,
+            model_size,
+            metadata_size,
+        )
 
     def write(self, snapshot: CheckpointSnapshot) -> CompleteCheckpoint:
         with self._lock:

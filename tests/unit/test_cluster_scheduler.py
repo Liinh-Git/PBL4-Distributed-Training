@@ -10,7 +10,6 @@ import unittest
 from pbl4.management_backend.services.cluster_scheduler import (
     ClusterScheduler,
     NodeCapacityUnavailableError,
-    WorkerPlacementSpec,
     select_placements,
 )
 

@@ -180,7 +180,9 @@ class TestNodeAgentConfig(unittest.TestCase):
         with self.assertRaises(ValueError):
             NodeAgentConfig(backend_url="http://test", heartbeat_interval_seconds=-1.0)
         with self.assertRaises(ValueError):
-            NodeAgentConfig(backend_url="http://test", reconnect_min_seconds=10.0, reconnect_max_seconds=5.0)
+            NodeAgentConfig(
+                backend_url="http://test", reconnect_min_seconds=10.0, reconnect_max_seconds=5.0
+            )
 
     def test_config_from_env(self) -> None:
         with patch.dict(

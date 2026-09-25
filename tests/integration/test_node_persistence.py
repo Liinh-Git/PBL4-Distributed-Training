@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import hashlib
 import json
 import os
@@ -21,7 +22,6 @@ import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
 
 import psycopg
 import pytest
@@ -70,15 +70,11 @@ def pg_conn():
 @pytest.fixture
 def clean_tx(pg_conn):
     """Function-level fixture ensuring a clean transaction per test."""
-    try:
+    with contextlib.suppress(Exception):
         pg_conn.rollback()
-    except Exception:
-        pass
     yield pg_conn
-    try:
+    with contextlib.suppress(Exception):
         pg_conn.rollback()
-    except Exception:
-        pass
 
 
 def _create_test_job_and_attempt(conn: psycopg.Connection) -> tuple[str, str]:
@@ -135,45 +131,42 @@ def test_01_migration_upgrade_downgrade_cycle():
     # Upgrade to head
     command.upgrade(alembic_cfg, "head")
 
-    with psycopg.connect(TEST_DB_URL) as conn:
-        with conn.cursor() as cur:
-            # Check tables exist
-            cur.execute("SELECT to_regclass('node_enrollment_codes')")
-            assert cur.fetchone()[0] == "node_enrollment_codes"
-            cur.execute("SELECT to_regclass('nodes')")
-            assert cur.fetchone()[0] == "nodes"
-            cur.execute("SELECT to_regclass('worker_allocations')")
-            assert cur.fetchone()[0] == "worker_allocations"
+    with psycopg.connect(TEST_DB_URL) as conn, conn.cursor() as cur:
+        # Check tables exist
+        cur.execute("SELECT to_regclass('node_enrollment_codes')")
+        assert cur.fetchone()[0] == "node_enrollment_codes"
+        cur.execute("SELECT to_regclass('nodes')")
+        assert cur.fetchone()[0] == "nodes"
+        cur.execute("SELECT to_regclass('worker_allocations')")
+        assert cur.fetchone()[0] == "worker_allocations"
 
-            # Check columns in worker_sessions
-            cur.execute(
-                """
+        # Check columns in worker_sessions
+        cur.execute(
+            """
                 SELECT column_name FROM information_schema.columns
                 WHERE table_name = 'worker_sessions' AND column_name IN ('node_id', 'allocation_id')
                 """
-            )
-            cols = {row[0] for row in cur.fetchall()}
-            assert cols == {"node_id", "allocation_id"}
+        )
+        cols = {row[0] for row in cur.fetchall()}
+        assert cols == {"node_id", "allocation_id"}
 
     # Downgrade 1 revision (0003 -> 0002)
     command.downgrade(alembic_cfg, "-1")
 
-    with psycopg.connect(TEST_DB_URL) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT to_regclass('node_enrollment_codes')")
-            assert cur.fetchone()[0] is None
-            cur.execute("SELECT to_regclass('nodes')")
-            assert cur.fetchone()[0] is None
-            cur.execute("SELECT to_regclass('worker_allocations')")
-            assert cur.fetchone()[0] is None
+    with psycopg.connect(TEST_DB_URL) as conn, conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('node_enrollment_codes')")
+        assert cur.fetchone()[0] is None
+        cur.execute("SELECT to_regclass('nodes')")
+        assert cur.fetchone()[0] is None
+        cur.execute("SELECT to_regclass('worker_allocations')")
+        assert cur.fetchone()[0] is None
 
     # Re-upgrade to head
     command.upgrade(alembic_cfg, "head")
 
-    with psycopg.connect(TEST_DB_URL) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT to_regclass('nodes')")
-            assert cur.fetchone()[0] == "nodes"
+    with psycopg.connect(TEST_DB_URL) as conn, conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('nodes')")
+        assert cur.fetchone()[0] == "nodes"
 
 
 # =========================================================================
@@ -240,7 +233,7 @@ def test_03_expired_enrollment_code_rejected(clean_tx):
 
 def test_04_atomic_concurrency_race_condition_proof(pg_conn):
     """Prove atomic one-time consumption: 10 parallel threads attempt to consume the same code."""
-    code_hash = hashlib.sha256(f"race-{uuid.uuid4().hex}".encode("utf-8")).hexdigest()
+    code_hash = hashlib.sha256(f"race-{uuid.uuid4().hex}".encode()).hexdigest()
     now = datetime.now(UTC)
     expires_at = now + timedelta(minutes=15)
 
@@ -326,7 +319,7 @@ def test_05_node_lifecycle_and_state_management(clean_tx):
 
 def test_06_worker_allocation_crud_and_lifecycle(clean_tx):
     """Verify worker allocation creation, state transitions, and listing."""
-    job_id, attempt_id = _create_test_job_and_attempt(clean_tx)
+    _job_id, attempt_id = _create_test_job_and_attempt(clean_tx)
     node_id = f"node-{uuid.uuid4().hex[:8]}"
     now = datetime.now(UTC)
 
@@ -367,7 +360,13 @@ def test_06_worker_allocation_crud_and_lifecycle(clean_tx):
     assert len(active) == 1
     assert active[0]["allocation_id"] == alloc_id
 
-    # 19. Update actual state to STARTED
+    # 19. Follow the canonical REQUESTED -> DISPATCHED -> STARTED path.
+    dispatched = allocation_repository.update_actual_state(
+        clean_tx,
+        alloc_id,
+        "DISPATCHED",
+    )
+    assert dispatched["actual_state"] == "DISPATCHED"
     started_time = now + timedelta(seconds=5)
     updated_act = allocation_repository.update_actual_state(
         clean_tx,
@@ -399,8 +398,8 @@ def test_06_worker_allocation_crud_and_lifecycle(clean_tx):
 
 
 def test_07_one_active_allocation_per_node_constraint(clean_tx):
-    """Verify partial unique index uq_worker_allocations__one_active_per_node enforces 1 active allocation."""
-    job_id, attempt_id = _create_test_job_and_attempt(clean_tx)
+    """Enforce one active allocation per node through the partial unique index."""
+    _job_id, attempt_id = _create_test_job_and_attempt(clean_tx)
     node_id = f"node-{uuid.uuid4().hex[:8]}"
     now = datetime.now(UTC)
 

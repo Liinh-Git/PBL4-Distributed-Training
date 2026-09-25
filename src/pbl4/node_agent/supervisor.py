@@ -33,6 +33,7 @@ from pbl4.agent_protocol.messages import (
     ERROR_CODE_ALLOCATION_ALREADY_ACTIVE,
     ERROR_CODE_ALLOCATION_NOT_FOUND,
     ERROR_CODE_WORKER_SPAWN_FAILED,
+    ERROR_CODE_WORKER_STOP_FAILED,
     StartWorkerPayload,
 )
 
@@ -76,7 +77,9 @@ class LocalAllocationRecord:
         if not isinstance(self.attempt_id, str) or not self.attempt_id:
             raise ValueError("attempt_id must be a non-empty string")
         if self.local_state not in VALID_LOCAL_STATES:
-            raise ValueError(f"Invalid local_state '{self.local_state}', must be one of {VALID_LOCAL_STATES}")
+            raise ValueError(
+                f"Invalid local_state '{self.local_state}', must be one of {VALID_LOCAL_STATES}"
+            )
 
     def transition_to(self, new_state: str, *, exit_code: int | None = None) -> None:
         """Perform a validated local state transition."""
@@ -170,7 +173,8 @@ class WorkerProcessSupervisor:
                 if record.local_state in (LOCAL_STATE_STARTING, LOCAL_STATE_RUNNING):
                     if record.pid is None or record.pid <= 0 or record.create_time is None:
                         logger.warning(
-                            "Cannot verify allocation %s: missing PID or create_time. Marking FAILED.",
+                            "Cannot verify allocation %s: missing PID or create_time. "
+                            "Marking FAILED.",
                             record.allocation_id,
                         )
                         record.transition_to(LOCAL_STATE_FAILED, exit_code=None)
@@ -191,7 +195,8 @@ class WorkerProcessSupervisor:
                                 continue
 
                         logger.warning(
-                            "Worker process PID=%d for allocation %s is dead or create_time mismatched. Marking FAILED.",
+                            "Worker process PID=%d for allocation %s is dead or "
+                            "create_time mismatched. Marking FAILED.",
                             record.pid,
                             record.allocation_id,
                         )
@@ -224,7 +229,8 @@ class WorkerProcessSupervisor:
             if existing is not None:
                 if existing.local_state in (LOCAL_STATE_STARTING, LOCAL_STATE_RUNNING):
                     logger.info(
-                        "Duplicate START_WORKER for active allocation %s in state %s: ACCEPTED (no-op)",
+                        "Duplicate START_WORKER for active allocation %s in state %s: "
+                        "ACCEPTED (no-op)",
                         command.allocation_id,
                         existing.local_state,
                     )
@@ -297,7 +303,9 @@ class WorkerProcessSupervisor:
                 )
                 return (COMMAND_STATUS_ACCEPTED, None)
             except Exception as exc:
-                logger.error("Failed spawning worker for allocation %s: %s", command.allocation_id, exc)
+                logger.error(
+                    "Failed spawning worker for allocation %s: %s", command.allocation_id, exc
+                )
                 record.transition_to(LOCAL_STATE_FAILED, exit_code=None)
                 self._save_records()
                 return (COMMAND_STATUS_REJECTED, ERROR_CODE_WORKER_SPAWN_FAILED)
@@ -313,7 +321,7 @@ class WorkerProcessSupervisor:
         Idempotency rules:
         - If allocation not found: returns (REJECTED, ERROR_CODE_ALLOCATION_NOT_FOUND).
         - If already STOPPED or FAILED: returns (ACCEPTED, None) no-op.
-        - If STARTING or RUNNING: terminates process gracefully or forcefully, transitions to STOPPED.
+        - If STARTING or RUNNING: stop according to force policy, then mark STOPPED.
 
         Returns:
             (status, error_code_or_none)
@@ -332,39 +340,62 @@ class WorkerProcessSupervisor:
                 return (COMMAND_STATUS_ACCEPTED, None)
 
             # Process active or starting
-            proc = self._subprocesses.pop(allocation_id, None)
+            proc = self._subprocesses.get(allocation_id)
             exit_code: int | None = None
+            stopped = False
 
             if proc is not None:
                 try:
-                    if force:
-                        proc.kill()
-                    else:
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=grace_period_seconds)
-                        except subprocess.TimeoutExpired:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=grace_period_seconds)
+                    except subprocess.TimeoutExpired:
+                        if force:
                             proc.kill()
                             proc.wait(timeout=2.0)
+                        else:
+                            logger.warning(
+                                "Worker allocation %s did not stop within grace period; "
+                                "force=false so it remains RUNNING",
+                                allocation_id,
+                            )
+                            return (COMMAND_STATUS_REJECTED, ERROR_CODE_WORKER_STOP_FAILED)
                     exit_code = proc.returncode
+                    stopped = True
                 except Exception as exc:
                     logger.warning("Error stopping subprocess for %s: %s", allocation_id, exc)
+                    return (COMMAND_STATUS_REJECTED, ERROR_CODE_WORKER_STOP_FAILED)
             elif record.pid is not None:
                 # Process was reattached or spawned in previous agent instance
                 try:
                     p = psutil.Process(record.pid)
-                    if p.is_running() and (record.create_time is None or abs(p.create_time() - record.create_time) < 2.0):
-                        if force:
-                            p.kill()
-                        else:
-                            p.terminate()
-                            try:
-                                p.wait(timeout=grace_period_seconds)
-                            except psutil.TimeoutExpired:
+                    if p.is_running() and (
+                        record.create_time is None
+                        or abs(p.create_time() - record.create_time) < 2.0
+                    ):
+                        p.terminate()
+                        try:
+                            p.wait(timeout=grace_period_seconds)
+                        except psutil.TimeoutExpired:
+                            if force:
                                 p.kill()
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
+                                p.wait(timeout=2.0)
+                            else:
+                                return (COMMAND_STATUS_REJECTED, ERROR_CODE_WORKER_STOP_FAILED)
+                        stopped = True
+                    else:
+                        stopped = True
+                except psutil.NoSuchProcess:
+                    stopped = True
+                except (psutil.AccessDenied, psutil.Error) as exc:
+                    logger.warning("Error stopping reattached worker %s: %s", allocation_id, exc)
+                    return (COMMAND_STATUS_REJECTED, ERROR_CODE_WORKER_STOP_FAILED)
+            else:
+                stopped = True
 
+            if not stopped:
+                return (COMMAND_STATUS_REJECTED, ERROR_CODE_WORKER_STOP_FAILED)
+            self._subprocesses.pop(allocation_id, None)
             record.transition_to(LOCAL_STATE_STOPPED, exit_code=exit_code)
             self._save_records()
             logger.info("Worker allocation %s successfully stopped", allocation_id)
@@ -383,7 +414,8 @@ class WorkerProcessSupervisor:
                         ret = proc.poll()
                         if ret is not None:
                             logger.warning(
-                                "Worker allocation %s terminated unexpectedly with returncode %d. Transitioning to FAILED.",
+                                "Worker allocation %s terminated unexpectedly with "
+                                "returncode %d. Transitioning to FAILED.",
                                 allocation_id,
                                 ret,
                             )
@@ -394,14 +426,16 @@ class WorkerProcessSupervisor:
                             p = psutil.Process(record.pid)
                             if not p.is_running() or p.status() == psutil.STATUS_ZOMBIE:
                                 logger.warning(
-                                    "Worker allocation %s (PID=%d) terminated unexpectedly. Transitioning to FAILED.",
+                                    "Worker allocation %s (PID=%d) terminated unexpectedly. "
+                                    "Transitioning to FAILED.",
                                     allocation_id,
                                     record.pid,
                                 )
                                 record.transition_to(LOCAL_STATE_FAILED, exit_code=None)
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
                             logger.warning(
-                                "Worker allocation %s (PID=%d) no longer exists. Transitioning to FAILED.",
+                                "Worker allocation %s (PID=%d) no longer exists. "
+                                "Transitioning to FAILED.",
                                 allocation_id,
                                 record.pid,
                             )

@@ -606,5 +606,3 @@ def test_response_socket_race_does_not_leak_to_new_connection() -> None:
         sock_a_server.close()
         sock_b_client.close()
         sock_b_server.close()
-
-

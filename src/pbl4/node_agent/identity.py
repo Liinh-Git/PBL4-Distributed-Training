@@ -9,6 +9,7 @@ Guarantees:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from dataclasses import dataclass
@@ -57,20 +58,16 @@ def save_identity(var_dir: str | Path, identity: NodeIdentity) -> Path:
     target_dir = Path(var_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
     if os.name != "nt":
-        try:
+        with contextlib.suppress(OSError):
             os.chmod(target_dir, 0o700)
-        except OSError:
-            pass
 
     path = identity_path(target_dir)
     content = json.dumps(identity.to_dict(), indent=2) + "\n"
     path.write_text(content, encoding="utf-8")
 
     if os.name != "nt":
-        try:
+        with contextlib.suppress(OSError):
             os.chmod(path, 0o600)
-        except OSError:
-            pass
 
     return path
 

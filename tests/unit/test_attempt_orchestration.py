@@ -8,7 +8,7 @@ Tests:
 3. _select_and_create_allocations deterministic scheduling.
 4. _select_and_create_allocations capacity failure (NODE_CAPACITY_UNAVAILABLE).
 5. _dispatch_workers_for_attempt successful dispatch to all nodes.
-6. _dispatch_workers_for_attempt partial failure handling (STOP_WORKER + ABORT_ATTEMPT + FAILED mark).
+6. Partial dispatch failure handling (STOP_WORKER + ABORT_ATTEMPT + FAILED).
 7. _AttemptRunner.snapshot serialization of node_id and allocation_id.
 8. RuntimeGateway.handle_state_snapshot passing node_id and allocation_id to session repository.
 """
@@ -16,9 +16,7 @@ Tests:
 from __future__ import annotations
 
 from datetime import UTC, datetime
-import json
-from typing import Any
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -26,10 +24,8 @@ from pbl4.common.errors import ProtocolError
 from pbl4.management_backend.gateways.runtime_gateway import RuntimeGateway
 from pbl4.management_backend.repositories import (
     allocation_repository,
-    worker_session_repository,
 )
 from pbl4.management_backend.schemas.attempt import WorkerSessionItem
-from pbl4.management_backend.services.allocation_service import AllocationService
 from pbl4.management_backend.services.attempt_service import (
     CommandFailedError,
     _dispatch_workers_for_attempt,
@@ -37,10 +33,8 @@ from pbl4.management_backend.services.attempt_service import (
 )
 from pbl4.management_backend.services.cluster_scheduler import (
     NodeCapacityUnavailableError,
-    WorkerPlacementSpec,
 )
 from pbl4.management_protocol.messages import StateSnapshot
-
 
 # ─── 1. StateSnapshot Schema Validation ──────────────────────────────────────
 
@@ -87,7 +81,7 @@ def test_state_snapshot_worker_projection_managed_identity() -> None:
 
 
 def test_state_snapshot_worker_projection_unmanaged_nullable() -> None:
-    """Verify StateSnapshot accepts None or omitted node_id and allocation_id for legacy/unmanaged."""
+    """Accept absent managed identities for legacy/unmanaged Workers."""
     worker_none = {
         "worker_id": 0,
         "session_id": "1",
@@ -211,7 +205,9 @@ def test_worker_session_item_schema_fields() -> None:
 
 @patch("pbl4.management_backend.repositories.node_repository.list_nodes")
 @patch("pbl4.management_backend.repositories.allocation_repository.list_active")
-@patch("pbl4.management_backend.services.allocation_service.AllocationService.create_allocations_for_attempt")
+@patch(
+    "pbl4.management_backend.services.allocation_service.AllocationService.create_allocations_for_attempt"
+)
 def test_select_and_create_allocations_success(
     mock_create_allocs: MagicMock,
     mock_list_active: MagicMock,
@@ -269,7 +265,9 @@ def test_select_and_create_allocations_invalid_contract() -> None:
         _select_and_create_allocations(mock_conn, "atm-1", {}, now)
 
     with pytest.raises(ValueError):
-        _select_and_create_allocations(mock_conn, "atm-1", {"synchronization": {"expected_workers": 0}}, now)
+        _select_and_create_allocations(
+            mock_conn, "atm-1", {"synchronization": {"expected_workers": 0}}, now
+        )
 
 
 # ─── 4. Worker Dispatch & Partial Failure Handling ────────────────────────────
@@ -282,17 +280,34 @@ def test_dispatch_workers_for_attempt_all_succeed() -> None:
     mock_db.transaction.return_value.__enter__.return_value = mock_conn
 
     allocations = [
-        {"allocation_id": "alloc-1", "node_id": "node-1", "device": "cpu", "actual_state": "REQUESTED"},
-        {"allocation_id": "alloc-2", "node_id": "node-2", "device": "cpu", "actual_state": "REQUESTED"},
+        {
+            "allocation_id": "alloc-1",
+            "node_id": "node-1",
+            "device": "cpu",
+            "actual_state": "REQUESTED",
+        },
+        {
+            "allocation_id": "alloc-2",
+            "node_id": "node-2",
+            "device": "cpu",
+            "actual_state": "REQUESTED",
+        },
     ]
 
     mock_node_gw = MagicMock()
     mock_rt_gw = MagicMock()
 
     with (
-        patch("pbl4.management_backend.services.allocation_service.AllocationService.list_for_attempt", return_value=allocations),
-        patch("pbl4.management_backend.services.allocation_service.AllocationService.build_start_worker_command") as mock_build_cmd,
-        patch("pbl4.management_backend.services.allocation_service.AllocationService.dispatch_allocation") as mock_dispatch,
+        patch(
+            "pbl4.management_backend.services.allocation_service.AllocationService.list_for_attempt",
+            return_value=allocations,
+        ),
+        patch(
+            "pbl4.management_backend.services.allocation_service.AllocationService.build_start_worker_command"
+        ) as mock_build_cmd,
+        patch(
+            "pbl4.management_backend.services.allocation_service.AllocationService.dispatch_allocation"
+        ) as mock_dispatch,
     ):
         mock_build_cmd.return_value = MagicMock()
         mock_dispatch.side_effect = [
@@ -314,26 +329,49 @@ def test_dispatch_workers_for_attempt_all_succeed() -> None:
 
 
 def test_dispatch_workers_for_attempt_partial_failure() -> None:
-    """Verify partial dispatch failure triggers STOP_WORKER, ABORT_ATTEMPT, and CommandFailedError."""
+    """Partial dispatch sends STOP/ABORT and raises CommandFailedError."""
     mock_db = MagicMock()
     mock_conn = MagicMock()
     mock_db.transaction.return_value.__enter__.return_value = mock_conn
 
     allocations = [
-        {"allocation_id": "alloc-1", "node_id": "node-1", "device": "cpu", "actual_state": "REQUESTED"},
-        {"allocation_id": "alloc-2", "node_id": "node-2", "device": "cpu", "actual_state": "REQUESTED"},
+        {
+            "allocation_id": "alloc-1",
+            "node_id": "node-1",
+            "device": "cpu",
+            "actual_state": "REQUESTED",
+        },
+        {
+            "allocation_id": "alloc-2",
+            "node_id": "node-2",
+            "device": "cpu",
+            "actual_state": "REQUESTED",
+        },
     ]
 
     mock_node_gw = MagicMock()
     mock_rt_gw = MagicMock()
 
     with (
-        patch("pbl4.management_backend.services.allocation_service.AllocationService.list_for_attempt", return_value=allocations),
-        patch("pbl4.management_backend.services.allocation_service.AllocationService.build_start_worker_command") as mock_build_cmd,
-        patch("pbl4.management_backend.services.allocation_service.AllocationService.dispatch_allocation") as mock_dispatch,
-        patch("pbl4.management_backend.services.allocation_service.AllocationService.build_stop_worker_command") as mock_build_stop,
-        patch("pbl4.management_backend.services.attempt_service.abort_attempt") as mock_abort_attempt,
-        patch("pbl4.management_backend.repositories.allocation_repository.update_desired_state") as mock_update_desired,
+        patch(
+            "pbl4.management_backend.services.allocation_service.AllocationService.list_for_attempt",
+            return_value=allocations,
+        ),
+        patch(
+            "pbl4.management_backend.services.allocation_service.AllocationService.build_start_worker_command"
+        ) as mock_build_cmd,
+        patch(
+            "pbl4.management_backend.services.allocation_service.AllocationService.dispatch_allocation"
+        ) as mock_dispatch,
+        patch(
+            "pbl4.management_backend.services.allocation_service.AllocationService.build_stop_worker_command"
+        ) as mock_build_stop,
+        patch(
+            "pbl4.management_backend.services.attempt_service.abort_attempt"
+        ) as mock_abort_attempt,
+        patch(
+            "pbl4.management_backend.repositories.allocation_repository.update_desired_state"
+        ) as mock_update_desired,
     ):
         mock_build_cmd.return_value = MagicMock()
         mock_build_stop.return_value = MagicMock()
@@ -360,19 +398,25 @@ def test_dispatch_workers_for_attempt_partial_failure() -> None:
         # Node 1 received STOP_WORKER best-effort
         mock_node_gw.send_stop_worker.assert_called_once()
         assert mock_node_gw.send_stop_worker.call_args[0][0] == "node-1"
-        mock_update_desired.assert_called_once_with(mock_conn, "alloc-1", allocation_repository.DESIRED_STATE_STOPPED)
+        mock_update_desired.assert_called_once_with(
+            mock_conn, "alloc-1", allocation_repository.DESIRED_STATE_STOPPED
+        )
 
         # Runtime received ABORT_ATTEMPT
-        mock_abort_attempt.assert_called_once_with(mock_conn, "atm-1", reason="Partial worker dispatch failure")
+        mock_abort_attempt.assert_called_once_with(
+            mock_conn, "atm-1", reason="Partial worker dispatch failure"
+        )
         mock_rt_gw.send_command_and_wait_result.assert_called_once()
-        assert mock_rt_gw.send_command_and_wait_result.call_args[1]["command_type"] == "ABORT_ATTEMPT"
+        assert (
+            mock_rt_gw.send_command_and_wait_result.call_args[1]["command_type"] == "ABORT_ATTEMPT"
+        )
 
 
 # ─── 5. Runtime Gateway Snapshot Reconciliation ──────────────────────────────
 
 
 def test_runtime_gateway_snapshot_reconciliation_passes_mapping() -> None:
-    """Verify handle_state_snapshot forwards node_id and allocation_id to worker_session_repository."""
+    """Forward managed Worker identities during snapshot reconciliation."""
     port = MagicMock()
     gw = RuntimeGateway(port=port)
 
@@ -419,12 +463,20 @@ def test_runtime_gateway_snapshot_reconciliation_passes_mapping() -> None:
 
     with (
         patch("pbl4.management_backend.db.transaction", return_value=mock_db.transaction()),
-        patch("pbl4.management_backend.repositories.attempt_repository.get_attempt") as mock_get_attempt,
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.get_attempt"
+        ) as mock_get_attempt,
         patch("pbl4.management_backend.repositories.attempt_repository.update_attempt_state"),
-        patch("pbl4.management_backend.repositories.worker_session_repository.update_snapshot_projection") as mock_update_proj,
-        patch("pbl4.management_backend.repositories.worker_session_repository.upsert_session") as mock_upsert,
+        patch(
+            "pbl4.management_backend.repositories.worker_session_repository.update_snapshot_projection"
+        ) as mock_update_proj,
+        patch("pbl4.management_backend.repositories.worker_session_repository.upsert_session"),
     ):
-        mock_get_attempt.return_value = {"attempt_id": "atm-1", "state": "WAITING_WORKERS", "runtime_metadata": {}}
+        mock_get_attempt.return_value = {
+            "attempt_id": "atm-1",
+            "state": "WAITING_WORKERS",
+            "runtime_metadata": {},
+        }
         mock_update_proj.return_value = {"session_id": 100}
 
         gw.handle_state_snapshot(snapshot_payload)

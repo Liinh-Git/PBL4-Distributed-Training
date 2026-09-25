@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import base64
 import binascii
-from dataclasses import dataclass
 import hashlib
 import hmac
 import json
 import secrets
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from pbl4.common.errors import PBL4Error
@@ -115,7 +115,9 @@ def verify_worker_join_token(
 
     parts = token.split(".")
     if len(parts) != 2 or not parts[0] or not parts[1]:
-        raise WorkerAdmissionError("Malformed worker join token: expected two non-empty dot-separated parts")
+        raise WorkerAdmissionError(
+            "Malformed worker join token: expected two non-empty dot-separated parts"
+        )
 
     payload_b64, signature_b64 = parts
 
@@ -169,15 +171,19 @@ def verify_worker_join_token(
 
     current_time = time.time() if now is None else float(now)
     if exp < current_time:
-        raise WorkerAdmissionError(f"Worker join token has expired (exp={int(exp)}, now={int(current_time)})")
+        raise WorkerAdmissionError(
+            f"Worker join token has expired (exp={int(exp)}, now={int(current_time)})"
+        )
 
     if attempt_id != expected_attempt_id:
         raise WorkerAdmissionError(
-            f"Token attempt_id scope mismatch (claim '{attempt_id}' != expected '{expected_attempt_id}')"
+            "Token attempt_id scope mismatch "
+            f"(claim '{attempt_id}' != expected '{expected_attempt_id}')"
         )
     if allocation_id != expected_allocation_id:
         raise WorkerAdmissionError(
-            f"Token allocation_id scope mismatch (claim '{allocation_id}' != expected '{expected_allocation_id}')"
+            "Token allocation_id scope mismatch "
+            f"(claim '{allocation_id}' != expected '{expected_allocation_id}')"
         )
     if node_id != expected_node_id:
         raise WorkerAdmissionError(

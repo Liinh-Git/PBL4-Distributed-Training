@@ -137,7 +137,10 @@ def list_active(
     node_id: str | None = None,
 ) -> list[dict]:
     """List all currently active allocations across nodes (or for a specific node)."""
-    query = "SELECT * FROM worker_allocations WHERE actual_state IN ('REQUESTED', 'DISPATCHED', 'STARTED')"
+    query = (
+        "SELECT * FROM worker_allocations "
+        "WHERE actual_state IN ('REQUESTED', 'DISPATCHED', 'STARTED')"
+    )
     params: list[Any] = []
 
     if node_id:
@@ -163,9 +166,26 @@ def update_actual_state(
     failure_code: str | None = None,
     failure_message: str | None = None,
 ) -> dict | None:
-    """Update actual_state and associated lifecycle timestamps."""
+    """Apply one canonical allocation transition atomically.
+
+    The source-state predicate prevents delayed Agent events from reviving a
+    terminal allocation and closes the check/update race at the database.
+    """
     if actual_state not in VALID_ACTUAL_STATES:
         raise ValueError(f"Invalid actual_state '{actual_state}'")
+
+    allowed_from = {
+        ACTUAL_STATE_DISPATCHED: (ACTUAL_STATE_REQUESTED,),
+        ACTUAL_STATE_STARTED: (ACTUAL_STATE_DISPATCHED,),
+        ACTUAL_STATE_ENDED: (ACTUAL_STATE_STARTED,),
+        ACTUAL_STATE_FAILED: (
+            ACTUAL_STATE_REQUESTED,
+            ACTUAL_STATE_DISPATCHED,
+            ACTUAL_STATE_STARTED,
+        ),
+    }.get(actual_state)
+    if allowed_from is None:
+        raise ValueError(f"No transition may target actual_state '{actual_state}'")
 
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -178,6 +198,7 @@ def update_actual_state(
                 failure_code = COALESCE(%s, failure_code),
                 failure_message = COALESCE(%s, failure_message)
             WHERE allocation_id = %s
+              AND actual_state = ANY(%s)
             RETURNING *
             """,
             (
@@ -188,6 +209,7 @@ def update_actual_state(
                 failure_code,
                 failure_message,
                 allocation_id,
+                list(allowed_from),
             ),
         )
         row = cur.fetchone()
@@ -228,7 +250,9 @@ def terminal_update(
 ) -> dict | None:
     """Helper to transition an allocation to a terminal state (ENDED or FAILED)."""
     if actual_state not in TERMINAL_ACTUAL_STATES:
-        raise ValueError(f"Terminal state must be one of {TERMINAL_ACTUAL_STATES}, got '{actual_state}'")
+        raise ValueError(
+            f"Terminal state must be one of {TERMINAL_ACTUAL_STATES}, got '{actual_state}'"
+        )
 
     return update_actual_state(
         conn,

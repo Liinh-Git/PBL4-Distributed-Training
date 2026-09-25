@@ -57,12 +57,13 @@ def main() -> None:
 
     join_token = os.getenv("PBL4_WORKER_JOIN_TOKEN")
     managed_items = (args.attempt_id, args.allocation_id, args.node_id, join_token)
-    if any(item is not None for item in managed_items):
-        if not all(isinstance(item, str) and item for item in managed_items):
-            parser.error(
-                "When running with managed identity, --attempt-id, --allocation-id, "
-                "--node-id, and PBL4_WORKER_JOIN_TOKEN environment variable must all be provided"
-            )
+    if any(item is not None for item in managed_items) and not all(
+        isinstance(item, str) and item for item in managed_items
+    ):
+        parser.error(
+            "When running with managed identity, --attempt-id, --allocation-id, "
+            "--node-id, and PBL4_WORKER_JOIN_TOKEN environment variable must all be provided"
+        )
 
     from pbl4.worker.config import WorkerConfig
     from pbl4.worker.process import WorkerProcess

@@ -30,29 +30,25 @@ NodeService:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 import hashlib
 import unittest
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 from pbl4.management_backend.services.node_enrollment_service import (
     NodeEnrollmentCodeExpiredError,
     NodeEnrollmentCodeInvalidError,
-    NodeEnrollmentService,
     create_enrollment_code,
     enroll_node,
     hash_secret,
 )
 from pbl4.management_backend.services.node_service import (
-    NodeNotFoundError,
     NodeRevokedError,
-    NodeService,
     NodeUnauthorizedError,
     authenticate_node,
     mark_stale_nodes,
     record_heartbeat,
     record_node_online,
-    record_resources,
     revoke_node,
 )
 
@@ -114,7 +110,7 @@ class TestNodeEnrollmentService(unittest.TestCase):
             now=self.now,
         )
 
-        expected_hash = hashlib.sha256("valid-secret-code".encode("utf-8")).hexdigest()
+        expected_hash = hashlib.sha256(b"valid-secret-code").hexdigest()
         mock_consume.assert_called_once_with(
             self.mock_conn,
             code_hash=expected_hash,
@@ -220,7 +216,9 @@ class TestNodeEnrollmentService(unittest.TestCase):
         self.assertIn("node_secret", res)
         # Second consume fails because code is one-time
         mock_consume.return_value = None
-        with patch("pbl4.management_backend.repositories.node_enrollment_repository.get_enrollment_code") as mock_get:
+        with patch(
+            "pbl4.management_backend.repositories.node_enrollment_repository.get_enrollment_code"
+        ) as mock_get:
             mock_get.return_value = {"code_hash": "hash", "used_at": self.now}
             with self.assertRaises(NodeEnrollmentCodeInvalidError):
                 enroll_node(self.mock_conn, enrollment_code="code-123", now=self.now)
@@ -300,11 +298,11 @@ class TestNodeService(unittest.TestCase):
         mock_update_hb.assert_called_once_with(self.mock_conn, "node-worker-01", self.now)
         self.assertEqual(res["last_seen_at"], self.now)
 
-        # Case B: OFFLINE node transitions to ONLINE on heartbeat
+        # Case B: heartbeat alone cannot transition OFFLINE -> ONLINE
         offline_node = dict(self.base_node, state="OFFLINE")
         mock_get_node.return_value = offline_node
         record_heartbeat(self.mock_conn, "node-worker-01", last_seen_at=self.now)
-        mock_update_state.assert_called_with(self.mock_conn, "node-worker-01", "ONLINE")
+        mock_update_state.assert_not_called()
 
     @patch("pbl4.management_backend.repositories.node_repository.list_nodes")
     @patch("pbl4.management_backend.repositories.node_repository.update_state")
@@ -314,7 +312,9 @@ class TestNodeService(unittest.TestCase):
         mock_list_nodes: MagicMock,
     ) -> None:
         stale_node = dict(self.base_node, last_seen_at=self.now - timedelta(seconds=20))
-        fresh_node = dict(self.base_node, node_id="node-fresh", last_seen_at=self.now - timedelta(seconds=5))
+        fresh_node = dict(
+            self.base_node, node_id="node-fresh", last_seen_at=self.now - timedelta(seconds=5)
+        )
         mock_list_nodes.return_value = [stale_node, fresh_node]
 
         stale_ids = mark_stale_nodes(self.mock_conn, timeout_seconds=15.0, now=self.now)
@@ -343,7 +343,9 @@ class TestNodeService(unittest.TestCase):
         mock_get_node: MagicMock,
     ) -> None:
         mock_get_node.return_value = dict(self.base_node, state="ONLINE")
-        mock_repo_revoke.return_value = dict(self.base_node, state="REVOKED", credential_revoked_at=self.now)
+        mock_repo_revoke.return_value = dict(
+            self.base_node, state="REVOKED", credential_revoked_at=self.now
+        )
 
         res = revoke_node(self.mock_conn, "node-worker-01", now=self.now)
         self.assertEqual(res["state"], "REVOKED")
@@ -357,7 +359,9 @@ class TestNodeService(unittest.TestCase):
         mock_get_node: MagicMock,
     ) -> None:
         mock_get_node.return_value = dict(self.base_node, state="OFFLINE")
-        mock_repo_revoke.return_value = dict(self.base_node, state="REVOKED", credential_revoked_at=self.now)
+        mock_repo_revoke.return_value = dict(
+            self.base_node, state="REVOKED", credential_revoked_at=self.now
+        )
 
         res = revoke_node(self.mock_conn, "node-worker-01", now=self.now)
         self.assertEqual(res["state"], "REVOKED")

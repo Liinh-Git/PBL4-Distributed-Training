@@ -28,9 +28,7 @@ def standalone_service():
 
     dm_root = Path(repo_root_env).resolve()
     if not dm_root.is_dir():
-        pytest.skip(
-            f"Configured DATASET_MANAGER_REPO_ROOT directory does not exist: {dm_root}"
-        )
+        pytest.skip(f"Configured DATASET_MANAGER_REPO_ROOT directory does not exist: {dm_root}")
 
     python_candidates = [
         dm_root / ".venv" / "Scripts" / "python.exe",
@@ -50,8 +48,6 @@ def standalone_service():
     proc = subprocess.Popen(
         [str(python_exe), str(smoke_script)],
         cwd=str(dm_root),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
     )
 
     base_url = "http://127.0.0.1:9200"
@@ -70,8 +66,8 @@ def standalone_service():
 
     if not ready:
         proc.kill()
-        out, err = proc.communicate()
-        raise RuntimeError(f"Standalone server failed to start: stdout={out!r}, stderr={err!r}")
+        proc.wait(timeout=5)
+        raise RuntimeError("Standalone Dataset Manager smoke server failed to start")
 
     yield base_url, client
 

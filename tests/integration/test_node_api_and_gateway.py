@@ -46,50 +46,42 @@ Tests:
 
 from __future__ import annotations
 
-import asyncio
-from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 import os
 import time
 import uuid
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
-from fastapi.testclient import TestClient
 import psycopg
 import pytest
+from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from pbl4.agent_protocol.messages import (
     COMMAND_STATUS_ACCEPTED,
     COMMAND_STATUS_REJECTED,
-    COMMAND_TYPE_START_WORKER,
-    COMMAND_TYPE_STOP_WORKER,
     MESSAGE_TYPE_AGENT_HELLO,
-    MESSAGE_TYPE_COMMAND,
     MESSAGE_TYPE_COMMAND_ACK,
     MESSAGE_TYPE_HEARTBEAT,
     MESSAGE_TYPE_HELLO_ACK,
     MESSAGE_TYPE_RESOURCE_SNAPSHOT,
     MESSAGE_TYPE_WORKER_STATUS,
     WORKER_ACTUAL_STATE_ENDED,
-    WORKER_ACTUAL_STATE_FAILED,
     WORKER_ACTUAL_STATE_STARTED,
-    ActiveAllocationItem,
     AgentEnvelope,
     AgentHelloPayload,
     CommandAckPayload,
     GpuSnapshotItem,
     HeartbeatPayload,
     ResourceSnapshotPayload,
-    StartWorkerPayload,
-    StopWorkerPayload,
     WorkerStatusPayload,
     parse_agent_envelope,
 )
-from pbl4.management_backend import db
-from pbl4.management_backend.app import create_app
+from pbl4.management_backend.app import _run_node_maintenance_once, create_app
 from pbl4.management_backend.gateways.node_control_gateway import (
     get_node_control_gateway,
-    init_node_control_gateway,
 )
 from pbl4.management_backend.repositories import (
     allocation_repository,
@@ -146,10 +138,16 @@ def pg_conn():
 def clean_active_attempts(pg_conn: psycopg.Connection):
     """Ensure no active attempt leaks across tests or test files."""
     with pg_conn.cursor() as cur:
-        cur.execute("UPDATE attempts SET state = 'COMPLETED' WHERE state NOT IN ('COMPLETED', 'FAILED', 'ABORTED')")
+        cur.execute(
+            "UPDATE attempts SET state = 'COMPLETED' "
+            "WHERE state NOT IN ('COMPLETED', 'FAILED', 'ABORTED')"
+        )
     yield
     with pg_conn.cursor() as cur:
-        cur.execute("UPDATE attempts SET state = 'COMPLETED' WHERE state NOT IN ('COMPLETED', 'FAILED', 'ABORTED')")
+        cur.execute(
+            "UPDATE attempts SET state = 'COMPLETED' "
+            "WHERE state NOT IN ('COMPLETED', 'FAILED', 'ABORTED')"
+        )
 
 
 def _create_test_job_and_attempt(conn: psycopg.Connection) -> tuple[str, str]:
@@ -159,7 +157,10 @@ def _create_test_job_and_attempt(conn: psycopg.Connection) -> tuple[str, str]:
     now = datetime.now(UTC)
 
     with conn.cursor() as cur:
-        cur.execute("UPDATE attempts SET state = 'COMPLETED' WHERE state NOT IN ('COMPLETED', 'FAILED', 'ABORTED')")
+        cur.execute(
+            "UPDATE attempts SET state = 'COMPLETED' "
+            "WHERE state NOT IN ('COMPLETED', 'FAILED', 'ABORTED')"
+        )
         cur.execute(
             """
             INSERT INTO jobs (
@@ -173,10 +174,12 @@ def _create_test_job_and_attempt(conn: psycopg.Connection) -> tuple[str, str]:
                 "Job for Node API & Gateway tests",
                 "READY",
                 json.dumps({"dataset_build_id": "bld-test"}),
-                json.dumps({
-                    "training": {"training_seed": 42},
-                    "synchronization": {"expected_workers": 2},
-                }),
+                json.dumps(
+                    {
+                        "training": {"training_seed": 42},
+                        "synchronization": {"expected_workers": 2},
+                    }
+                ),
                 "hash-node-test",
                 now,
                 now,
@@ -206,6 +209,7 @@ def _wait_until(predicate, timeout: float = 3.0, interval: float = 0.05):
 
 # ─── 1. REST API Tests ────────────────────────────────────────────────────────
 
+
 def test_01_create_enrollment_code_api(app_client: TestClient) -> None:
     res = app_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 1800})
     assert res.status_code == 201
@@ -216,7 +220,9 @@ def test_01_create_enrollment_code_api(app_client: TestClient) -> None:
     assert data["code_hash"] == hashlib.sha256(data["enrollment_code"].encode("utf-8")).hexdigest()
 
 
-def test_02_enroll_node_and_credentials_api(app_client: TestClient, pg_conn: psycopg.Connection) -> None:
+def test_02_enroll_node_and_credentials_api(
+    app_client: TestClient, pg_conn: psycopg.Connection
+) -> None:
     # 1. Create code
     code_res = app_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
     raw_code = code_res.json()["data"]["enrollment_code"]
@@ -281,7 +287,9 @@ def test_03_enroll_code_second_use_rejected(app_client: TestClient) -> None:
     assert err["code"] == "NODE_ENROLLMENT_CODE_INVALID"
 
 
-def test_04_expired_enrollment_code_rejected(app_client: TestClient, pg_conn: psycopg.Connection) -> None:
+def test_04_expired_enrollment_code_rejected(
+    app_client: TestClient, pg_conn: psycopg.Connection
+) -> None:
     # Insert already-expired code
     raw_code = f"expired-{uuid.uuid4().hex}"
     code_hash = hashlib.sha256(raw_code.encode("utf-8")).hexdigest()
@@ -314,7 +322,10 @@ def test_05_revoke_node_api(app_client: TestClient) -> None:
 
 # ─── 2. WSS Gateway Auth & Connection Management ──────────────────────────────
 
-def test_06_wss_auth_success_and_rejections(app_client: TestClient, pg_conn: psycopg.Connection) -> None:
+
+def test_06_wss_auth_success_and_rejections(
+    app_client: TestClient, pg_conn: psycopg.Connection
+) -> None:
     # 1. Enroll valid node
     c_res = app_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
     raw_code = c_res.json()["data"]["enrollment_code"]
@@ -332,29 +343,35 @@ def test_06_wss_auth_success_and_rejections(app_client: TestClient, pg_conn: psy
         assert gw.is_node_connected(node_id)
 
     # B. Invalid secret -> Rejected (policy violation 1008)
-    with pytest.raises(Exception):
-        with app_client.websocket_connect(
+    with (
+        pytest.raises(WebSocketDisconnect),
+        app_client.websocket_connect(
             f"/ws/v1/nodes/{node_id}/control",
             headers={"Authorization": "Bearer wrong-secret"},
-        ):
-            pass
+        ),
+    ):
+        pass
 
     # C. Revoked node -> Rejected (1008)
     app_client.post(f"/api/v1/nodes/{node_id}/revoke")
-    with pytest.raises(Exception):
-        with app_client.websocket_connect(
+    with (
+        pytest.raises(WebSocketDisconnect),
+        app_client.websocket_connect(
             f"/ws/v1/nodes/{node_id}/control",
             headers={"Authorization": f"Bearer {node_secret}"},
-        ):
-            pass
+        ),
+    ):
+        pass
 
     # D. Unknown node -> Rejected (1008)
-    with pytest.raises(Exception):
-        with app_client.websocket_connect(
+    with (
+        pytest.raises(WebSocketDisconnect),
+        app_client.websocket_connect(
             "/ws/v1/nodes/node-nonexistent/control",
             headers={"Authorization": "Bearer any-secret"},
-        ):
-            pass
+        ),
+    ):
+        pass
 
 
 def test_07_one_active_control_connection_per_node(app_client: TestClient) -> None:
@@ -365,23 +382,27 @@ def test_07_one_active_control_connection_per_node(app_client: TestClient) -> No
     node_secret = e_res.json()["data"]["node_secret"]
 
     # Open first connection
-    with app_client.websocket_connect(
-        f"/ws/v1/nodes/{node_id}/control",
-        headers={"Authorization": f"Bearer {node_secret}"},
-    ) as ws1:
-        # Open second connection to same node
-        with app_client.websocket_connect(
+    with (
+        app_client.websocket_connect(
             f"/ws/v1/nodes/{node_id}/control",
             headers={"Authorization": f"Bearer {node_secret}"},
-        ) as ws2:
-            # First connection was closed/superseded by second connection
-            with pytest.raises(Exception):
-                ws1.receive_text()
+        ) as ws1,
+        app_client.websocket_connect(
+            f"/ws/v1/nodes/{node_id}/control",
+            headers={"Authorization": f"Bearer {node_secret}"},
+        ),
+        pytest.raises(WebSocketDisconnect),
+    ):
+        # First connection was closed/superseded by second connection
+        ws1.receive_text()
 
 
 # ─── 3. AGENT_HELLO, HEARTBEAT & Liveness ─────────────────────────────────────
 
-def test_08_agent_hello_transitions_offline_to_online(app_client: TestClient, pg_conn: psycopg.Connection) -> None:
+
+def test_08_agent_hello_transitions_offline_to_online(
+    app_client: TestClient, pg_conn: psycopg.Connection
+) -> None:
     c_res = app_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
     raw_code = c_res.json()["data"]["enrollment_code"]
     e_res = app_client.post("/api/v1/nodes/enroll", json={"enrollment_code": raw_code})
@@ -465,7 +486,9 @@ def test_09_heartbeat_and_disconnect_alone_does_not_offline(
     assert node["state"] == "ONLINE"
 
 
-def test_10_resource_snapshot_persisted(app_client: TestClient, pg_conn: psycopg.Connection) -> None:
+def test_10_resource_snapshot_persisted(
+    app_client: TestClient, pg_conn: psycopg.Connection
+) -> None:
     c_res = app_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
     raw_code = c_res.json()["data"]["enrollment_code"]
     e_res = app_client.post("/api/v1/nodes/enroll", json={"enrollment_code": raw_code})
@@ -476,6 +499,16 @@ def test_10_resource_snapshot_persisted(app_client: TestClient, pg_conn: psycopg
         f"/ws/v1/nodes/{node_id}/control",
         headers={"Authorization": f"Bearer {node_secret}"},
     ) as ws:
+        hello = AgentEnvelope(
+            message_type=MESSAGE_TYPE_AGENT_HELLO,
+            message_id="msg-res-hello",
+            node_id=node_id,
+            sent_at=datetime.now(UTC).isoformat(),
+            payload=AgentHelloPayload(agent_version="0.1.0", platform="Linux").to_dict(),
+        )
+        ws.send_text(hello.to_json())
+        assert parse_agent_envelope(ws.receive_text()).message_type == MESSAGE_TYPE_HELLO_ACK
+
         # Send RESOURCE_SNAPSHOT
         res_payload = ResourceSnapshotPayload(
             cpu_utilization_pct=42.5,
@@ -500,7 +533,9 @@ def test_10_resource_snapshot_persisted(app_client: TestClient, pg_conn: psycopg
         ws.send_text(env.to_json())
 
     # Verify persisted in database
-    _wait_until(lambda: node_repository.get_node(pg_conn, node_id).get("latest_resources_jsonb") is not None)
+    _wait_until(
+        lambda: node_repository.get_node(pg_conn, node_id).get("latest_resources_jsonb") is not None
+    )
     node = node_repository.get_node(pg_conn, node_id)
     resources = node["latest_resources_jsonb"]
     assert resources is not None
@@ -510,6 +545,7 @@ def test_10_resource_snapshot_persisted(app_client: TestClient, pg_conn: psycopg
 
 
 # ─── 4. COMMAND_ACK & WORKER_STATUS Mappings ──────────────────────────────────
+
 
 def test_11_command_ack_and_worker_status_lifecycle(
     app_client: TestClient, pg_conn: psycopg.Connection
@@ -549,7 +585,10 @@ def test_11_command_ack_and_worker_status_lifecycle(
 
         # Simulate dispatch -> actual_state = DISPATCHED
         allocation_service.record_dispatched(pg_conn, allocation_id)
-        assert allocation_repository.get_allocation(pg_conn, allocation_id)["actual_state"] == "DISPATCHED"
+        assert (
+            allocation_repository.get_allocation(pg_conn, allocation_id)["actual_state"]
+            == "DISPATCHED"
+        )
 
         # A. COMMAND_ACK ACCEPTED -> remains DISPATCHED
         ack_accepted = AgentEnvelope(
@@ -584,7 +623,12 @@ def test_11_command_ack_and_worker_status_lifecycle(
         )
         ws.send_text(st_started.to_json())
 
-        _wait_until(lambda: allocation_repository.get_allocation(pg_conn, allocation_id).get("actual_state") == "STARTED")
+        _wait_until(
+            lambda: (
+                allocation_repository.get_allocation(pg_conn, allocation_id).get("actual_state")
+                == "STARTED"
+            )
+        )
         alloc = allocation_repository.get_allocation(pg_conn, allocation_id)
         assert alloc["actual_state"] == "STARTED"
 
@@ -603,7 +647,12 @@ def test_11_command_ack_and_worker_status_lifecycle(
         )
         ws.send_text(st_ended.to_json())
 
-        _wait_until(lambda: allocation_repository.get_allocation(pg_conn, allocation_id).get("actual_state") == "ENDED")
+        _wait_until(
+            lambda: (
+                allocation_repository.get_allocation(pg_conn, allocation_id).get("actual_state")
+                == "ENDED"
+            )
+        )
         alloc = allocation_repository.get_allocation(pg_conn, allocation_id)
         assert alloc["actual_state"] == "ENDED"
 
@@ -658,13 +707,19 @@ def test_12_command_ack_rejected_transitions_to_failed(
         )
         ws.send_text(ack_rejected.to_json())
 
-        _wait_until(lambda: allocation_repository.get_allocation(pg_conn, allocation_id).get("actual_state") == "FAILED")
+        _wait_until(
+            lambda: (
+                allocation_repository.get_allocation(pg_conn, allocation_id).get("actual_state")
+                == "FAILED"
+            )
+        )
         alloc = allocation_repository.get_allocation(pg_conn, allocation_id)
         assert alloc["actual_state"] == "FAILED"
         assert alloc["failure_code"] == "WORKER_SPAWN_FAILED"
 
 
 # ─── 5. Revocation & Connection Close ─────────────────────────────────────────
+
 
 def test_13_revoke_closes_active_wss_and_blocks_reconnect(
     app_client: TestClient, pg_conn: psycopg.Connection
@@ -678,7 +733,7 @@ def test_13_revoke_closes_active_wss_and_blocks_reconnect(
     with app_client.websocket_connect(
         f"/ws/v1/nodes/{node_id}/control",
         headers={"Authorization": f"Bearer {node_secret}"},
-    ) as ws:
+    ):
         # Node connected
         assert get_node_control_gateway().is_node_connected(node_id)
 
@@ -691,15 +746,18 @@ def test_13_revoke_closes_active_wss_and_blocks_reconnect(
         assert not get_node_control_gateway().is_node_connected(node_id)
 
     # Reconnect attempt must fail
-    with pytest.raises(Exception):
-        with app_client.websocket_connect(
+    with (
+        pytest.raises(WebSocketDisconnect),
+        app_client.websocket_connect(
             f"/ws/v1/nodes/{node_id}/control",
             headers={"Authorization": f"Bearer {node_secret}"},
-        ):
-            pass
+        ),
+    ):
+        pass
 
 
 # ─── 6. Maintenance Logic Verification ────────────────────────────────────────
+
 
 def test_14_stale_node_becomes_offline_without_altering_allocations(
     app_client: TestClient, pg_conn: psycopg.Connection
@@ -735,7 +793,7 @@ def test_14_stale_node_becomes_offline_without_altering_allocations(
     assert alloc["actual_state"] == "REQUESTED"
 
 
-def test_15_dispatched_timeout_marks_allocation_failed(
+def test_15_dispatched_timeout_aborts_attempt_and_marks_allocation_failed(
     app_client: TestClient, pg_conn: psycopg.Connection
 ) -> None:
     _, attempt_id = _create_test_job_and_attempt(pg_conn)
@@ -757,9 +815,29 @@ def test_15_dispatched_timeout_marks_allocation_failed(
         pg_conn, alloc_id, "DISPATCHED", dispatched_at=old_time
     )
 
-    timed_out = allocation_service.fail_timed_out_dispatched_allocations(pg_conn, timeout_seconds=60.0)
-    assert alloc_id in timed_out
+    _run_node_maintenance_once(
+        SimpleNamespace(
+            node_heartbeat_timeout_seconds=60.0,
+            worker_start_timeout_seconds=60.0,
+        )
+    )
 
     alloc = allocation_repository.get_allocation(pg_conn, alloc_id)
     assert alloc["actual_state"] == "FAILED"
     assert alloc["failure_code"] == "WORKER_START_TIMEOUT"
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT state, request_jsonb
+              FROM control_commands
+             WHERE command_type = 'ABORT_ATTEMPT' AND target_id = %s
+             ORDER BY requested_at DESC
+             LIMIT 1
+            """,
+            (attempt_id,),
+        )
+        command = cur.fetchone()
+    assert command is not None
+    assert command[0] == "PENDING"
+    request = command[1] if isinstance(command[1], dict) else json.loads(command[1])
+    assert request["reason"] == "Worker start timeout"

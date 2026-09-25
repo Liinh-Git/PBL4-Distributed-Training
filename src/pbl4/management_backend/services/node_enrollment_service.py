@@ -16,12 +16,12 @@ Responsibilities:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 import hashlib
 import logging
 import secrets
-from typing import Any
 import uuid
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import psycopg
 
@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 # ─── Service Exceptions ───────────────────────────────────────────────────────
+
 
 class NodeEnrollmentError(Exception):
     """Base exception for node enrollment errors."""
@@ -58,6 +59,7 @@ class NodeEnrollmentCodeExpiredError(NodeEnrollmentError):
 
 
 # ─── Service Implementation ───────────────────────────────────────────────────
+
 
 def hash_secret(secret: str) -> str:
     """Compute standard SHA-256 hex digest of a secret string."""
@@ -93,7 +95,9 @@ class NodeEnrollmentService:
             expires_at=expires_at,
         )
 
-        logger.info("Created node enrollment code hash=%s expires_at=%s", code_hash[:8] + "...", expires_at)
+        logger.info(
+            "Created node enrollment code hash=%s expires_at=%s", code_hash[:8] + "...", expires_at
+        )
         return {
             "enrollment_code": raw_code,
             "code_hash": code_hash,
@@ -147,7 +151,9 @@ class NodeEnrollmentService:
         credential_hash = hash_secret(node_secret)
 
         caps = capabilities or {}
-        resolved_display_name = display_name or caps.get("hostname") or f"Node-{chosen_node_id[-6:]}"
+        resolved_display_name = (
+            display_name or caps.get("hostname") or f"Node-{chosen_node_id[-6:]}"
+        )
 
         # Insert new node record with INITIAL STATE OFFLINE
         node = node_repository.create_node(

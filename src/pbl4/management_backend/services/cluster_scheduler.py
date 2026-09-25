@@ -21,15 +21,16 @@ Invariants:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
 # ─── Scheduler Exceptions ─────────────────────────────────────────────────────
+
 
 class ClusterSchedulerError(Exception):
     """Base exception for cluster scheduling errors."""
@@ -49,6 +50,7 @@ class NodeCapacityUnavailableError(ClusterSchedulerError):
 
 # ─── Placement Specification ──────────────────────────────────────────────────
 
+
 @dataclass(frozen=True, slots=True)
 class WorkerPlacementSpec:
     """Deterministic placement directive for a single worker on a target node."""
@@ -58,6 +60,7 @@ class WorkerPlacementSpec:
 
 
 # ─── Scheduler Implementation ─────────────────────────────────────────────────
+
 
 class ClusterScheduler:
     """Pure deterministic scheduler for distributed training worker placement."""
@@ -74,7 +77,7 @@ class ClusterScheduler:
         Args:
             expected_workers: Number of workers required by the frozen synchronization contract.
             nodes: List of node dictionaries containing node_id, state, and capabilities_jsonb.
-            active_allocations: List of active allocation dicts (containing node_id) or set of busy node_ids.
+            active_allocations: Active allocation rows or a set of busy node ids.
 
         Returns:
             List of exactly expected_workers WorkerPlacementSpec objects.
@@ -83,8 +86,14 @@ class ClusterScheduler:
             NodeCapacityUnavailableError: If available online nodes are fewer than expected_workers.
             ValueError: If expected_workers <= 0.
         """
-        if not isinstance(expected_workers, int) or isinstance(expected_workers, bool) or expected_workers <= 0:
-            raise ValueError(f"expected_workers must be a positive integer, got: {expected_workers!r}")
+        if (
+            not isinstance(expected_workers, int)
+            or isinstance(expected_workers, bool)
+            or expected_workers <= 0
+        ):
+            raise ValueError(
+                f"expected_workers must be a positive integer, got: {expected_workers!r}"
+            )
 
         # Extract set of busy node IDs currently holding active allocations
         busy_node_ids: set[str] = set()
@@ -116,7 +125,8 @@ class ClusterScheduler:
         # 4. Check available capacity
         if len(candidates) < expected_workers:
             raise NodeCapacityUnavailableError(
-                f"Cluster has insufficient capacity: {expected_workers} online worker node(s) required, "
+                "Cluster has insufficient capacity: "
+                f"{expected_workers} online worker node(s) required, "
                 f"but only {len(candidates)} available."
             )
 
@@ -149,9 +159,11 @@ class ClusterScheduler:
         has_gpu = False
         if isinstance(caps, dict):
             gpus = caps.get("gpus")
-            if isinstance(gpus, (list, tuple)) and len(gpus) > 0:
-                has_gpu = True
-            elif caps.get("gpu_count", 0) > 0 or caps.get("has_gpu") is True:
+            if (
+                (isinstance(gpus, (list, tuple)) and len(gpus) > 0)
+                or caps.get("gpu_count", 0) > 0
+                or caps.get("has_gpu") is True
+            ):
                 has_gpu = True
 
         return "cuda:0" if has_gpu else "cpu"

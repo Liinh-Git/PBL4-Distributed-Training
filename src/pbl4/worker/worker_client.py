@@ -123,7 +123,9 @@ class WorkerClient:
         frame = DTPFrame.read_from(self._transport.sock, recv_exact)
         message = decode_control_message(frame.header.message_type, frame.payload)
         if isinstance(message, Error):
-            raise ProtocolError(f"Runtime rejected admission ({message.error_code}): {message.message}")
+            raise ProtocolError(
+                f"Runtime rejected admission ({message.error_code}): {message.message}"
+            )
         if not isinstance(message, HelloAck):
             raise ProtocolError("Runtime did not reply with HELLO_ACK")
         self.session_id = int(message.session_id)
@@ -264,7 +266,7 @@ class WorkerClient:
         }
         if loss is not None:
             values["loss"] = loss
-        if compute_ms is not None and compute_ms > 0:
+        if compute_ms is not None:
             values["compute_ms"] = float(compute_ms)
         meta = GradientMeta.from_dict(values)
         end = GradientEnd.from_dict(

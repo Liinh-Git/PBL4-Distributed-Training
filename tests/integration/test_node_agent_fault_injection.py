@@ -1,27 +1,25 @@
 """Fault Injection and Release Gate Integration Tests for Node Agent & Managed Admission.
 
 Reference: Phase 9 requirements in NODE_AGENT_IMPLEMENTATION_PLAN.md:
-- Fault Invariant 1: Agent restart preserves running Worker, DTP stays alive, reconcile finds PID, no duplicate Worker.
-- Fault Invariant 2: Backend restart preserves running Worker, DTP stays alive, Agent reconnects, no duplicate Worker.
-- Fault Invariant 3: Duplicate START_WORKER idempotency across STARTING, RUNNING, STOPPED, FAILED states.
-- Fault Invariant 4: Worker admission gate: 10 rejection cases verified BEFORE registry.register(), positive admission verified.
-- Liveness fix: ParameterServer duplicate registry.heartbeat() elimination and microsecond drift prevention.
+- Agent restart preserves the Worker, DTP session, and PID reconciliation.
+- Backend restart preserves the Worker and allows Agent reconnection.
+- Duplicate START_WORKER remains idempotent across all local states.
+- Admission rejection occurs before registry.register(); valid admission succeeds.
+- ParameterServer heartbeat handling does not introduce timestamp drift.
 """
 
 from __future__ import annotations
 
 import base64
-import contextlib
 import json
 import os
-from pathlib import Path
 import socket
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import psutil
@@ -43,11 +41,7 @@ from pbl4.node_agent.supervisor import (
 )
 from pbl4.protocol.codec import DTPFrame
 from pbl4.protocol.constants import (
-    MESSAGE_TYPE_ERROR,
-    MESSAGE_TYPE_HEARTBEAT,
-    MESSAGE_TYPE_HELLO,
     MESSAGE_TYPE_HELLO_ACK,
-    MESSAGE_TYPE_SHARD_READY,
 )
 from pbl4.protocol.messages import (
     ERROR_CODE_WORKER_ADMISSION_EXPIRED,
@@ -64,7 +58,7 @@ from pbl4.protocol.messages import (
     decode_control_message,
 )
 from pbl4.protocol.parameter_manifest import ParameterEntry, ParameterManifest
-from pbl4.runtime.parameter_server import ParameterServer, _Connection
+from pbl4.runtime.parameter_server import ParameterServer
 from pbl4.runtime.worker_registry import SessionState, WorkerRegistry
 from pbl4.transport.framed_socket import recv_exact, send_all
 
@@ -207,11 +201,13 @@ time.sleep(30)
         self.assertEqual(self.registry.snapshot()[0].state, SessionState.PROVISIONING)
 
         # Step 2: Simulate Agent restart (Agent stops, supervisor object discarded)
-        # Note: proc is NOT killed because in production Agent process restart does not kill children
+        # Agent restart does not kill child Worker processes in production.
         del supervisor1
 
         # Step 3: Verify Worker OS process is STILL ALIVE during Agent downtime
-        self.assertTrue(psutil.pid_exists(worker_pid_before), "Worker process must survive Agent stop")
+        self.assertTrue(
+            psutil.pid_exists(worker_pid_before), "Worker process must survive Agent stop"
+        )
         self.assertEqual(len(self.server.worker_ids()), 1, "DTP connection must remain alive")
 
         # Step 4: Start Supervisor 2 (Agent rebooted) and run reconcile_on_startup()
@@ -223,7 +219,9 @@ time.sleep(30)
         rec = reconciled[0]
         self.assertEqual(rec.allocation_id, "alloc-fi-1")
         self.assertEqual(rec.local_state, LOCAL_STATE_RUNNING)
-        self.assertEqual(rec.pid, worker_pid_before, "Worker PID before restart == Worker PID after reconcile")
+        self.assertEqual(
+            rec.pid, worker_pid_before, "Worker PID before restart == Worker PID after reconcile"
+        )
         self.assertIsNone(rec.exit_code, "Must not fabricate exit code for live process")
 
         # Step 6: Verify duplicate START_WORKER after restart does NOT spawn second process
@@ -298,14 +296,16 @@ class TestFaultInvariant2BackendRestart(unittest.TestCase):
 
         client_sock = socket.create_connection((self.host, self.port), timeout=5.0)
         try:
-            hello = Hello.from_dict({
-                **_base_hello_dict(),
-                "node_label": "node-fi-2",
-                "attempt_id": "att-fi-2",
-                "allocation_id": "alloc-fi-2",
-                "node_id": "node-fi-2",
-                "worker_join_token": token,
-            })
+            hello = Hello.from_dict(
+                {
+                    **_base_hello_dict(),
+                    "node_label": "node-fi-2",
+                    "attempt_id": "att-fi-2",
+                    "allocation_id": "alloc-fi-2",
+                    "node_id": "node-fi-2",
+                    "worker_join_token": token,
+                }
+            )
             frame = build_control_frame(hello)
             frame.write_to(client_sock, send_all)
 
@@ -324,14 +324,16 @@ class TestFaultInvariant2BackendRestart(unittest.TestCase):
             self.assertEqual(self.registry.snapshot()[0].state, SessionState.SHARD_READY)
 
             # Send heartbeat frame over DTP while Backend is "dead"
-            hb = Heartbeat.from_dict({
-                "attempt_id": "att-fi-2",
-                "worker_state": "SHARD_READY",
-                "local_model_version": 0,
-                "last_completed_operation_id": None,
-                "recovery_cursor": {"epoch": 0},
-                "monotonic_timestamp_ms": 1000.0,
-            })
+            hb = Heartbeat.from_dict(
+                {
+                    "attempt_id": "att-fi-2",
+                    "worker_state": "SHARD_READY",
+                    "local_model_version": 0,
+                    "last_completed_operation_id": None,
+                    "recovery_cursor": {"epoch": 0},
+                    "monotonic_timestamp_ms": 1000.0,
+                }
+            )
             hb_frame = build_control_frame(hb, session_id=1, worker_id=0)
             hb_frame.write_to(client_sock, send_all)
 
@@ -419,7 +421,9 @@ class TestFaultInvariant3DuplicateStartWorker(unittest.TestCase):
             status2, err2 = self.supervisor.spawn_worker(cmd_a)
             self.assertEqual(status2, COMMAND_STATUS_ACCEPTED)
             self.assertIsNone(err2)
-            self.assertEqual(mock_popen.call_count, 1, "Duplicate START on RUNNING must NOT spawn second process")
+            self.assertEqual(
+                mock_popen.call_count, 1, "Duplicate START on RUNNING must NOT spawn second process"
+            )
 
             # Case B: Duplicate START when STARTING -> ACCEPTED no-op
             cmd_b = StartWorkerPayload(
@@ -445,7 +449,11 @@ class TestFaultInvariant3DuplicateStartWorker(unittest.TestCase):
             status_b, err_b = self.supervisor.spawn_worker(cmd_b)
             self.assertEqual(status_b, COMMAND_STATUS_ACCEPTED)
             self.assertIsNone(err_b)
-            self.assertEqual(mock_popen.call_count, 1, "Duplicate START on STARTING must NOT spawn second process")
+            self.assertEqual(
+                mock_popen.call_count,
+                1,
+                "Duplicate START on STARTING must NOT spawn second process",
+            )
 
             # Case D: START after STOPPED -> REJECTED
             rec.local_state = LOCAL_STATE_STOPPED
@@ -508,7 +516,9 @@ class TestFaultInvariant4WorkerAdmission(unittest.TestCase):
     def tearDown(self) -> None:
         self.server.stop()
 
-    def _send_hello_and_get_response(self, hello_dict: dict[str, object]) -> DtpControlMessage | None:
+    def _send_hello_and_get_response(
+        self, hello_dict: dict[str, object]
+    ) -> DtpControlMessage | None:
         s = socket.create_connection((self.host, self.port), timeout=5.0)
         try:
             hello = Hello.from_dict(hello_dict)
@@ -539,96 +549,122 @@ class TestFaultInvariant4WorkerAdmission(unittest.TestCase):
         pad = (-len(payload_b64)) % 4
         payload_dict = json.loads(base64.urlsafe_b64decode(payload_b64 + "=" * pad).decode("utf-8"))
         payload_dict["allocation_id"] = "alloc-tampered"
-        tampered_bytes = json.dumps(payload_dict, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        tampered_bytes = json.dumps(payload_dict, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
         tampered_payload_b64 = base64.urlsafe_b64encode(tampered_bytes).decode("ascii").rstrip("=")
         tampered_payload_token = f"{tampered_payload_b64}.{sig_b64}"
 
         test_cases = [
             # 1. Random token
-            ("random_token", {
-                **_base_hello_dict(),
-                "attempt_id": "att-fi-4",
-                "allocation_id": "alloc-1",
-                "node_id": "node-1",
-                "worker_join_token": "random.invalid.gibberish",
-            }, ERROR_CODE_WORKER_ADMISSION_INVALID),
-
+            (
+                "random_token",
+                {
+                    **_base_hello_dict(),
+                    "attempt_id": "att-fi-4",
+                    "allocation_id": "alloc-1",
+                    "node_id": "node-1",
+                    "worker_join_token": "random.invalid.gibberish",
+                },
+                ERROR_CODE_WORKER_ADMISSION_INVALID,
+            ),
             # 2. Malformed token
-            ("malformed_token", {
-                **_base_hello_dict(),
-                "attempt_id": "att-fi-4",
-                "allocation_id": "alloc-1",
-                "node_id": "node-1",
-                "worker_join_token": "not-a-token",
-            }, ERROR_CODE_WORKER_ADMISSION_INVALID),
-
+            (
+                "malformed_token",
+                {
+                    **_base_hello_dict(),
+                    "attempt_id": "att-fi-4",
+                    "allocation_id": "alloc-1",
+                    "node_id": "node-1",
+                    "worker_join_token": "not-a-token",
+                },
+                ERROR_CODE_WORKER_ADMISSION_INVALID,
+            ),
             # 3. Expired token
-            ("expired_token", {
-                **_base_hello_dict(),
-                "attempt_id": "att-fi-4",
-                "allocation_id": "alloc-1",
-                "node_id": "node-1",
-                "worker_join_token": issue_worker_join_token(
-                    secret=self.secret,
-                    attempt_id="att-fi-4",
-                    allocation_id="alloc-1",
-                    node_id="node-1",
-                    ttl_seconds=10,
-                    now=time.time() - 100,  # Expired
-                ),
-            }, ERROR_CODE_WORKER_ADMISSION_EXPIRED),
-
+            (
+                "expired_token",
+                {
+                    **_base_hello_dict(),
+                    "attempt_id": "att-fi-4",
+                    "allocation_id": "alloc-1",
+                    "node_id": "node-1",
+                    "worker_join_token": issue_worker_join_token(
+                        secret=self.secret,
+                        attempt_id="att-fi-4",
+                        allocation_id="alloc-1",
+                        node_id="node-1",
+                        ttl_seconds=10,
+                        now=time.time() - 100,  # Expired
+                    ),
+                },
+                ERROR_CODE_WORKER_ADMISSION_EXPIRED,
+            ),
             # 4. Tampered payload
-            ("tampered_payload", {
-                **_base_hello_dict(),
-                "attempt_id": "att-fi-4",
-                "allocation_id": "alloc-1",
-                "node_id": "node-1",
-                "worker_join_token": tampered_payload_token,
-            }, ERROR_CODE_WORKER_ADMISSION_INVALID),
-
+            (
+                "tampered_payload",
+                {
+                    **_base_hello_dict(),
+                    "attempt_id": "att-fi-4",
+                    "allocation_id": "alloc-1",
+                    "node_id": "node-1",
+                    "worker_join_token": tampered_payload_token,
+                },
+                ERROR_CODE_WORKER_ADMISSION_INVALID,
+            ),
             # 5. Tampered signature
-            ("tampered_signature", {
-                **_base_hello_dict(),
-                "attempt_id": "att-fi-4",
-                "allocation_id": "alloc-1",
-                "node_id": "node-1",
-                "worker_join_token": valid_token[:-4] + "AAAA",
-            }, ERROR_CODE_WORKER_ADMISSION_INVALID),
-
+            (
+                "tampered_signature",
+                {
+                    **_base_hello_dict(),
+                    "attempt_id": "att-fi-4",
+                    "allocation_id": "alloc-1",
+                    "node_id": "node-1",
+                    "worker_join_token": valid_token[:-4] + "AAAA",
+                },
+                ERROR_CODE_WORKER_ADMISSION_INVALID,
+            ),
             # 6. Wrong attempt_id
-            ("wrong_attempt_id", {
-                **_base_hello_dict(),
-                "attempt_id": "att-wrong",
-                "allocation_id": "alloc-1",
-                "node_id": "node-1",
-                "worker_join_token": issue_worker_join_token(
-                    secret=self.secret,
-                    attempt_id="att-wrong",
-                    allocation_id="alloc-1",
-                    node_id="node-1",
-                    ttl_seconds=300,
-                ),
-            }, ERROR_CODE_WORKER_ADMISSION_SCOPE_MISMATCH),
-
+            (
+                "wrong_attempt_id",
+                {
+                    **_base_hello_dict(),
+                    "attempt_id": "att-wrong",
+                    "allocation_id": "alloc-1",
+                    "node_id": "node-1",
+                    "worker_join_token": issue_worker_join_token(
+                        secret=self.secret,
+                        attempt_id="att-wrong",
+                        allocation_id="alloc-1",
+                        node_id="node-1",
+                        ttl_seconds=300,
+                    ),
+                },
+                ERROR_CODE_WORKER_ADMISSION_SCOPE_MISMATCH,
+            ),
             # 7. Wrong allocation_id (token has alloc-1, but hello declares alloc-wrong)
-            ("wrong_allocation_id", {
-                **_base_hello_dict(),
-                "attempt_id": "att-fi-4",
-                "allocation_id": "alloc-wrong",
-                "node_id": "node-1",
-                "worker_join_token": valid_token,
-            }, ERROR_CODE_WORKER_ADMISSION_SCOPE_MISMATCH),
-
+            (
+                "wrong_allocation_id",
+                {
+                    **_base_hello_dict(),
+                    "attempt_id": "att-fi-4",
+                    "allocation_id": "alloc-wrong",
+                    "node_id": "node-1",
+                    "worker_join_token": valid_token,
+                },
+                ERROR_CODE_WORKER_ADMISSION_SCOPE_MISMATCH,
+            ),
             # 8. Wrong node_id (token has node-1, but hello declares node-wrong)
-            ("wrong_node_id", {
-                **_base_hello_dict(),
-                "attempt_id": "att-fi-4",
-                "allocation_id": "alloc-1",
-                "node_id": "node-wrong",
-                "worker_join_token": valid_token,
-            }, ERROR_CODE_WORKER_ADMISSION_SCOPE_MISMATCH),
-
+            (
+                "wrong_node_id",
+                {
+                    **_base_hello_dict(),
+                    "attempt_id": "att-fi-4",
+                    "allocation_id": "alloc-1",
+                    "node_id": "node-wrong",
+                    "worker_join_token": valid_token,
+                },
+                ERROR_CODE_WORKER_ADMISSION_SCOPE_MISMATCH,
+            ),
             # 9. Missing managed identity (unmanaged Hello when admission required)
             ("missing_managed_identity", _base_hello_dict(), ERROR_CODE_WORKER_ADMISSION_REQUIRED),
         ]
@@ -653,20 +689,24 @@ class TestFaultInvariant4WorkerAdmission(unittest.TestCase):
             # First admission of alloc-1 succeeds:
             s1 = socket.create_connection((self.host, self.port), timeout=5.0)
             try:
-                h1 = Hello.from_dict({
-                    **_base_hello_dict(),
-                    "attempt_id": "att-fi-4",
-                    "allocation_id": "alloc-1",
-                    "node_id": "node-1",
-                    "worker_join_token": valid_token,
-                })
+                h1 = Hello.from_dict(
+                    {
+                        **_base_hello_dict(),
+                        "attempt_id": "att-fi-4",
+                        "allocation_id": "alloc-1",
+                        "node_id": "node-1",
+                        "worker_join_token": valid_token,
+                    }
+                )
                 frame1 = build_control_frame(h1)
                 frame1.write_to(s1, send_all)
 
                 ack_frame = DTPFrame.read_from(s1, recv_exact)
                 ack = decode_control_message(ack_frame.header.message_type, ack_frame.payload)
                 self.assertIsInstance(ack, HelloAck)
-                self.assertEqual(len(self.registry.snapshot()), 1, "First valid admission consumes slot")
+                self.assertEqual(
+                    len(self.registry.snapshot()), 1, "First valid admission consumes slot"
+                )
             finally:
                 s1.close()
 
@@ -683,13 +723,15 @@ class TestFaultInvariant4WorkerAdmission(unittest.TestCase):
             )
             s2 = socket.create_connection((self.host, self.port), timeout=5.0)
             try:
-                h2 = Hello.from_dict({
-                    **_base_hello_dict(),
-                    "attempt_id": "att-fi-4",
-                    "allocation_id": "alloc-1",
-                    "node_id": "node-1",
-                    "worker_join_token": token2,
-                })
+                h2 = Hello.from_dict(
+                    {
+                        **_base_hello_dict(),
+                        "attempt_id": "att-fi-4",
+                        "allocation_id": "alloc-1",
+                        "node_id": "node-1",
+                        "worker_join_token": token2,
+                    }
+                )
                 frame2 = build_control_frame(h2)
                 frame2.write_to(s2, send_all)
 
@@ -700,7 +742,7 @@ class TestFaultInvariant4WorkerAdmission(unittest.TestCase):
                 self.assertEqual(resp2.error_code, ERROR_CODE_WORKER_ADMISSION_INVALID)
                 self.assertIn("already been admitted", resp2.message)
 
-                # Invariant: Duplicate admission rejected BEFORE registration, no second session created
+                # Duplicate admission is rejected before creating a second session.
                 self.assertEqual(len(self.registry.snapshot()), 1)
             finally:
                 s2.close()
@@ -766,20 +808,24 @@ class TestParameterServerLivenessDuplicateFix(unittest.TestCase):
                 original_heartbeat(worker_id, session_id, now)
 
             with patch.object(self.registry, "heartbeat", side_effect=counting_heartbeat):
-                hb = Heartbeat.from_dict({
-                    "attempt_id": "att-liveness",
-                    "worker_state": "SHARD_READY",
-                    "local_model_version": 0,
-                    "last_completed_operation_id": None,
-                    "recovery_cursor": {"epoch": 0},
-                    "monotonic_timestamp_ms": 100.0,
-                })
+                hb = Heartbeat.from_dict(
+                    {
+                        "attempt_id": "att-liveness",
+                        "worker_state": "SHARD_READY",
+                        "local_model_version": 0,
+                        "last_completed_operation_id": None,
+                        "recovery_cursor": {"epoch": 0},
+                        "monotonic_timestamp_ms": 100.0,
+                    }
+                )
                 frame2 = build_control_frame(hb, session_id=1, worker_id=0)
                 frame2.write_to(s, send_all)
                 time.sleep(0.05)
 
                 # Must be called EXACTLY ONCE per frame!
-                self.assertEqual(call_count, 1, "HEARTBEAT frame must trigger registry.heartbeat() exactly once")
+                self.assertEqual(
+                    call_count, 1, "HEARTBEAT frame must trigger registry.heartbeat() exactly once"
+                )
         finally:
             s.close()
 

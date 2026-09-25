@@ -11,10 +11,10 @@ Responsibilities:
 - Report only active (STARTING / RUNNING) allocations in AGENT_HELLO.
 - Heartbeat loop: periodic HEARTBEAT with active_allocations_count.
 - Telemetry loop: periodic RESOURCE_SNAPSHOT with CPU, RAM, and GPU metrics.
-- Worker monitoring loop: detect unexpected process exit outside stop flow and report WORKER_STATUS FAILED.
+- Worker monitoring reports unexpected process exits as WORKER_STATUS FAILED.
 - Command receive loop:
-  * START_WORKER -> idempotent spawn via WorkerProcessSupervisor -> COMMAND_ACK -> WORKER_STATUS STARTED.
-  * Duplicate START_WORKER on active allocation -> COMMAND_ACK ACCEPTED (no-op, no duplicate process).
+  * START_WORKER -> idempotent spawn, COMMAND_ACK, then WORKER_STATUS STARTED.
+  * Duplicate active START_WORKER -> COMMAND_ACK ACCEPTED without another process.
   * Duplicate START_WORKER on terminal allocation -> COMMAND_ACK REJECTED.
   * STOP_WORKER -> graceful stop via WorkerProcessSupervisor -> COMMAND_ACK -> WORKER_STATUS ENDED.
 - Worker survival invariant:
@@ -26,11 +26,11 @@ Responsibilities:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import platform
 from typing import Any
-import uuid
 
 import websockets
 
@@ -142,10 +142,8 @@ class NodeAgentClient:
         ws = self._current_ws
         loop = self._loop
         if ws is not None and loop is not None and loop.is_running():
-            try:
+            with contextlib.suppress(Exception):
                 loop.call_soon_threadsafe(lambda: asyncio.create_task(ws.close()))
-            except Exception:
-                pass
 
     async def run(self) -> None:
         """Alias for start()."""
@@ -193,7 +191,7 @@ class NodeAgentClient:
                 try:
                     await asyncio.wait_for(self._stop_event.wait(), timeout=reconnect_delay)
                     break
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
                 reconnect_delay = min(reconnect_delay * 2.0, self.config.reconnect_max_seconds)
             finally:
@@ -212,7 +210,9 @@ class NodeAgentClient:
         raw_ack = await ws.recv()
         envelope = parse_agent_envelope(raw_ack)
         if envelope.message_type != MESSAGE_TYPE_HELLO_ACK:
-            raise AgentMessageError(f"Expected HELLO_ACK from Backend, got '{envelope.message_type}'")
+            raise AgentMessageError(
+                f"Expected HELLO_ACK from Backend, got '{envelope.message_type}'"
+            )
 
         if isinstance(envelope.payload, HelloAckPayload):
             ack_payload = envelope.payload
@@ -302,7 +302,10 @@ class NodeAgentClient:
     async def _check_reconciled_failures(self, ws: Any) -> None:
         """Report any workers that were marked FAILED prior to or during reconnect."""
         for r in self.supervisor.list_records():
-            if r.local_state == LOCAL_STATE_FAILED and r.allocation_id not in self._reported_failures:
+            if (
+                r.local_state == LOCAL_STATE_FAILED
+                and r.allocation_id not in self._reported_failures
+            ):
                 self._reported_failures.add(r.allocation_id)
                 status_payload = WorkerStatusPayload(
                     allocation_id=r.allocation_id,
@@ -310,7 +313,9 @@ class NodeAgentClient:
                     actual_state=WORKER_ACTUAL_STATE_FAILED,
                     exit_code=r.exit_code,
                     failure_code="WORKER_RECONCILE_FAILED",
-                    failure_message="Worker process terminated while offline or failed reconciliation",
+                    failure_message=(
+                        "Worker process terminated while offline or failed reconciliation"
+                    ),
                 )
                 env = AgentEnvelope(
                     message_type=MESSAGE_TYPE_WORKER_STATUS,
@@ -409,7 +414,7 @@ class NodeAgentClient:
         )
         await self._send_envelope(ws, ack_env)
 
-        # If spawn was successful and this was a new process (not duplicate no-op), report WORKER_STATUS STARTED
+        # Report STARTED only for a newly spawned process, not a duplicate no-op.
         if status == COMMAND_STATUS_ACCEPTED and is_new:
             status_payload = WorkerStatusPayload(
                 allocation_id=cmd.allocation_id,
@@ -431,7 +436,7 @@ class NodeAgentClient:
         envelope: AgentEnvelope,
         cmd: StopWorkerPayload,
     ) -> None:
-        """Handle STOP_WORKER command: stop worker process gracefully and reply with ACK + WORKER_STATUS."""
+        """Stop a Worker and reply with its ACK and terminal status."""
         logger.info(
             "Handling STOP_WORKER command_id='%s' for allocation_id='%s' (force=%s)",
             cmd.command_id,
@@ -483,7 +488,9 @@ class NodeAgentClient:
                         payload=status_payload,
                     )
                     await self._send_envelope(ws, status_env)
-                    logger.info("Reported WORKER_STATUS ENDED for allocation '%s'", cmd.allocation_id)
+                    logger.info(
+                        "Reported WORKER_STATUS ENDED for allocation '%s'", cmd.allocation_id
+                    )
                 elif updated.local_state == LOCAL_STATE_FAILED:
                     status_payload = WorkerStatusPayload(
                         allocation_id=cmd.allocation_id,
@@ -508,7 +515,10 @@ class NodeAgentClient:
                 await asyncio.sleep(1.0)
                 records = self.supervisor.poll()
                 for r in records:
-                    if r.local_state == LOCAL_STATE_FAILED and r.allocation_id not in self._reported_failures:
+                    if (
+                        r.local_state == LOCAL_STATE_FAILED
+                        and r.allocation_id not in self._reported_failures
+                    ):
                         self._reported_failures.add(r.allocation_id)
                         status_payload = WorkerStatusPayload(
                             allocation_id=r.allocation_id,
@@ -516,7 +526,9 @@ class NodeAgentClient:
                             actual_state=WORKER_ACTUAL_STATE_FAILED,
                             exit_code=r.exit_code,
                             failure_code="WORKER_PROCESS_CRASHED",
-                            failure_message=f"Worker process exited unexpectedly (code {r.exit_code})",
+                            failure_message=(
+                                f"Worker process exited unexpectedly (code {r.exit_code})"
+                            ),
                         )
                         env = AgentEnvelope(
                             message_type=MESSAGE_TYPE_WORKER_STATUS,

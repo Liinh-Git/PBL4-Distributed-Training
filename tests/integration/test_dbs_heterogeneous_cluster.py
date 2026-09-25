@@ -265,9 +265,7 @@ def test_dbs_heterogeneous_cluster_3_workers(tmp_path) -> None:
 
     for w in worker_ids:
         coordinator.parameter_applied(
-            ParameterApplied(
-                "att-hetero", w + 10, w, op1.operation_id, op1.step_id, ver_before + 1
-            )
+            ParameterApplied("att-hetero", w + 10, w, op1.operation_id, op1.step_id, ver_before + 1)
         )
 
     cp1 = coordinator.checkpoint()

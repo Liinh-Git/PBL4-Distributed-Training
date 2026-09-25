@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, WebSocket, status
+from fastapi import APIRouter, Query, WebSocket, status
 
 from pbl4.management_backend import db
 from pbl4.management_backend.gateways.node_control_gateway import get_node_control_gateway
@@ -37,20 +37,13 @@ from pbl4.management_backend.services import (
     node_enrollment_service,
     node_service,
 )
-from pbl4.management_backend.services.node_enrollment_service import (
-    NodeEnrollmentCodeExpiredError,
-    NodeEnrollmentCodeInvalidError,
-)
-from pbl4.management_backend.services.node_service import (
-    NodeNotFoundError,
-    NodeRevokedError,
-)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Nodes"])
 
 
 # ─── REST Endpoints ───────────────────────────────────────────────────────────
+
 
 @router.post(
     "/api/v1/nodes/enrollment-codes",
@@ -105,7 +98,9 @@ def enroll_node(body: NodeEnrollRequest):
     summary="List registered nodes",
 )
 def list_nodes(
-    state: Annotated[str | None, Query(description="Filter by node state: ONLINE, OFFLINE, REVOKED")] = None,
+    state: Annotated[
+        str | None, Query(description="Filter by node state: ONLINE, OFFLINE, REVOKED")
+    ] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ):
     """List cluster nodes with optional state filtering."""
@@ -146,6 +141,7 @@ def revoke_node(node_id: str):
 
 
 # ─── WebSocket Endpoint ───────────────────────────────────────────────────────
+
 
 @router.websocket("/ws/v1/nodes/{node_id}/control")
 async def node_control_websocket(websocket: WebSocket, node_id: str):

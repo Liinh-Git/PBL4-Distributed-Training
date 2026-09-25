@@ -5,8 +5,10 @@ Monitors CPU, RAM, and NVIDIA GPU resources without crashing when GPU / NVML is 
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import platform
+import warnings
 from typing import Any
 
 import psutil
@@ -14,8 +16,6 @@ import psutil
 from pbl4.agent_protocol.messages import GpuSnapshotItem, ResourceSnapshotPayload
 
 logger = logging.getLogger(__name__)
-
-import warnings
 
 # Defensive pynvml import
 try:
@@ -66,10 +66,8 @@ def _get_gpu_snapshots() -> list[GpuSnapshotItem]:
                 except Exception as exc:
                     logger.debug("Failed querying GPU device index %d: %s", idx, exc)
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 pynvml.nvmlShutdown()
-            except Exception:
-                pass
     except Exception as exc:
         logger.debug("NVML unavailable or failed to initialize: %s", exc)
         return []
@@ -92,7 +90,11 @@ def _get_gpu_static_capabilities() -> list[dict[str, Any]]:
                     handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
                     try:
                         name_raw = pynvml.nvmlDeviceGetName(handle)
-                        name = name_raw.decode("utf-8", errors="replace") if isinstance(name_raw, bytes) else str(name_raw)
+                        name = (
+                            name_raw.decode("utf-8", errors="replace")
+                            if isinstance(name_raw, bytes)
+                            else str(name_raw)
+                        )
                     except Exception:
                         name = f"NVIDIA GPU #{idx}"
 
@@ -112,10 +114,8 @@ def _get_gpu_static_capabilities() -> list[dict[str, Any]]:
                 except Exception as exc:
                     logger.debug("Failed querying static info for GPU %d: %s", idx, exc)
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 pynvml.nvmlShutdown()
-            except Exception:
-                pass
     except Exception as exc:
         logger.debug("NVML unavailable or failed during static capability collection: %s", exc)
         return []

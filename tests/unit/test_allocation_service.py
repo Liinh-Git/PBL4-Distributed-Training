@@ -19,19 +19,16 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 import json
 import unittest
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 from pbl4.common.worker_admission import verify_worker_join_token
 from pbl4.management_backend.config import BackendSettings
 from pbl4.management_backend.services.allocation_service import (
-    AllocationNotFoundError,
-    AllocationService,
     WorkerAdmissionConfigError,
     build_start_worker_command,
-    build_stop_worker_command,
     create_allocation,
     create_allocations_for_attempt,
     dispatch_allocation,
@@ -280,7 +277,10 @@ class TestAllocationService(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "WORKER_ADMISSION_CONFIG_ERROR")
 
     def test_attempt_allocation_mismatch_rejected(self) -> None:
-        wrong_attempt = {"attempt_id": "attempt-OTHER-999", "resolved_contract": self.base_job["resolved_contract"]}
+        wrong_attempt = {
+            "attempt_id": "attempt-OTHER-999",
+            "resolved_contract": self.base_job["resolved_contract"],
+        }
         with self.assertRaises(ValueError):
             build_start_worker_command(
                 allocation=self.base_allocation,
@@ -404,7 +404,7 @@ class TestAllocationService(unittest.TestCase):
         mock_get_alloc.return_value = dict(self.base_allocation)
         mock_gateway = MagicMock()
 
-        res = stop_allocation(
+        stop_allocation(
             self.mock_conn,
             "alloc-001",
             gateway=mock_gateway,

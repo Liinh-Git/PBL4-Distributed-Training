@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import ClassVar
@@ -213,7 +214,9 @@ class StateSnapshot(McpPayload):
                 raise ProtocolError("STATE_SNAPSHOT worker projection has invalid field types")
             for name, kind in optional_worker.items():
                 if name in worker and not _valid(worker[name], kind):
-                    raise ProtocolError(f"STATE_SNAPSHOT worker projection field '{name}' has invalid type")
+                    raise ProtocolError(
+                        f"STATE_SNAPSHOT worker projection field '{name}' has invalid type"
+                    )
             _validate_json(worker, "payload.workers")
 
 
@@ -230,10 +233,36 @@ class StartAttempt(McpPayload):
         "requested_at": "string",
     }
     ENUMS = {"execution_mode": frozenset({"FRESH", "RETRY_FROM_START", "RESUME"})}
+    OPTIONAL = {"resume_checkpoint": "object"}
 
     def _validate(self, data: dict[str, object]) -> None:
-        if (data["execution_mode"] == "RESUME") != (data["resume_from_checkpoint_id"] is not None):
+        is_resume = data["execution_mode"] == "RESUME"
+        descriptor = data.get("resume_checkpoint")
+        if is_resume != (data["resume_from_checkpoint_id"] is not None):
             raise ProtocolError("START_ATTEMPT resume identity does not match execution_mode")
+        if is_resume != (descriptor is not None):
+            raise ProtocolError(
+                "START_ATTEMPT trusted checkpoint descriptor is required for RESUME"
+            )
+        if descriptor is not None:
+            if not isinstance(descriptor, dict) or set(descriptor) != {
+                "checkpoint_id",
+                "source_attempt_id",
+                "model_sha256",
+                "metadata_sha256",
+            }:
+                raise ProtocolError("START_ATTEMPT resume_checkpoint fields are invalid")
+            if any(
+                not isinstance(descriptor[name], str) or not descriptor[name]
+                for name in ("checkpoint_id", "source_attempt_id")
+            ) or any(
+                not isinstance(descriptor[name], str)
+                or re.fullmatch(r"[0-9a-f]{64}", descriptor[name]) is None
+                for name in ("model_sha256", "metadata_sha256")
+            ):
+                raise ProtocolError("START_ATTEMPT resume_checkpoint values are invalid")
+            if descriptor["checkpoint_id"] != data["resume_from_checkpoint_id"]:
+                raise ProtocolError("START_ATTEMPT checkpoint identities do not match")
 
 
 class AbortAttempt(McpPayload):

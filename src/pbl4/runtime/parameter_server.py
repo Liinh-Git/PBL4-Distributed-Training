@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import socket
 import threading
 import time
@@ -12,8 +13,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import numpy as np
-
-logger = logging.getLogger(__name__)
 
 from pbl4.common.errors import ProtocolError, TransportError
 from pbl4.common.worker_admission import WorkerAdmissionError, verify_worker_join_token
@@ -37,12 +36,12 @@ from pbl4.protocol.constants import (
     UNASSIGNED_WORKER_ID,
 )
 from pbl4.protocol.messages import (
-    DatasetAssignment,
-    DtpControlMessage,
     ERROR_CODE_WORKER_ADMISSION_EXPIRED,
     ERROR_CODE_WORKER_ADMISSION_INVALID,
     ERROR_CODE_WORKER_ADMISSION_REQUIRED,
     ERROR_CODE_WORKER_ADMISSION_SCOPE_MISMATCH,
+    DatasetAssignment,
+    DtpControlMessage,
     Error,
     GradientEnd,
     GradientMeta,
@@ -72,6 +71,8 @@ from pbl4.runtime.synchronization.base import ParameterApplied
 from pbl4.runtime.worker_registry import SessionState, WorkerRegistry
 from pbl4.transport.framed_socket import recv_exact, send_all
 from pbl4.transport.tcp_server import TcpServer
+
+logger = logging.getLogger(__name__)
 
 GradientHandler = Callable[[Contribution], None]
 ParameterAppliedHandler = Callable[[ParameterApplied], None]
@@ -123,6 +124,7 @@ class ParameterServer:
         max_tensor_chunk_bytes: int = 1024 * 1024,
         worker_admission_secret: str | None = None,
         require_worker_admission: bool = False,
+        require_compute_ms: bool = False,
     ) -> None:
         if heartbeat_timeout_ms <= heartbeat_interval_ms:
             raise ValueError("heartbeat timeout must exceed interval")
@@ -141,6 +143,7 @@ class ParameterServer:
         self._max_chunk = max_tensor_chunk_bytes
         self._worker_admission_secret = worker_admission_secret
         self._require_worker_admission = require_worker_admission
+        self._require_compute_ms = require_compute_ms
         self._server = TcpServer(host, port, self._serve_connection)
         self._lock = threading.Lock()
         self._connections: dict[int, _Connection] = {}
@@ -258,22 +261,28 @@ class ParameterServer:
                     sock.close()
                     return
 
-                with self._lock:
-                    if hello.allocation_id in self._admitted_allocation_ids:
-                        self._send_admission_error(
-                            sock,
-                            ERROR_CODE_WORKER_ADMISSION_INVALID,
-                            f"Allocation '{hello.allocation_id}' has already been admitted in this attempt",
-                        )
-                        sock.close()
-                        return
+            duplicate_admission = False
+            with self._membership_changed:
+                if is_managed and hello.allocation_id in self._admitted_allocation_ids:
+                    duplicate_admission = True
+                    registered = None
+                else:
+                    session_id = self._next_session_id
+                    self._next_session_id += 1
+                    registered = self.registry.register(session_id, time.monotonic())
+                    if is_managed:
+                        self._admitted_allocation_ids.add(str(hello.allocation_id))
+
+            if duplicate_admission or registered is None:
+                self._send_admission_error(
+                    sock,
+                    ERROR_CODE_WORKER_ADMISSION_INVALID,
+                    f"Allocation '{hello.allocation_id}' has already been admitted in this attempt",
+                )
+                sock.close()
+                return
 
             with self._membership_changed:
-                session_id = self._next_session_id
-                self._next_session_id += 1
-                registered = self.registry.register(session_id, time.monotonic())
-                if is_managed:
-                    self._admitted_allocation_ids.add(str(hello.allocation_id))
                 self.registry.transition(
                     registered.worker_id,
                     session_id,
@@ -496,7 +505,14 @@ class ParameterServer:
     def _to_contribution(self, transfer: CompletedTensorTransfer) -> Contribution:
         meta = transfer.metadata
         identity = transfer.identity
-        compute_ms = float(meta["compute_ms"]) if "compute_ms" in meta else 0.0
+        if "compute_ms" not in meta:
+            if self._require_compute_ms:
+                raise ValueError("Work Unit gradient requires compute_ms")
+            compute_ms = 0.0
+        else:
+            compute_ms = float(meta["compute_ms"])
+            if not math.isfinite(compute_ms) or compute_ms <= 0:
+                raise ValueError("Work Unit gradient compute_ms must be positive and finite")
         return Contribution.from_gradient(
             np.frombuffer(transfer.data, dtype="<f4").astype(np.float32, copy=True),
             attempt_id=str(meta["attempt_id"]),

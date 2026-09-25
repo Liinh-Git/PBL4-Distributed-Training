@@ -50,11 +50,13 @@ def test_workload_scheduler_equal_policy() -> None:
     assert plan0.units_per_worker == {0: 2, 1: 2, 2: 2}
 
     # Record some stats
-    scheduler.record_committed([
-        _dummy_contribution(0, 64, 100.0),
-        _dummy_contribution(1, 64, 50.0),
-        _dummy_contribution(2, 64, 200.0),
-    ])
+    scheduler.record_committed(
+        [
+            _dummy_contribution(0, 64, 100.0),
+            _dummy_contribution(1, 64, 50.0),
+            _dummy_contribution(2, 64, 200.0),
+        ]
+    )
 
     # On epoch completed, epoch 1 is still equal
     plan1 = scheduler.on_epoch_completed(0)
@@ -79,14 +81,18 @@ def test_workload_scheduler_dbs_transition_epoch_0_to_1() -> None:
     # Record 2 committed steps in epoch 0
     # Worker 0: 200 total samples, 200.0 ms total compute -> throughput = 1.0 s/ms
     # Worker 1: 200 total samples, 100.0 ms total compute -> throughput = 2.0 s/ms (2x faster)
-    scheduler.record_committed([
-        _dummy_contribution(0, 100, 100.0, epoch=0, ordinal=0),
-        _dummy_contribution(1, 100, 50.0, epoch=0, ordinal=0),
-    ])
-    scheduler.record_committed([
-        _dummy_contribution(0, 100, 100.0, epoch=0, ordinal=1),
-        _dummy_contribution(1, 100, 50.0, epoch=0, ordinal=1),
-    ])
+    scheduler.record_committed(
+        [
+            _dummy_contribution(0, 100, 100.0, epoch=0, ordinal=0),
+            _dummy_contribution(1, 100, 50.0, epoch=0, ordinal=0),
+        ]
+    )
+    scheduler.record_committed(
+        [
+            _dummy_contribution(0, 100, 100.0, epoch=0, ordinal=1),
+            _dummy_contribution(1, 100, 50.0, epoch=0, ordinal=1),
+        ]
+    )
 
     # Epoch 0 completed -> transition to Epoch 1
     plan1 = scheduler.on_epoch_completed(0)
@@ -137,10 +143,12 @@ def test_workload_scheduler_boundary_resume() -> None:
     assert plan1.units_per_worker == {0: 2, 1: 2}
 
     # Record stats during epoch 1
-    scheduler.record_committed([
-        _dummy_contribution(0, 100, 200.0, epoch=1),
-        _dummy_contribution(1, 100, 100.0, epoch=1),
-    ])
+    scheduler.record_committed(
+        [
+            _dummy_contribution(0, 100, 200.0, epoch=1),
+            _dummy_contribution(1, 100, 100.0, epoch=1),
+        ]
+    )
 
     # Transition to epoch 2: should use DBS!
     plan2 = scheduler.on_epoch_completed(1)
@@ -163,10 +171,12 @@ def test_workload_scheduler_mid_epoch_resume() -> None:
     assert scheduler.collect_stats is False
 
     # Recording during remainder of epoch 1 is ignored
-    scheduler.record_committed([
-        _dummy_contribution(0, 100, 200.0, epoch=1),
-        _dummy_contribution(1, 100, 100.0, epoch=1),
-    ])
+    scheduler.record_committed(
+        [
+            _dummy_contribution(0, 100, 200.0, epoch=1),
+            _dummy_contribution(1, 100, 100.0, epoch=1),
+        ]
+    )
 
     # End of partial epoch 1: next epoch 2 must be Equal and enable stats collection
     plan2 = scheduler.on_epoch_completed(1)
@@ -174,10 +184,12 @@ def test_workload_scheduler_mid_epoch_resume() -> None:
     assert scheduler.collect_stats is True
 
     # Record full stats in epoch 2
-    scheduler.record_committed([
-        _dummy_contribution(0, 100, 200.0, epoch=2),
-        _dummy_contribution(1, 100, 100.0, epoch=2),
-    ])
+    scheduler.record_committed(
+        [
+            _dummy_contribution(0, 100, 200.0, epoch=2),
+            _dummy_contribution(1, 100, 100.0, epoch=2),
+        ]
+    )
 
     # End of full epoch 2: epoch 3 transitions to DBS!
     plan3 = scheduler.on_epoch_completed(2)
@@ -194,9 +206,11 @@ def test_workload_scheduler_missing_worker_stats_at_boundary_raises() -> None:
     scheduler.plan_for_epoch(0)
 
     # Only worker 0 recorded stats in epoch 0; worker 1 is missing
-    scheduler.record_committed([
-        _dummy_contribution(0, 100, 100.0, epoch=0),
-    ])
+    scheduler.record_committed(
+        [
+            _dummy_contribution(0, 100, 100.0, epoch=0),
+        ]
+    )
 
     # Transitioning to epoch 1 must raise ValueError because DBS stats are incomplete
     with pytest.raises(ValueError, match="missing sample stats for workers \\[1\\]"):

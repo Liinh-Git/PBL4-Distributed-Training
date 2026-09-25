@@ -5,8 +5,8 @@ import re
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
-from urllib.parse import quote
 
+from pbl4.common.artifact_origin import resolve_artifact_url
 from pbl4.common.hashing import canonical_json_bytes, sha256_bytes
 
 
@@ -15,6 +15,8 @@ class PinnedDatasetManifest:
     dataset_build_id: str
     dataset_manifest_hash: str
     value: dict[str, object]
+    artifact_base_url: str
+    root_manifest_path: str
 
     @property
     def shard_count(self) -> int:
@@ -46,17 +48,22 @@ class DatasetManifestClient:
         self._opener = opener
 
     def pin(
-        self, dataset_build_id: str, expected_dataset_manifest_hash: str
+        self,
+        dataset_build_id: str,
+        expected_dataset_manifest_hash: str,
+        *,
+        artifact_base_url: str | None = None,
+        root_manifest_path: str = "manifest.json",
     ) -> PinnedDatasetManifest:
         if (
             not dataset_build_id
             or re.fullmatch(r"[0-9a-f]{64}", expected_dataset_manifest_hash) is None
         ):
             raise ValueError("Invalid pinned Dataset Build identity")
-        url = (
-            f"{self._base_url}/artifacts/v1/dataset-builds/"
-            f"{quote(dataset_build_id, safe='')}/manifest.json"
+        origin = artifact_base_url or (
+            f"{self._base_url}/artifacts/v1/dataset-builds/{dataset_build_id}"
         )
+        url = resolve_artifact_url(origin, root_manifest_path)
         request = urllib.request.Request(url, headers={"Accept": "application/json"})
         with self._opener(request, timeout=self._timeout) as response:
             if getattr(response, "status", 200) != 200:
@@ -86,4 +93,10 @@ class DatasetManifestClient:
             or value["batch_count_per_shard"] <= 0
         ):
             raise ValueError("Invalid pinned Root Dataset Manifest")
-        return PinnedDatasetManifest(dataset_build_id, expected_dataset_manifest_hash, value)
+        return PinnedDatasetManifest(
+            dataset_build_id,
+            expected_dataset_manifest_hash,
+            value,
+            origin.rstrip("/"),
+            root_manifest_path,
+        )

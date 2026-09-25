@@ -32,6 +32,7 @@ def project_command(
                 "resolved_contract": source.get("resolved_contract"),
                 "contract_hash": source.get("contract_hash"),
                 "resume_from_checkpoint_id": source.get("resume_from_checkpoint_id"),
+                "resume_checkpoint": source.get("resume_checkpoint"),
                 "requested_at": source.get("requested_at"),
             }
         ).to_dict()

@@ -188,6 +188,7 @@ class WorkerProcess:
             str(assignment.artifact_base_url),
             ShardCache(cache_root),
             cache_root / ".downloads",
+            root_manifest_path=str(assignment.root_manifest_path),
             **downloader_kwargs,
         )
         result = downloader.provision(key)
@@ -308,10 +309,10 @@ class WorkerProcess:
                 pending = self._pending
             if loop is None or shard_key is None:
                 raise ValueError("Canonical parameters arrived before shard provisioning")
-            if target_version == 0 and pending is None:
-                self._adapter.apply_parameters(bundle)
+            if pending is None:
+                loop.initialize_parameters(target_version, bundle)
                 self._client.send_ready(
-                    model_version=0,
+                    model_version=target_version,
                     dataset_build_id=shard_key.dataset_build_id,
                     shard_id=shard_key.shard_id,
                 )

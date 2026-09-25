@@ -509,6 +509,21 @@ class SessionAndAtomicityTest(unittest.TestCase):
         validator.set_phase(ConnectionPhase.UPLOADING)
         validator.validate(gradient.header)
 
+    def test_heartbeat_is_valid_during_in_flight_training_phases(self) -> None:
+        heartbeat = build_frame(0x0030, b"{}", session_id=7, worker_id=0)
+        for phase in (
+            ConnectionPhase.UPLOADING,
+            ConnectionPhase.WAITING_PARAMETER,
+            ConnectionPhase.APPLYING,
+        ):
+            with self.subTest(phase=phase):
+                validator = ConnectionProtocolValidator(
+                    phase=phase,
+                    bound_identity=(7, 0),
+                    inbound_peer=PeerRole.WORKER,
+                )
+                validator.validate(heartbeat.header)
+
     def test_runtime_side_rejects_wrong_message_direction(self) -> None:
         validator = ConnectionProtocolValidator(inbound_peer=PeerRole.WORKER)
         wrong_direction = build_frame(0x0002, b"{}", session_id=7, worker_id=0)
@@ -1363,6 +1378,18 @@ class RuntimeSeamTest(unittest.TestCase):
                     "work_units": [
                         {"shard_id": 1, "batch_id": 1, "sample_count": 4},
                         {"shard_id": 1, "batch_id": 2, "sample_count": 4},
+                    ],
+                }
+            )
+
+        # Duplicate physical Work Unit identity is rejected on the wire.
+        with self.assertRaises(ProtocolError, msg="duplicate Work Unit must be rejected"):
+            StepStart.from_dict(
+                {
+                    **base,
+                    "work_units": [
+                        {"shard_id": 0, "batch_id": 1, "sample_count": 4},
+                        {"shard_id": 0, "batch_id": 1, "sample_count": 4},
                     ],
                 }
             )

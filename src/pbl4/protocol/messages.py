@@ -405,6 +405,7 @@ class StepStart(DtpControlMessage):
             if not isinstance(units, list) or not units:
                 raise ProtocolError("STEP_START work_units must be a non-empty array")
             total_samples = 0
+            identities: set[tuple[int, int]] = set()
             for idx, u in enumerate(units):
                 if not isinstance(u, dict):
                     raise ProtocolError(f"STEP_START work_units[{idx}] must be a dict")
@@ -420,6 +421,12 @@ class StepStart(DtpControlMessage):
                         f"STEP_START work_units[{idx}].sample_count must be a positive int"
                     )
                 total_samples += sc
+                identity = (int(u["shard_id"]), int(u["batch_id"]))
+                if identity in identities:
+                    raise ProtocolError(
+                        "STEP_START work_units must not contain duplicate shard_id/batch_id"
+                    )
+                identities.add(identity)
 
             if total_samples != data["expected_sample_count"]:
                 raise ProtocolError(

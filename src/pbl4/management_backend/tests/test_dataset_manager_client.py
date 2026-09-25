@@ -481,6 +481,7 @@ def test_idempotency_timeout_and_retry_flow_preserves_command_and_single_build(m
         @staticmethod
         def transaction():
             from contextlib import nullcontext
+
             return nullcontext(fake_conn)
 
     # Idempotency state

@@ -19,7 +19,6 @@ Reference: Phase 3 requirements in NODE_AGENT_IMPLEMENTATION_PLAN.md:
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 import tempfile
@@ -35,6 +34,7 @@ from pbl4.agent_protocol.messages import (
     COMMAND_STATUS_REJECTED,
     ERROR_CODE_ALLOCATION_ALREADY_ACTIVE,
     ERROR_CODE_ALLOCATION_NOT_FOUND,
+    ERROR_CODE_WORKER_STOP_FAILED,
     StartWorkerPayload,
 )
 from pbl4.node_agent.supervisor import (
@@ -47,7 +47,9 @@ from pbl4.node_agent.supervisor import (
 )
 
 
-def _make_start_command(allocation_id: str = "alloc-1", attempt_id: str = "att-1") -> StartWorkerPayload:
+def _make_start_command(
+    allocation_id: str = "alloc-1", attempt_id: str = "att-1"
+) -> StartWorkerPayload:
     return StartWorkerPayload(
         command_id="cmd-1",
         allocation_id=allocation_id,
@@ -119,7 +121,7 @@ class TestWorkerProcessSupervisor(unittest.TestCase):
     def test_3_duplicate_start_when_active_is_accepted_noop(
         self, mock_popen: MagicMock, mock_psutil_proc: MagicMock
     ) -> None:
-        """Duplicate START_WORKER for an already active allocation does not spawn a second process."""
+        """Duplicate START_WORKER does not spawn a second process."""
         mock_psutil_proc.return_value.create_time.return_value = 1000.0
         mock_psutil_proc.return_value.is_running.return_value = True
         fake_proc = MagicMock()
@@ -189,24 +191,56 @@ class TestWorkerProcessSupervisor(unittest.TestCase):
         self.supervisor.spawn_worker(cmd)
 
         # Graceful stop
-        status, err = self.supervisor.stop_worker("alloc-stop-test", grace_period_seconds=5.0, force=False)
+        status, err = self.supervisor.stop_worker(
+            "alloc-stop-test", grace_period_seconds=5.0, force=False
+        )
         self.assertEqual(status, COMMAND_STATUS_ACCEPTED)
         self.assertIsNone(err)
         proc_mock.terminate.assert_called_once()
-        self.assertEqual(self.supervisor.get_record("alloc-stop-test").local_state, LOCAL_STATE_STOPPED)
+        self.assertEqual(
+            self.supervisor.get_record("alloc-stop-test").local_state, LOCAL_STATE_STOPPED
+        )
 
         # Force stop on another worker
         proc_mock2 = MagicMock()
         proc_mock2.pid = 4444
         proc_mock2.returncode = -9
+        proc_mock2.wait.side_effect = [subprocess.TimeoutExpired("worker", 10.0), None]
         mock_popen.return_value = proc_mock2
 
         cmd2 = _make_start_command("alloc-force-test")
         self.supervisor.spawn_worker(cmd2)
         status2, _ = self.supervisor.stop_worker("alloc-force-test", force=True)
         self.assertEqual(status2, COMMAND_STATUS_ACCEPTED)
+        proc_mock2.terminate.assert_called_once()
         proc_mock2.kill.assert_called_once()
-        self.assertEqual(self.supervisor.get_record("alloc-force-test").local_state, LOCAL_STATE_STOPPED)
+        self.assertEqual(
+            self.supervisor.get_record("alloc-force-test").local_state, LOCAL_STATE_STOPPED
+        )
+
+    @patch("psutil.Process")
+    @patch("subprocess.Popen")
+    def test_force_false_never_kills_stubborn_process(
+        self, mock_popen: MagicMock, mock_psutil_proc: MagicMock
+    ) -> None:
+        mock_psutil_proc.return_value.create_time.return_value = 1000.0
+        proc = MagicMock()
+        proc.pid = 4555
+        proc.wait.side_effect = subprocess.TimeoutExpired("worker", 0.01)
+        mock_popen.return_value = proc
+        self.supervisor.spawn_worker(_make_start_command("alloc-stubborn"))
+
+        status, error = self.supervisor.stop_worker(
+            "alloc-stubborn", grace_period_seconds=0.01, force=False
+        )
+
+        self.assertEqual(status, COMMAND_STATUS_REJECTED)
+        self.assertEqual(error, ERROR_CODE_WORKER_STOP_FAILED)
+        proc.kill.assert_not_called()
+        self.assertEqual(
+            self.supervisor.get_record("alloc-stubborn").local_state,
+            LOCAL_STATE_RUNNING,
+        )
 
     def test_8_duplicate_stop_on_terminal_is_accepted_noop(self) -> None:
         """Duplicate STOP_WORKER on an already STOPPED/FAILED allocation is an accepted no-op."""
@@ -245,7 +279,7 @@ class TestWorkerProcessSupervisor(unittest.TestCase):
         self.assertEqual(self.supervisor.get_record("alloc-poll").local_state, LOCAL_STATE_RUNNING)
 
         # poll while running
-        records = self.supervisor.poll()
+        self.supervisor.poll()
         self.assertEqual(self.supervisor.get_record("alloc-poll").local_state, LOCAL_STATE_RUNNING)
 
         # process exits unexpectedly with error code 137
@@ -276,7 +310,7 @@ class TestWorkerProcessSupervisor(unittest.TestCase):
 
         with patch("psutil.Process", return_value=mock_proc):
             reconciled = self.supervisor.reconcile_on_startup()
-            matching = [r for r in reconciled if r.allocation_id == "alloc-reconcile-ok"][0]
+            matching = next(r for r in reconciled if r.allocation_id == "alloc-reconcile-ok")
             self.assertEqual(matching.local_state, LOCAL_STATE_RUNNING)
 
     def test_12_13_14_reconcile_mismatch_marks_failed_without_exit_code(self) -> None:
@@ -313,8 +347,8 @@ class TestWorkerProcessSupervisor(unittest.TestCase):
 
         with patch("psutil.Process", side_effect=psutil_side_effect):
             reconciled = self.supervisor.reconcile_on_startup()
-            rec1_after = [r for r in reconciled if r.allocation_id == "alloc-dead"][0]
-            rec2_after = [r for r in reconciled if r.allocation_id == "alloc-reused"][0]
+            rec1_after = next(r for r in reconciled if r.allocation_id == "alloc-dead")
+            rec2_after = next(r for r in reconciled if r.allocation_id == "alloc-reused")
 
             # 12 & 13: Both marked FAILED and not attached
             self.assertEqual(rec1_after.local_state, LOCAL_STATE_FAILED)
@@ -372,7 +406,9 @@ class TestRealProcessSupervisorIntegration(unittest.TestCase):
 
         # Process should no longer be running
         time.sleep(0.1)
-        self.assertFalse(psutil.Process(proc.pid).is_running() if psutil.pid_exists(proc.pid) else False)
+        self.assertFalse(
+            psutil.Process(proc.pid).is_running() if psutil.pid_exists(proc.pid) else False
+        )
 
 
 if __name__ == "__main__":

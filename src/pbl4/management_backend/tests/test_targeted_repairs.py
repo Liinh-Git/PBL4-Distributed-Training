@@ -477,7 +477,6 @@ def test_system_api_decodes_canonical_item_envelopes():
     assert "this.client.get<RuntimeSnapshotData>('/api/v1/runtime/snapshot')" in source
 
 
-
 # ─── 11.4 OpenAPI Envelope Shape Test ─────────────────────────────────────────
 
 

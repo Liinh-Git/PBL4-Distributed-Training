@@ -1,0 +1,146 @@
+PBL4 INTEGRATION VERIFICATION REPORT
+====================================
+
+1. VERDICT
+----------
+
+READY_TO_MERGE.
+
+Integration Implementation Plan đã được sửa trực tiếp, implementation đã hoàn
+tất trên nhánh integration/runtime-node-agent-dataset, và toàn bộ targeted,
+integration, real-process E2E cùng final gates đều được yêu cầu chạy trước khi
+handoff. Commit integration head chính xác được ghi tại handoff sau final commit.
+
+2. SOURCE SNAPSHOT
+------------------
+
+- Main repository dev: 197cb478468d88d7f40365d79ce70d402d53d2f5
+- PR8 — DBS: cb72ae78a0f67bb1e6c89ba7241b6d2a391399d0
+- PR9 — Node Agent: b5b6d0cc17ce1270dc67b8aafe53d61395c67f53
+- Dataset-Manager main: 91b2277e462d3b2fc581bdb0f1515fc1862b0fd2
+- Merge evidence: PR9 merge a0920a3; PR8 merge 3f19d2c.
+- Integration head cuối: git rev-parse HEAD tại handoff.
+
+3. PLAN CHANGES APPLIED
+-----------------------
+
+- Sửa trực tiếp INTEGRATION_PLAN.txt, ghi cố định bốn source snapshot, ownership,
+  file/symbol, test và thứ tự thực thi thật.
+- Chốt backend/control plane resolve checkpoint_id thành trusted descriptor;
+  Runtime chỉ derive locator dưới checkpoint root và verify toàn bộ integrity.
+- Chốt artifact-origin flow từ Dataset Manager qua Backend, Runtime và field DTP/1
+  DatasetAssignment.root_manifest_path hiện có; không thêm field wire mới.
+- Đồng bộ DBS_DESIGN.md và DBS_IMPLEMENTATION_PLAN.md canonical, giữ authority;
+  loại file sai đuôi .md.md; đánh dấu DBS_EXECUTION_BLUEPRINT.md NON-NORMATIVE.
+- Bỏ task giả định embedded Dataset Manager; chỉ giữ regression guard.
+
+4. IMPLEMENTATION CHANGES
+-------------------------
+
+Checkpoint/Runtime:
+- management_protocol.messages.StartAttempt mang resume_checkpoint descriptor.
+- AttemptService resolve checkpoint COMPLETE và truyền descriptor tin cậy.
+- runtime.checkpoint kiểm tra identity, locator containment, SHA-256, Checkpoint V1,
+  contract/dataset/model compatibility, rồi restore model, model_version và cursor.
+- RuntimeProcess dựng Coordinator với cursor khôi phục và reset scheduler đúng
+  boundary/mid-epoch semantics.
+
+Dataset origin/provisioning:
+- common.artifact_origin chuẩn hóa và kiểm tra artifact_base_url + manifest URI.
+- Backend giữ origin descriptor; Runtime derive root_manifest_path tương đối.
+- Worker/Sh​ardDownloader dùng field hiện có, hỗ trợ local, HF-style/fake remote và
+  legacy local Dataset Manager V1 đã nhận diện rõ ràng.
+
+DBS/DTP:
+- Catalog chỉ nhận physical batch có sample_count == U.
+- Work Unit contribution bắt buộc compute_ms finite và > 0.
+- StepStart từ chối trùng (shard_id, batch_id), không đổi framing 48-byte/DTP/1.
+
+Node Agent/control plane:
+- Timeout abort dọn tiến trình; force=false không kill Worker đang chạy.
+- Admission duplicate đồng thời trở thành atomic; terminal allocation không sống lại.
+- Heartbeat không tự chuyển OFFLINE thành ONLINE; HELLO vẫn là admission gate.
+
+Database:
+- Alembic schema nodes/allocations được migrate tới 0003_add_nodes_and_allocations.
+
+5. PR8 ISSUES
+-------------
+
+- DBS-01: FIXED — WorkloadScheduler filter sample_count == U; unit tests bao phủ
+  full/short batch.
+- DBS-02: FIXED — Worker/Runtime fail-fast khi compute_ms missing, NaN, infinity
+  hoặc <= 0 trong Work Unit mode.
+- DBS-03: FIXED — production RESUME chạy qua backend descriptor và Runtime restart.
+- DBS-04: FIXED — có real-process E2E Runtime + Workers + DTP/1, không gọi synthetic
+  Coordinator test là full E2E.
+- DBS-05: FIXED — canonical docs được sync, không còn file .md.md; Blueprint được
+  đánh dấu NON-NORMATIVE và authority được giữ.
+- DBS-06: FIXED — StepStart reject duplicate Work Unit identity, có protocol tests.
+
+6. PR9 ISSUES
+-------------
+
+- NA-01: FIXED — timeout start/stop command abort và cleanup đúng lifecycle.
+- NA-02: FIXED — terminal allocation không bị heartbeat/duplicate command hồi sinh.
+- NA-03: FIXED — concurrent duplicate admission được serialize/atomic và có race test.
+- NA-04: FIXED — STOP_WORKER force=false không gửi kill cưỡng bức.
+- NA-05: FIXED — heartbeat không nâng OFFLINE lên ONLINE; HELLO mới mở session.
+- NA-06: FIXED — duplicate heartbeat/reconnect behavior được giữ idempotent và kiểm thử.
+
+7. CHECKPOINT RESUME
+--------------------
+
+- Locator ownership: Backend/control plane resolve checkpoint_id; Runtime không query
+  PostgreSQL và không nhận arbitrary filesystem path.
+- Runtime derive checkpoint_root/source_attempt_id/deterministic-checkpoint-directory,
+  reject invalid identity và mọi locator thoát checkpoint root.
+- Integrity: verify metadata_sha256, model_sha256, Checkpoint V1, contract_hash,
+  dataset_build_id, dataset_manifest_hash và parameter manifest/model compatibility.
+- Restart: real-process E2E đã dừng Runtime, dựng Runtime mới, restore model_version 1,
+  RecoveryCursor và hoàn tất ở model_version 6.
+- Negative tests bao phủ unknown checkpoint, corrupt metadata/model, checksum mismatch,
+  wrong contract/dataset, invalid identity và path escape.
+
+8. DATASET ORIGIN FLOW
+----------------------
+
+- Local: legacy response được nhận diện rõ ràng mới fallback manifest.json; current
+  standalone V1 explicit shard/batch routes tiếp tục tương thích.
+- HF-style/fake remote: manifest path không ở root được resolve tương đối và tải đúng.
+- Runtime validate manifest URI thuộc artifact origin, từ chối ../ và equivalent escape,
+  rồi truyền root_manifest_path qua DatasetAssignment hiện có tới Worker.
+- Cross-repo test chạy với Dataset-Manager đúng locked snapshot; Dataset Manager chỉ
+  tham gia provisioning trước RUNNING.
+
+9. TEST RESULTS
+---------------
+
+- Targeted: 281 passed, 132 subtests passed.
+- Subsystem integration: 17 passed, 10 subtests passed.
+- PostgreSQL integration: 41 passed.
+- Dataset origin/cross-repo compatibility: 12 passed.
+- Checkpoint-specific: 15 passed.
+- Node maintenance/admission: 25 passed, 5 subtests passed.
+- Real-process E2E: PASS cho managed training + DBS và Runtime restart + RESUME.
+- Full pytest: 508 passed, 150 subtests passed, 5 dependency deprecation warnings.
+- Database migration: local pbl4_test và configured remote database đều ở
+  0003_add_nodes_and_allocations (head).
+- Architecture import-boundary: PASS.
+- Ruff format check: 237 files formatted; PASS.
+- Ruff lint: all checks passed.
+- Compileall, scaffold verification và git diff --check: PASS.
+
+10. REMAINING RISKS
+-------------------
+
+- FastAPI/Starlette/httpx và Alembic phát deprecation warnings từ dependency/config;
+  không ảnh hưởng correctness hiện tại nhưng nên xử lý trong maintenance riêng.
+- E2E dùng local CPU/process và fake remote origin; WAN/GPU benchmark nằm ngoài scope
+  đã chốt, nên không cung cấp số liệu hiệu năng production WAN/GPU.
+
+11. MERGE RECOMMENDATION
+------------------------
+
+Merge integration/runtime-node-agent-dataset sau khi CI tái hiện final gates. Giữ hai
+merge commit PR9/PR8 để bảo toàn evidence; không squash trước khi review integration.

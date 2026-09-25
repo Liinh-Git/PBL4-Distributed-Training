@@ -17,28 +17,28 @@ Responsibilities:
 - Outbound command dispatch:
   * START_WORKER -> send COMMAND envelope to target node's active websocket.
   * STOP_WORKER -> send COMMAND envelope to target node's active websocket.
-- On disconnect: remove from active map WITHOUT marking node OFFLINE (offline handled by stale maintenance).
+- On disconnect: remove from active map WITHOUT marking node OFFLINE.
+  Stale maintenance owns the OFFLINE transition.
 - On revoke: close active WSS cleanly without stopping workers or aborting attempts.
-- Strict isolation: NEVER imports or proxies Runtime, Worker internals, DTP/1, tensors, or gradients.
+- Strict isolation: never proxy Runtime/Worker internals, DTP/1, tensors, or gradients.
 """
 
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+import contextlib
 import json
 import logging
 import threading
-from typing import Any
 import uuid
+from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect, status
 
 from pbl4.agent_protocol.messages import (
     COMMAND_STATUS_ACCEPTED,
     COMMAND_STATUS_REJECTED,
-    COMMAND_TYPE_START_WORKER,
-    COMMAND_TYPE_STOP_WORKER,
     MESSAGE_TYPE_AGENT_HELLO,
     MESSAGE_TYPE_COMMAND,
     MESSAGE_TYPE_COMMAND_ACK,
@@ -81,7 +81,7 @@ logger = logging.getLogger(__name__)
 
 
 class NodeControlGateway(NodeControlGatewayProtocol):
-    """Gateway managing outbound control channels and bi-directional message routing for Node Agents."""
+    """Manage outbound control channels and bidirectional Node Agent messages."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -105,12 +105,14 @@ class NodeControlGateway(NodeControlGatewayProtocol):
     # ─── WSS Connection Lifecycle ─────────────────────────────────────────────
 
     async def handle_websocket_connection(self, websocket: WebSocket, node_id: str) -> None:
-        """Handle incoming WSS connection, authenticate, enforce single connection, and loop messages."""
+        """Authenticate and serve one logical WSS session for a node."""
         # 1. Capture event loop reference
         self._loop = asyncio.get_running_loop()
 
         # 2. Extract Bearer node_secret from Authorization header (or query param fallback)
-        auth_header = websocket.headers.get("authorization") or websocket.headers.get("Authorization")
+        auth_header = websocket.headers.get("authorization") or websocket.headers.get(
+            "Authorization"
+        )
         node_secret: str | None = None
         if auth_header and auth_header.startswith("Bearer "):
             node_secret = auth_header[len("Bearer ") :].strip()
@@ -120,8 +122,12 @@ class NodeControlGateway(NodeControlGatewayProtocol):
             node_secret = websocket.query_params["secret"].strip()
 
         if not node_secret:
-            logger.warning("WSS rejected for node '%s': missing Authorization Bearer token", node_id)
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Missing authorization token")
+            logger.warning(
+                "WSS rejected for node '%s': missing Authorization Bearer token", node_id
+            )
+            await websocket.close(
+                code=status.WS_1008_POLICY_VIOLATION, reason="Missing authorization token"
+            )
             return
 
         # 3. Authenticate node_secret via NodeService BEFORE accepting logical session
@@ -130,11 +136,15 @@ class NodeControlGateway(NodeControlGatewayProtocol):
                 node = node_service.authenticate_node(conn, node_id, node_secret)
         except (NodeUnauthorizedError, NodeNotFoundError) as exc:
             logger.warning("WSS authentication failed for node '%s': %s", node_id, exc)
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid credentials")
+            await websocket.close(
+                code=status.WS_1008_POLICY_VIOLATION, reason="Invalid credentials"
+            )
             return
         except NodeRevokedError as exc:
             logger.warning("WSS authentication rejected for REVOKED node '%s': %s", node_id, exc)
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Node has been revoked")
+            await websocket.close(
+                code=status.WS_1008_POLICY_VIOLATION, reason="Node has been revoked"
+            )
             return
         except Exception as exc:
             logger.error("Database error during WSS auth for node '%s': %s", node_id, exc)
@@ -150,19 +160,22 @@ class NodeControlGateway(NodeControlGatewayProtocol):
 
         if old_ws is not None:
             logger.info("Closing previous control connection for node '%s'", node_id)
-            try:
+            with contextlib.suppress(Exception):
                 await old_ws.close(
                     code=status.WS_1008_POLICY_VIOLATION,
                     reason="Superseded by new control connection",
                 )
-            except Exception:
-                pass
 
         # 5. Accept logical WebSocket session
         await websocket.accept()
-        logger.info("Accepted control WebSocket session for node '%s' (initial state=%s)", node_id, node["state"])
+        logger.info(
+            "Accepted control WebSocket session for node '%s' (initial state=%s)",
+            node_id,
+            node["state"],
+        )
 
         # 6. Bi-directional message receive loop
+        hello_accepted = False
         try:
             while True:
                 raw_text = await websocket.receive_text()
@@ -180,6 +193,16 @@ class NodeControlGateway(NodeControlGatewayProtocol):
                     )
                     continue
 
+                if envelope.message_type == MESSAGE_TYPE_AGENT_HELLO:
+                    hello_accepted = await self._handle_agent_hello(websocket, node_id, envelope)
+                    continue
+                if not hello_accepted:
+                    logger.warning(
+                        "Ignoring %s from node '%s' before AGENT_HELLO acceptance",
+                        envelope.message_type,
+                        node_id,
+                    )
+                    continue
                 await self._process_inbound_message(websocket, node_id, envelope)
 
         except WebSocketDisconnect:
@@ -221,7 +244,7 @@ class NodeControlGateway(NodeControlGatewayProtocol):
         websocket: WebSocket,
         node_id: str,
         envelope: AgentEnvelope,
-    ) -> None:
+    ) -> bool:
         """Process AGENT_HELLO: transition OFFLINE -> ONLINE and reply with HELLO_ACK."""
         try:
             if isinstance(envelope.payload, AgentHelloPayload):
@@ -232,7 +255,7 @@ class NodeControlGateway(NodeControlGatewayProtocol):
                 raise TypeError(f"Unexpected payload type: {type(envelope.payload).__name__}")
         except Exception as exc:
             logger.warning("Invalid AGENT_HELLO payload from node '%s': %s", node_id, exc)
-            return
+            return False
 
         settings = get_settings()
         now = datetime.now(UTC)
@@ -249,7 +272,7 @@ class NodeControlGateway(NodeControlGatewayProtocol):
                 )
         except Exception as exc:
             logger.error("Failed recording node online for '%s': %s", node_id, exc)
-            return
+            return False
 
         # Reply with HELLO_ACK
         ack_payload = HelloAckPayload(
@@ -266,6 +289,7 @@ class NodeControlGateway(NodeControlGatewayProtocol):
         )
         await websocket.send_text(reply_env.to_json())
         logger.info("Sent HELLO_ACK to node '%s' (node transitioned to ONLINE)", node_id)
+        return True
 
     async def _handle_heartbeat(
         self,
@@ -275,9 +299,9 @@ class NodeControlGateway(NodeControlGatewayProtocol):
         """Process HEARTBEAT: update last_seen_at idempotently."""
         try:
             if isinstance(envelope.payload, HeartbeatPayload):
-                payload = envelope.payload
+                pass
             elif isinstance(envelope.payload, dict):
-                payload = HeartbeatPayload.from_dict(envelope.payload)
+                HeartbeatPayload.from_dict(envelope.payload)
             else:
                 raise TypeError(f"Unexpected payload type: {type(envelope.payload).__name__}")
         except Exception as exc:
@@ -351,14 +375,16 @@ class NodeControlGateway(NodeControlGatewayProtocol):
 
                 if payload.status == COMMAND_STATUS_ACCEPTED:
                     logger.info(
-                        "Command '%s' for allocation '%s' was ACCEPTED by node '%s' (remains DISPATCHED)",
+                        "Command '%s' for allocation '%s' was ACCEPTED by node '%s' "
+                        "(remains DISPATCHED)",
                         payload.command_id,
                         payload.allocation_id,
                         node_id,
                     )
                 elif payload.status == COMMAND_STATUS_REJECTED:
                     logger.warning(
-                        "Command '%s' for allocation '%s' was REJECTED by node '%s': code=%s msg=%s",
+                        "Command '%s' for allocation '%s' was REJECTED by node '%s': "
+                        "code=%s msg=%s",
                         payload.command_id,
                         payload.allocation_id,
                         node_id,
@@ -423,7 +449,9 @@ class NodeControlGateway(NodeControlGatewayProtocol):
                         failure_message=payload.failure_message,
                     )
         except AllocationNotFoundError:
-            logger.warning("WORKER_STATUS referenced unknown allocation '%s'", payload.allocation_id)
+            logger.warning(
+                "WORKER_STATUS referenced unknown allocation '%s'", payload.allocation_id
+            )
         except Exception as exc:
             logger.error("Error processing WORKER_STATUS for node '%s': %s", node_id, exc)
 
@@ -440,7 +468,9 @@ class NodeControlGateway(NodeControlGatewayProtocol):
             ws = self._active_connections.get(node_id)
 
         if ws is None:
-            logger.warning("Cannot dispatch START_WORKER: node '%s' is not connected via WSS", node_id)
+            logger.warning(
+                "Cannot dispatch START_WORKER: node '%s' is not connected via WSS", node_id
+            )
             return False
 
         env = AgentEnvelope(
@@ -479,7 +509,9 @@ class NodeControlGateway(NodeControlGatewayProtocol):
             ws = self._active_connections.get(node_id)
 
         if ws is None:
-            logger.warning("Cannot dispatch STOP_WORKER: node '%s' is not connected via WSS", node_id)
+            logger.warning(
+                "Cannot dispatch STOP_WORKER: node '%s' is not connected via WSS", node_id
+            )
             return False
 
         env = AgentEnvelope(
@@ -536,7 +568,7 @@ class NodeControlGateway(NodeControlGatewayProtocol):
 
             if current is loop:
                 # Same loop thread: must not block thread; run task
-                task = loop.create_task(coro)
+                loop.create_task(coro)
                 # Wait briefly if possible, or return True optimistic
                 return True
             else:
@@ -564,13 +596,11 @@ class NodeControlGateway(NodeControlGatewayProtocol):
 
         if ws is not None:
             logger.info("Closing active WSS connection for revoked node '%s'", node_id)
-            try:
+            with contextlib.suppress(Exception):
                 await ws.close(
                     code=status.WS_1008_POLICY_VIOLATION,
                     reason="Node credentials revoked",
                 )
-            except Exception:
-                pass
 
     def close_node_connection(self, node_id: str) -> None:
         """Synchronous wrapper for closing a node connection."""
@@ -582,11 +612,9 @@ class NodeControlGateway(NodeControlGatewayProtocol):
             conns = list(self._active_connections.items())
             self._active_connections.clear()
 
-        for n_id, ws in conns:
-            try:
+        for _n_id, ws in conns:
+            with contextlib.suppress(Exception):
                 await ws.close(code=status.WS_1000_NORMAL_CLOSURE, reason="Server shutdown")
-            except Exception:
-                pass
 
 
 # ─── Gateway Singleton ────────────────────────────────────────────────────────

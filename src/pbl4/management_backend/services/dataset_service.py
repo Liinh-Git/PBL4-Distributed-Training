@@ -871,9 +871,7 @@ def execute_delete_build(
             if isinstance(body, str):
                 body = json.loads(body)
             b_id = (
-                body.get("dataset_build_id")
-                or cached_record.get("resource_id")
-                or dataset_build_id
+                body.get("dataset_build_id") or cached_record.get("resource_id") or dataset_build_id
             )
             c_id = body.get("command_id") or cached_record.get("command_id")
             build_row = dataset_build_repository.get_build(conn, b_id) if b_id else None

@@ -1,4 +1,4 @@
-"""Allocation Service — business logic for worker allocations, command dispatch, and admission tokens.
+"""Worker-allocation, command-dispatch, and admission-token business logic.
 
 Reference: NODE_AGENT_IMPLEMENTATION_PLAN.md & NODE_AGENT_DESIGN.md
 
@@ -8,7 +8,7 @@ Responsibilities:
 - Build START_WORKER command with exact parameters:
   * runtime_host = settings.dtp_advertised_host
   * runtime_port = settings.runtime_dtp_port
-  * initialization_seed extracted from job.resolved_contract["training"]["training_seed"] (strictly int)
+  * initialization_seed from the frozen training contract (strictly int)
   * short-lived signed worker_join_token with claims (attempt_id, allocation_id, node_id)
 - Zero token logging or token in database.
 - Dispatch commands through NodeControlGatewayProtocol boundary.
@@ -21,16 +21,17 @@ Responsibilities:
   * WORKER_STATUS STARTED -> STARTED
   * intentional stop + ended -> ENDED
   * unexpected process exit -> FAILED
-- Enforce stop semantics: set desired_state = 'STOPPED', dispatch STOP_WORKER, without modifying Attempt lifecycle.
+- Stop semantics set desired_state='STOPPED' and dispatch STOP_WORKER.
+  They do not modify the Attempt lifecycle.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import json
 import logging
-from typing import Any, Protocol, runtime_checkable
 import uuid
+from datetime import UTC, datetime
+from typing import Any, Protocol, runtime_checkable
 
 import psycopg
 
@@ -58,6 +59,7 @@ logger = logging.getLogger(__name__)
 
 
 # ─── Service Exceptions ───────────────────────────────────────────────────────
+
 
 class AllocationError(Exception):
     """Base exception for worker allocation service errors."""
@@ -89,6 +91,7 @@ class WorkerAdmissionConfigError(AllocationError):
 
 # ─── Gateway Boundary Protocol ────────────────────────────────────────────────
 
+
 @runtime_checkable
 class NodeControlGatewayProtocol(Protocol):
     """Outbound boundary interface for communicating with Node Agents over WSS.
@@ -116,6 +119,7 @@ class NodeControlGatewayProtocol(Protocol):
 
 
 # ─── Allocation Service Implementation ─────────────────────────────────────────
+
 
 class AllocationService:
     """Domain service managing WorkerAllocation records, commands, and tokens."""
@@ -172,11 +176,15 @@ class AllocationService:
             raise NodeRevokedError(f"Cannot allocate worker to REVOKED node '{node_id}'.")
         if node.get("state") != node_repository.NODE_STATE_ONLINE:
             raise NodeOfflineError(
-                f"Cannot allocate worker to node '{node_id}' in state '{node.get('state')}'; must be ONLINE."
+                f"Cannot allocate worker to node '{node_id}' in state "
+                f"'{node.get('state')}'; must be ONLINE."
             )
 
         app_settings = settings or get_settings()
-        endpoint = runtime_endpoint or f"{app_settings.dtp_advertised_host}:{app_settings.runtime_dtp_port}"
+        endpoint = (
+            runtime_endpoint
+            or f"{app_settings.dtp_advertised_host}:{app_settings.runtime_dtp_port}"
+        )
         current_time = now or datetime.now(UTC)
         chosen_alloc_id = allocation_id or f"alloc-{uuid.uuid4().hex[:12]}"
 
@@ -194,7 +202,8 @@ class AllocationService:
         )
 
         logger.info(
-            "Created allocation '%s' on node '%s' for attempt '%s' (actual=REQUESTED, desired=RUNNING)",
+            "Created allocation '%s' on node '%s' for attempt '%s' "
+            "(actual=REQUESTED, desired=RUNNING)",
             chosen_alloc_id,
             node_id,
             attempt_id,
@@ -240,7 +249,7 @@ class AllocationService:
         """Construct the canonical START_WORKER command with short-lived admission token.
 
         Invariants enforced:
-        - initialization_seed strictly extracted from job.resolved_contract["training"]["training_seed"] as int.
+        - initialization_seed comes from the frozen training contract as an int.
         - worker_admission_secret loaded from settings, never hardcoded.
         - Token issued with exact scope claims: (attempt_id, allocation_id, node_id).
         - Advertised host and port strictly from settings.dtp_advertised_host and runtime_dtp_port.
@@ -257,7 +266,8 @@ class AllocationService:
             expected_attempt_id = str(attempt.get("attempt_id", ""))
             if expected_attempt_id and expected_attempt_id != attempt_id:
                 raise ValueError(
-                    f"Attempt ID mismatch: allocation has '{attempt_id}', attempt has '{expected_attempt_id}'"
+                    f"Attempt ID mismatch: allocation has '{attempt_id}', "
+                    f"attempt has '{expected_attempt_id}'"
                 )
 
         # Extract resolved contract from job or attempt
@@ -270,7 +280,10 @@ class AllocationService:
             resolved_contract = json.loads(rc) if isinstance(rc, str) else rc
 
         if not resolved_contract or not isinstance(resolved_contract, dict):
-            raise ValueError("A frozen resolved_contract is required to extract initialization_seed for START_WORKER.")
+            raise ValueError(
+                "A frozen resolved_contract is required to extract "
+                "initialization_seed for START_WORKER."
+            )
 
         # Extract and validate initialization_seed
         training = resolved_contract.get("training")
@@ -279,7 +292,10 @@ class AllocationService:
 
         seed = training.get("training_seed")
         if seed is None or not isinstance(seed, int) or isinstance(seed, bool):
-            raise ValueError(f"initialization_seed must be an integer in resolved_contract['training'], got: {seed!r}")
+            raise ValueError(
+                "initialization_seed must be an integer in "
+                f"resolved_contract['training'], got: {seed!r}"
+            )
 
         # Check admission secret
         secret = app_settings.worker_admission_secret
@@ -367,7 +383,10 @@ class AllocationService:
                 success = False
 
             if not success:
-                logger.warning("Failed to dispatch START_WORKER to node '%s'; marking allocation FAILED", node_id)
+                logger.warning(
+                    "Failed to dispatch START_WORKER to node '%s'; marking allocation FAILED",
+                    node_id,
+                )
                 updated = allocation_repository.update_actual_state(
                     conn,
                     allocation_id,

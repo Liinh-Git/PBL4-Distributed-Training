@@ -22,6 +22,8 @@ ENV/
 htmlcov/
 .pytest_cache/
 .pytest-*/
+.pytest_tmp/
+.test-tmp-*/
 .mypy_cache/
 .ruff_cache/
 test_api.py

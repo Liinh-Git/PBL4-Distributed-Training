@@ -425,4 +425,3 @@ def test_contract_resolver_non_dict_preprocessing_json_raises():
         pytest.raises(ContractResolutionError, match="must decode to an object/dict"),
     ):
         resolve(conn, req)
-

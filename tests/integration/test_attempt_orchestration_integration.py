@@ -24,13 +24,12 @@ Tests:
 
 from __future__ import annotations
 
-from contextlib import suppress
-from datetime import UTC, datetime
 import json
 import os
+import uuid
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock, patch
-import uuid
 
 import psycopg
 import pytest
@@ -38,16 +37,16 @@ import pytest
 from pbl4.agent_protocol.messages import StartWorkerPayload, StopWorkerPayload
 from pbl4.common.worker_admission import verify_worker_join_token
 from pbl4.management_backend import db
-from pbl4.management_backend.config import BackendSettings, get_settings
+from pbl4.management_backend.config import get_settings
 from pbl4.management_backend.gateways.runtime_gateway import RuntimeGateway
 from pbl4.management_backend.repositories import (
     allocation_repository,
     attempt_repository,
-    job_repository,
     worker_session_repository,
 )
 from pbl4.management_backend.services import attempt_service
 from pbl4.management_backend.services.allocation_service import AllocationService
+from pbl4.management_backend.services.cluster_scheduler import NodeCapacityUnavailableError
 from pbl4.management_protocol.messages import StateSnapshot
 
 TEST_DB_URL = (
@@ -143,10 +142,12 @@ def _create_test_job(
                 "Attempt orchestration test job",
                 "READY",
                 json.dumps({"dataset_build_id": "bld-1"}),
-                json.dumps({
-                    "synchronization": {"expected_workers": expected_workers},
-                    "training": {"training_seed": training_seed},
-                }),
+                json.dumps(
+                    {
+                        "synchronization": {"expected_workers": expected_workers},
+                        "training": {"training_seed": training_seed},
+                    }
+                ),
                 f"hash-{job_id}",
                 now,
                 now,
@@ -217,8 +218,15 @@ def test_start_attempt_success_orchestration(pg_conn):
 
     mock_node_gw.send_start_worker.side_effect = fake_send_start_worker
 
-    with patch("pbl4.management_backend.services.attempt_service.get_gateway", return_value=mock_rt_gw), \
-         patch("pbl4.management_backend.gateways.node_control_gateway.get_node_control_gateway", return_value=mock_node_gw):
+    with (
+        patch(
+            "pbl4.management_backend.services.attempt_service.get_gateway", return_value=mock_rt_gw
+        ),
+        patch(
+            "pbl4.management_backend.gateways.node_control_gateway.get_node_control_gateway",
+            return_value=mock_node_gw,
+        ),
+    ):
         attempt_row, cmd_row = attempt_service.execute_start_job(
             db,
             job_id,
@@ -281,9 +289,16 @@ def test_start_attempt_insufficient_nodes_rollback(pg_conn):
     mock_rt_gw = MagicMock()
     mock_node_gw = MagicMock()
 
-    with patch("pbl4.management_backend.services.attempt_service.get_gateway", return_value=mock_rt_gw), \
-         patch("pbl4.management_backend.gateways.node_control_gateway.get_node_control_gateway", return_value=mock_node_gw):
-        with pytest.raises(attempt_service.NodeCapacityUnavailableError) as exc_info:
+    with (
+        patch(
+            "pbl4.management_backend.services.attempt_service.get_gateway", return_value=mock_rt_gw
+        ),
+        patch(
+            "pbl4.management_backend.gateways.node_control_gateway.get_node_control_gateway",
+            return_value=mock_node_gw,
+        ),
+    ):
+        with pytest.raises(NodeCapacityUnavailableError) as exc_info:
             attempt_service.execute_start_job(
                 db,
                 job_id,
@@ -297,7 +312,9 @@ def test_start_attempt_insufficient_nodes_rollback(pg_conn):
 
     # Verify no allocations created
     with pg_conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM worker_allocations WHERE node_id IN (%s, %s)", (node_0, node_1))
+        cur.execute(
+            "SELECT COUNT(*) FROM worker_allocations WHERE node_id IN (%s, %s)", (node_0, node_1)
+        )
         count = cur.fetchone()[0]
         assert count == 0
 
@@ -327,8 +344,15 @@ def test_start_attempt_runtime_rejection_no_worker_dispatch(pg_conn):
 
     mock_node_gw = MagicMock()
 
-    with patch("pbl4.management_backend.services.attempt_service.get_gateway", return_value=mock_rt_gw), \
-         patch("pbl4.management_backend.gateways.node_control_gateway.get_node_control_gateway", return_value=mock_node_gw):
+    with (
+        patch(
+            "pbl4.management_backend.services.attempt_service.get_gateway", return_value=mock_rt_gw
+        ),
+        patch(
+            "pbl4.management_backend.gateways.node_control_gateway.get_node_control_gateway",
+            return_value=mock_node_gw,
+        ),
+    ):
         with pytest.raises(attempt_service.CommandRejectedError) as exc_info:
             attempt_service.execute_start_job(
                 db,
@@ -381,9 +405,7 @@ def test_start_attempt_partial_worker_dispatch_failure(pg_conn):
     stops_sent: list[str] = []
 
     def fake_send_start_worker(node_id: str, *, command: StartWorkerPayload) -> bool:
-        if node_id == succ_node:
-            return True
-        return False  # fail_node fails dispatch
+        return node_id == succ_node  # fail_node fails dispatch
 
     def fake_send_stop_worker(node_id: str, *, command: StopWorkerPayload) -> bool:
         stops_sent.append(node_id)
@@ -392,8 +414,15 @@ def test_start_attempt_partial_worker_dispatch_failure(pg_conn):
     mock_node_gw.send_start_worker.side_effect = fake_send_start_worker
     mock_node_gw.send_stop_worker.side_effect = fake_send_stop_worker
 
-    with patch("pbl4.management_backend.services.attempt_service.get_gateway", return_value=mock_rt_gw), \
-         patch("pbl4.management_backend.gateways.node_control_gateway.get_node_control_gateway", return_value=mock_node_gw):
+    with (
+        patch(
+            "pbl4.management_backend.services.attempt_service.get_gateway", return_value=mock_rt_gw
+        ),
+        patch(
+            "pbl4.management_backend.gateways.node_control_gateway.get_node_control_gateway",
+            return_value=mock_node_gw,
+        ),
+    ):
         with pytest.raises(attempt_service.CommandFailedError) as exc_info:
             attempt_service.execute_start_job(
                 db,
@@ -443,8 +472,15 @@ def test_retry_creates_fresh_allocations_and_tokens(pg_conn):
     mock_node_gw.send_start_worker.return_value = True
 
     # 1. First attempt starts and completes/fails
-    with patch("pbl4.management_backend.services.attempt_service.get_gateway", return_value=mock_rt_gw), \
-         patch("pbl4.management_backend.gateways.node_control_gateway.get_node_control_gateway", return_value=mock_node_gw):
+    with (
+        patch(
+            "pbl4.management_backend.services.attempt_service.get_gateway", return_value=mock_rt_gw
+        ),
+        patch(
+            "pbl4.management_backend.gateways.node_control_gateway.get_node_control_gateway",
+            return_value=mock_node_gw,
+        ),
+    ):
         attempt_1, _ = attempt_service.execute_start_job(
             db,
             job_id,
@@ -479,8 +515,15 @@ def test_retry_creates_fresh_allocations_and_tokens(pg_conn):
 
     mock_node_gw.send_start_worker.side_effect = fake_send_start
 
-    with patch("pbl4.management_backend.services.attempt_service.get_gateway", return_value=mock_rt_gw), \
-         patch("pbl4.management_backend.gateways.node_control_gateway.get_node_control_gateway", return_value=mock_node_gw):
+    with (
+        patch(
+            "pbl4.management_backend.services.attempt_service.get_gateway", return_value=mock_rt_gw
+        ),
+        patch(
+            "pbl4.management_backend.gateways.node_control_gateway.get_node_control_gateway",
+            return_value=mock_node_gw,
+        ),
+    ):
         attempt_2, _ = attempt_service.execute_retry_job(
             db,
             job_id,
@@ -555,55 +598,57 @@ def test_snapshot_reconciliation_and_backend_recovery(pg_conn):
     sess_id_1 = int(uuid.uuid4().hex[:8], 16)
 
     # Simulate Runtime emitting StateSnapshot with identity mapping
-    snapshot_msg = StateSnapshot.from_dict({
-        "runtime_instance_id": "rt-snap-1",
-        "active_job_id": job_id,
-        "active_attempt_id": attempt_id,
-        "attempt_state": "RUNNING",
-        "training_strategy": "strict_bsp",
-        "checkpoint_policy": "every_step",
-        "epoch": 1,
-        "current_operation_id": 1,
-        "current_batch_ordinal": 5,
-        "model_version": 1,
-        "workers": [
-            {
-                "worker_id": 0,
-                "session_id": str(sess_id_0),
-                "node_label": "worker-0",
-                "protocol_version": 1,
-                "connected_at": "2026-09-25T00:00:00Z",
-                "state": "READY",
-                "last_heartbeat_at": "2026-09-25T00:00:00Z",
-                "shard_id": 0,
-                "local_model_version": 1,
-                "node_id": node_0,
-                "allocation_id": alloc_0["allocation_id"],
-            },
-            {
-                "worker_id": 1,
-                "session_id": str(sess_id_1),
-                "node_label": "worker-1",
-                "protocol_version": 1,
-                "connected_at": "2026-09-25T00:00:00Z",
-                "state": "READY",
-                "last_heartbeat_at": "2026-09-25T00:00:00Z",
-                "shard_id": 1,
-                "local_model_version": 1,
-                "node_id": node_1,
-                "allocation_id": alloc_1["allocation_id"],
-            },
-        ],
-        "strategy_state": {},
-        "checkpoint_state": "IDLE",
-        "latest_checkpoint_id": None,
-        "recovery_cursor": {},
-        "dataset_build_id": "bld-1",
-        "dataset_manifest_hash": f"hash-{job_id}",
-        "last_runtime_event_seq": 10,
-        "management_event_gap_count": 0,
-        "captured_at": "2026-09-25T00:00:01Z",
-    })
+    snapshot_msg = StateSnapshot.from_dict(
+        {
+            "runtime_instance_id": "rt-snap-1",
+            "active_job_id": job_id,
+            "active_attempt_id": attempt_id,
+            "attempt_state": "RUNNING",
+            "training_strategy": "strict_bsp",
+            "checkpoint_policy": "every_step",
+            "epoch": 1,
+            "current_operation_id": 1,
+            "current_batch_ordinal": 5,
+            "model_version": 1,
+            "workers": [
+                {
+                    "worker_id": 0,
+                    "session_id": str(sess_id_0),
+                    "node_label": "worker-0",
+                    "protocol_version": 1,
+                    "connected_at": "2026-09-25T00:00:00Z",
+                    "state": "READY",
+                    "last_heartbeat_at": "2026-09-25T00:00:00Z",
+                    "shard_id": 0,
+                    "local_model_version": 1,
+                    "node_id": node_0,
+                    "allocation_id": alloc_0["allocation_id"],
+                },
+                {
+                    "worker_id": 1,
+                    "session_id": str(sess_id_1),
+                    "node_label": "worker-1",
+                    "protocol_version": 1,
+                    "connected_at": "2026-09-25T00:00:00Z",
+                    "state": "READY",
+                    "last_heartbeat_at": "2026-09-25T00:00:00Z",
+                    "shard_id": 1,
+                    "local_model_version": 1,
+                    "node_id": node_1,
+                    "allocation_id": alloc_1["allocation_id"],
+                },
+            ],
+            "strategy_state": {},
+            "checkpoint_state": "IDLE",
+            "latest_checkpoint_id": None,
+            "recovery_cursor": {},
+            "dataset_build_id": "bld-1",
+            "dataset_manifest_hash": f"hash-{job_id}",
+            "last_runtime_event_seq": 10,
+            "management_event_gap_count": 0,
+            "captured_at": "2026-09-25T00:00:01Z",
+        }
+    )
 
     # Process snapshot through RuntimeGateway
     gateway = RuntimeGateway()
@@ -626,7 +671,9 @@ def test_snapshot_reconciliation_and_backend_recovery(pg_conn):
     # Simulating backend process restart where in-memory gateway has no snapshot,
     # get_attempt_snapshot reads authoritative projection from PostgreSQL
     fresh_gw = RuntimeGateway()
-    with patch("pbl4.management_backend.services.attempt_service.get_gateway", return_value=fresh_gw):
+    with patch(
+        "pbl4.management_backend.services.attempt_service.get_gateway", return_value=fresh_gw
+    ):
         restored_snapshot = attempt_service.get_attempt_snapshot(pg_conn, attempt_id)
     assert restored_snapshot["attempt_id"] == attempt_id
     restored_workers = restored_snapshot["workers"]

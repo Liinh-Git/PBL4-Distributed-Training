@@ -19,10 +19,10 @@ Critical boundary:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import hashlib
 import hmac
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 # ─── Service Exceptions ───────────────────────────────────────────────────────
+
 
 class NodeServiceError(Exception):
     """Base exception for node service domain errors."""
@@ -69,6 +70,7 @@ class NodeOfflineError(NodeServiceError):
 
 
 # ─── Service Implementation ───────────────────────────────────────────────────
+
 
 def hash_secret(secret: str) -> str:
     """Compute standard SHA-256 hex digest of a secret string."""
@@ -120,7 +122,10 @@ class NodeService:
             raise NodeUnauthorizedError(f"Node '{node_id}' does not exist.")
 
         # Revoked nodes must never be authenticated
-        if node.get("state") == node_repository.NODE_STATE_REVOKED or node.get("credential_revoked_at") is not None:
+        if (
+            node.get("state") == node_repository.NODE_STATE_REVOKED
+            or node.get("credential_revoked_at") is not None
+        ):
             raise NodeRevokedError(f"Node '{node_id}' has been revoked.")
 
         actual_hash = hash_secret(node_secret)
@@ -147,11 +152,14 @@ class NodeService:
         """
         node = NodeService.get_node(conn, node_id)
 
-        if node.get("state") == node_repository.NODE_STATE_REVOKED or node.get("credential_revoked_at") is not None:
+        if (
+            node.get("state") == node_repository.NODE_STATE_REVOKED
+            or node.get("credential_revoked_at") is not None
+        ):
             raise NodeRevokedError(f"Node '{node_id}' is revoked and cannot be brought ONLINE.")
 
         current_time = now or datetime.now(UTC)
-        updated = node_repository.update_state(conn, node_id, node_repository.NODE_STATE_ONLINE)
+        node_repository.update_state(conn, node_id, node_repository.NODE_STATE_ONLINE)
         node_repository.update_heartbeat(conn, node_id, current_time)
 
         # Update metadata if provided
@@ -181,18 +189,18 @@ class NodeService:
 
         Strictly enforces:
         - Heartbeats from REVOKED nodes are rejected with NodeRevokedError.
-        - Valid heartbeats update last_seen_at and ensure state is ONLINE.
+        - Heartbeats update last_seen_at only. Only accepted AGENT_HELLO may
+          transition OFFLINE -> ONLINE.
         """
         node = NodeService.get_node(conn, node_id)
 
-        if node.get("state") == node_repository.NODE_STATE_REVOKED or node.get("credential_revoked_at") is not None:
+        if (
+            node.get("state") == node_repository.NODE_STATE_REVOKED
+            or node.get("credential_revoked_at") is not None
+        ):
             raise NodeRevokedError(f"Heartbeat rejected: Node '{node_id}' is revoked.")
 
         current_time = last_seen_at or datetime.now(UTC)
-
-        # If node was OFFLINE, heartbeat brings it back ONLINE
-        if node.get("state") == node_repository.NODE_STATE_OFFLINE:
-            node_repository.update_state(conn, node_id, node_repository.NODE_STATE_ONLINE)
 
         updated = node_repository.update_heartbeat(conn, node_id, current_time)
         return updated or node
@@ -227,7 +235,9 @@ class NodeService:
         - Does NOT touch active allocations or training attempts.
         """
         current_time = now or datetime.now(UTC)
-        online_nodes = node_repository.list_nodes(conn, state=node_repository.NODE_STATE_ONLINE, limit=1000)
+        online_nodes = node_repository.list_nodes(
+            conn, state=node_repository.NODE_STATE_ONLINE, limit=1000
+        )
 
         stale_node_ids: list[str] = []
         for node in online_nodes:
@@ -268,7 +278,11 @@ class NodeService:
                 try:
                     gateway.close_node_connection(node_id)
                 except Exception as exc:
-                    logger.warning("Failed closing active WSS connection for revoked node '%s': %s", node_id, exc)
+                    logger.warning(
+                        "Failed closing active WSS connection for revoked node '%s': %s",
+                        node_id,
+                        exc,
+                    )
             return node
 
         current_time = now or datetime.now(UTC)
@@ -279,7 +293,9 @@ class NodeService:
             try:
                 gateway.close_node_connection(node_id)
             except Exception as exc:
-                logger.warning("Failed closing active WSS connection for revoked node '%s': %s", node_id, exc)
+                logger.warning(
+                    "Failed closing active WSS connection for revoked node '%s': %s", node_id, exc
+                )
 
         return updated or node
 

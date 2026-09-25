@@ -1,0 +1,1170 @@
+PBL4 — MASTER INTEGRATION PLAN
+Runtime DBS + Node Agent + Standalone Dataset Manager
+Target repository: Liinh-Git/PBL4-Distributed-Training
+Target base: dev
+Integration branch: integration/runtime-node-agent-dataset
+
+LOCKED SOURCE SNAPSHOT (25/09/2026):
+- dev: 197cb478468d88d7f40365d79ce70d402d53d2f5
+- PR #8 / DBS: cb72ae78a0f67bb1e6c89ba7241b6d2a391399d0
+- PR #9 / Node Agent: b5b6d0cc17ce1270dc67b8aafe53d61395c67f53
+- Dataset-Manager main: 91b2277e462d3b2fc581bdb0f1515fc1862b0fd2
+
+The integration branch MUST be created directly from the locked dev commit. PR heads
+and Dataset-Manager evidence MUST NOT float during this execution.
+
+===============================================================================
+0. MỤC TIÊU VÀ CÁCH LÀM
+===============================================================================
+
+Mục tiêu cuối:
+- Hợp nhất PR #8 (DBS / Dynamic Workload + Work Unit) và PR #9 (Node Agent).
+- Giải quyết conflict theo semantics, không dùng "ours/theirs" mù quáng.
+- Sửa toàn bộ lỗi còn lại đã được chỉ ra trong hai review report.
+- Kết nối đúng với Dataset-Manager standalone, kể cả local artifact origin và
+  Hugging Face artifact origin.
+- Chạy được full flow:
+  Job/Attempt -> Node scheduling -> START_WORKER -> managed DTP admission
+  -> dataset provisioning -> SHARD_READY N/N -> model sync
+  -> StrictBSP + Work Unit training -> checkpoint -> completion/resume.
+- Sau cùng mới chạy full regression + architecture + lint + E2E và tạo report.
+
+Nguyên tắc thực thi:
+1. Làm theo mục tiêu, không dừng ở "review xong" hoặc "plan xong".
+2. Không audit toàn repo một cách vô hạn. Audit có giới hạn ở:
+   - delta của PR #8;
+   - delta của PR #9;
+   - 5 file overlap;
+   - các file được review report chỉ đích danh;
+   - đường Dataset Manager -> Runtime/Worker;
+   - call-site trực tiếp của các file trên.
+3. Chỉ mở rộng audit khi test hoặc dependency graph chỉ ra một caller/callee liên quan.
+4. Không redesign kiến trúc, không thêm framework/subsystem mới nếu code hiện tại đủ dùng.
+5. Mỗi phase: targeted tests trước. Full test suite chỉ chạy:
+   - một lần baseline nếu môi trường sẵn sàng;
+   - một lần final gate;
+   - chỉ chạy lại full suite nếu final gate fail và sau khi đã sửa.
+6. Không benchmark lớn, không GPU thật, không WAN thật cho mọi phase. Chỉ dùng WAN/HF
+   ở smoke test cuối.
+7. Không sửa AGENTS.md/governance trừ khi chính integration chứng minh tài liệu đang sai;
+   mặc định coi governance hiện tại là constraint.
+8. Không claim E2E nếu test chỉ construct Coordinator/components trực tiếp.
+
+===============================================================================
+1. NGUỒN AUTHORITY
+===============================================================================
+
+PR #8:
+https://github.com/Liinh-Git/PBL4-Distributed-Training/pull/8
+Branch: feature/dynamic-batch-size-algorithm
+
+Canonical DBS docs:
+https://drive.google.com/drive/folders/1F7JzjvFAC5LHmCOVO7mX5Wt9fYIAu2-K
+- DBS_DESIGN.md
+- DBS_IMPLEMENTATION_PLAN.md
+
+PR #9:
+https://github.com/Liinh-Git/PBL4-Distributed-Training/pull/9
+Branch: feature/node-agent
+
+Canonical Node Agent docs:
+https://drive.google.com/drive/folders/1ENgbbQrJxRP-SgAEC-8wep8nvYrloamm
+- NODE_AGENT_DESIGN.md
+- NODE_AGENT_IMPLEMENTATION_PLAN.md
+
+Historical/reference-only docs:
+https://drive.google.com/drive/folders/1Mpx1o3Px_v_amxay7bVaxIQ7e8Af9lpz
+Không dùng các tài liệu này để override DBS_DESIGN/NODE_AGENT_DESIGN.
+
+Standalone Dataset Manager:
+https://github.com/Liinh-Git/Dataset-Manager
+Authority chính:
+- docs/DATASET_MANAGER_DESIGN.md
+- docs/DATASET_MANAGER_IMPLEMENTATION_PLAN.md
+
+Review report đã audit:
+- PR8_DBS_REVIEW_FIX_REPORT.txt
+  Reviewed head: cb72ae78a0f67bb1e6c89ba7241b6d2a391399d0
+- PR9_NODE_AGENT_REVIEW_REPORT.txt
+  Reviewed head: b5b6d0cc17ce1270dc67b8aafe53d61395c67f53
+
+Authority khi có mâu thuẫn:
+1. Domain/Data Model/Source Structure canonical hiện hành.
+2. DBS_DESIGN.md cho Work Unit/DBS.
+3. NODE_AGENT_DESIGN.md cho Node/Allocation/admission/orchestration.
+4. DBS_IMPLEMENTATION_PLAN.md.
+5. Integration Implementation Plan này.
+6. Review reports của PR8/PR9.
+7. Dataset Manager canonical design cho artifact lifecycle/origin/manifest.
+8. IMPLEMENTATION_CONTRACT.md + AGENTS.md.
+9. Execution Blueprint/notes chỉ là NON-NORMATIVE.
+10. Code hiện tại để xác định implementation state.
+
+Paper DBS:
+https://arxiv.org/abs/2007.11831
+Chỉ dùng làm authority cho công thức/logic DBS đã được canonical design chọn.
+Không tự nghĩ heuristic thay thế.
+
+===============================================================================
+2. PHASE 0 — AUDIT DELTA CÓ GIỚI HẠN
+===============================================================================
+
+Mục tiêu:
+Xác nhận repository state và chỉ audit phần thay đổi kể từ các reviewed heads.
+
+Thực hiện:
+- git status --short
+- git fetch origin --prune
+- ghi lại:
+  BASE_DEV_SHA
+  PR8_HEAD_SHA
+  PR9_HEAD_SHA
+  DATASET_MANAGER_MAIN_SHA
+
+Nếu PR8_HEAD_SHA == reviewed head của PR8:
+- KHÔNG review lại toàn PR.
+- Dùng review report làm issue list chuẩn.
+
+Nếu PR8_HEAD_SHA đã đổi:
+- chỉ xem:
+  git log --oneline cb72ae78a0f67bb1e6c89ba7241b6d2a391399d0..PR8_HEAD_SHA
+  git diff cb72ae78a0f67bb1e6c89ba7241b6d2a391399d0..PR8_HEAD_SHA
+- audit delta mới + các file overlap.
+
+Tương tự PR9 với reviewed head:
+b5b6d0cc17ce1270dc67b8aafe53d61395c67f53
+
+Đọc tối thiểu trước khi merge:
+- root AGENTS.md
+- docs/IMPLEMENTATION_CONTRACT.md
+- canonical design sections liên quan trực tiếp
+- 2 review reports
+- 5 file overlap:
+  1. src/pbl4/protocol/messages.py
+  2. src/pbl4/runtime/parameter_server.py
+  3. src/pbl4/runtime/process.py
+  4. src/pbl4/worker/process.py
+  5. src/pbl4/worker/worker_client.py
+
+Không đọc toàn bộ historical docs.
+
+Output nội bộ ngắn của Phase 0:
+PLAN_DELTA
+- tối đa 15 bullet;
+- chỉ nêu chỗ plan này không còn đúng với code hiện tại;
+- nếu không có thay đổi kiến trúc: ghi "NO ARCHITECTURAL PLAN DELTA" và tiếp tục.
+
+Không chờ approval chỉ vì khác tên hàm/file nhỏ.
+Chỉ dừng nếu phát hiện contradiction architecture thật sự không thể reconcile.
+
+===============================================================================
+3. PHASE 1 — TẠO INTEGRATION BRANCH VÀ HỢP NHẤT HAI PR
+===============================================================================
+
+Required:
+git checkout --detach 197cb478468d88d7f40365d79ce70d402d53d2f5
+git checkout -b integration/runtime-node-agent-dataset
+
+Merge order:
+1. merge feature/node-agent
+2. merge feature/dynamic-batch-size-algorithm
+
+Lý do:
+- Node Agent đặt control-plane/admission/orchestration nền.
+- DBS sau đó bổ sung Work Unit/data-plane behavior.
+- Conflict phải resolve theo ownership matrix dưới đây, không theo merge order.
+
+Không squash hai feature vào một commit ngay từ đầu.
+Giữ history để truy trace regression.
+
+Sau mỗi merge:
+- compile/import smoke;
+- targeted tests của feature vừa merge;
+- chưa cần full suite nếu targeted tests đủ phát hiện lỗi merge cơ bản.
+
+Commit gợi ý:
+chore(integration): merge node-agent feature
+chore(integration): merge dbs workload feature
+
+===============================================================================
+4. OWNERSHIP MATRIX KHI RESOLVE 5 FILE OVERLAP
+===============================================================================
+
+4.1 src/pbl4/protocol/messages.py
+Phải giữ CẢ HAI:
+Node Agent:
+- HELLO managed fields:
+  attempt_id
+  allocation_id
+  node_id
+  worker_join_token
+- managed fields all-or-none.
+- join token không lộ trong repr/log.
+- admission error codes.
+
+DBS:
+- DatasetAssignment.cache_scope optional; default assigned_shard.
+- Work Unit mode dùng all_shards.
+- StepStart.work_units[].
+- GradientMeta.compute_ms.
+- duplicate Work Unit identity phải bị reject.
+
+Không bump DTP version chỉ vì các optional/additive fields này nếu canonical contract vẫn cho phép.
+Không thêm DTP/2.
+
+4.2 src/pbl4/runtime/parameter_server.py
+Phải giữ CẢ HAI:
+Node Agent:
+- verify managed admission TRƯỚC WorkerRegistry.register().
+- attempt/allocation/node/token scope validation.
+- allocation_id chỉ admit một lần.
+- duplicate heartbeat fix.
+- worker snapshot có allocation_id/node mapping.
+
+DBS:
+- GradientMeta.compute_ms -> Contribution.
+- Work Unit contribution bắt buộc timing hợp lệ.
+- StrictBSP/aggregation semantics không đổi.
+
+Bắt buộc fix race:
+duplicate-admission check + register + add admitted allocation ID
+phải nằm trong cùng một critical section ngắn.
+
+Không giữ lock trong HMAC/token verification.
+
+4.3 src/pbl4/runtime/process.py
+Phải giữ CẢ HAI:
+Node Agent:
+- worker_admission_secret.
+- require_worker_admission.
+- Runtime vẫn owner Attempt lifecycle.
+- allocation mapping trong snapshot.
+
+DBS:
+- Work Unit catalog.
+- BatchScheduler.
+- WorkloadScheduler.
+- cache_scope=all_shards.
+- StepStart(work_units[]).
+- production RESUME path.
+- eligible Work Unit filter sample_count == U.
+
+Không để merge conflict làm mất:
+- admission requirement;
+- workload contract;
+- checkpoint/resume;
+- Dataset Assignment.
+
+4.4 src/pbl4/worker/process.py
+Phải giữ CẢ HAI:
+Node Agent:
+- WorkerClient nhận attempt_id/allocation_id/node_id/join token từ process config/env.
+
+DBS:
+- all-shards provisioning.
+- DatasetCache.
+- multi-Work-Unit compute.
+- compute_ms đo compute-only.
+
+Managed identity chỉ ảnh hưởng admission.
+Nó KHÔNG được thay đổi Work Unit assignment hoặc gradient semantics.
+
+4.5 src/pbl4/worker/worker_client.py
+Phải giữ CẢ HAI:
+Node Agent:
+- managed HELLO.
+- admission rejection surface rõ lỗi.
+
+DBS:
+- send_gradient(... compute_ms=...).
+
+Không log join token.
+Không gửi workload policy xuống Worker.
+Worker chỉ cần work_units cụ thể.
+
+===============================================================================
+5. PHASE 2 — FIX TOÀN BỘ BLOCKER CỦA NODE AGENT
+===============================================================================
+
+NA-01 — Worker start timeout phải abort Attempt + cleanup
+Files trọng tâm:
+- management_backend/services/allocation_service.py
+- management_backend/app.py
+- management_backend/services/attempt_service.py
+- runtime gateway/node gateway liên quan
+
+Yêu cầu:
+- DISPATCHED quá timeout -> Allocation FAILED.
+- gom affected attempt_id.
+- nếu Attempt chưa terminal:
+  - gửi ABORT_ATTEMPT qua Runtime gateway đúng flow hiện có;
+  - STOP_WORKER best-effort các Allocation DISPATCHED/STARTED còn lại;
+  - desired_state = STOPPED cho Allocation được yêu cầu dừng.
+- Backend KHÔNG tự set Attempt terminal state.
+- Runtime vẫn owner lifecycle.
+- không shrink expected_workers.
+
+Test:
+- expected_workers=2;
+- A STARTED, B DISPATCHED timeout;
+- B FAILED;
+- ABORT_ATTEMPT đúng 1 lần;
+- STOP_WORKER cho A;
+- Backend không tự terminalize Attempt.
+
+NA-02 — Terminal Allocation không được "hồi sinh"
+Files:
+- allocation_repository.py
+- allocation_service.py
+- node_control_gateway.py
+
+State rules:
+REQUESTED -> DISPATCHED | FAILED
+DISPATCHED -> STARTED | FAILED
+STARTED -> ENDED | FAILED
+ENDED -> terminal
+FAILED -> terminal
+
+Ưu tiên:
+UPDATE ... WHERE allocation_id=? AND actual_state IN (...) RETURNING ...
+
+Late/duplicate event cho terminal Allocation:
+- warning;
+- ignore;
+- không crash WSS loop;
+- không thay state.
+
+Tests:
+FAILED + STARTED -> FAILED
+ENDED + FAILED -> ENDED
+FAILED + duplicate REJECTED -> FAILED
+STARTED -> ENDED hợp lệ
+
+NA-03 — Concurrent duplicate admission
+Trong ParameterServer:
+- parse/validate HELLO;
+- verify token ngoài lock;
+- acquire admission/membership lock;
+- check allocation_id not admitted;
+- WorkerRegistry.register();
+- add allocation_id;
+- release lock.
+
+Test 2 concurrent HELLO cùng allocation/token:
+- đúng 1 register;
+- đúng 1 reject;
+- registry count = 1;
+- admitted allocation count = 1.
+
+NA-04 — STOP_WORKER force semantics
+force=False:
+- terminate;
+- wait grace;
+- nếu còn sống: KHÔNG kill;
+- không STOPPED/ENDED giả;
+- trả rejected/failure theo semantics hiện có.
+
+force=True:
+- terminate;
+- wait grace;
+- còn sống -> kill;
+- chỉ STOPPED sau khi xác nhận process kết thúc.
+
+Áp dụng cả subprocess và psutil re-attach.
+
+Tests:
+- stubborn process + force=False -> kill never called, not STOPPED.
+- same + force=True -> kill called, then STOPPED after exit.
+- stop exception -> no fake ENDED.
+
+NA-05 — HEARTBEAT không được OFFLINE -> ONLINE
+- record_heartbeat chỉ update last_seen_at.
+- chỉ accepted AGENT_HELLO được đưa Node ONLINE.
+- WSS handler có hello_accepted boolean đơn giản.
+- trước accepted HELLO:
+  HEARTBEAT / RESOURCE_SNAPSHOT / COMMAND_ACK / WORKER_STATUS
+  -> ignore hoặc protocol close theo behavior hiện có.
+- REVOKED không online lại.
+
+Tests:
+OFFLINE + heartbeat -> OFFLINE
+RESOURCE_SNAPSHOT before HELLO -> not ONLINE
+valid AGENT_HELLO -> ONLINE
+REVOKED -> never ONLINE
+
+NA-06 — Giữ ParameterServer duplicate-heartbeat fix
+Không revert.
+
+Gate Phase 2:
+- Node Agent unit/integration targeted tests pass.
+- Không mở rộng sang retry daemon, elastic membership, IAM platform, generic command history.
+
+Commit gợi ý:
+fix(node-agent): close allocation and admission correctness gaps
+
+===============================================================================
+6. PHASE 3 — FIX TOÀN BỘ BLOCKER CỦA DBS / WORK UNIT
+===============================================================================
+
+DBS-01 — Loại short/tail physical batch khỏi eligible Work Unit catalog
+Runtime phải lấy U = resolved dataset.batch_size.
+
+Khi build global Work Unit catalog:
+include unit IFF entry.sample_count == U
+
+Sau filter:
+M = eligible unit count
+require M >= K
+steps_per_epoch = floor(M / K)
+M mod K -> drop_last
+
+Không:
+- repack artifact;
+- sửa Dataset Manager format;
+- pad tail;
+- đổi U động.
+
+Tests:
+- tail < U không vào catalog;
+- mỗi step đúng K units;
+- global sample count = U*K;
+- M < K fail trước RUNNING.
+
+DBS-02 — compute_ms fail-fast trong Work Unit mode
+Không default missing timing thành 0 rồi để model update/checkpoint xong mới fail.
+
+Work Unit contribution:
+- compute_ms present;
+- finite;
+- > 0;
+- reject trước accepted Contribution/aggregation.
+
+compute_ms chỉ gồm:
+- forward;
+- backward;
+- local multi-unit accumulation.
+
+Không gồm:
+- network;
+- barrier wait;
+- PS aggregate;
+- broadcast;
+- checkpoint.
+
+Legacy path nếu thật sự còn được support:
+- test riêng;
+- không làm yếu Work Unit invariant.
+
+Tests:
+missing / 0 / NaN / inf -> fail sớm
+valid -> accepted.
+
+DBS-03 — Production RESUME thật sự chạy qua RuntimeProcess
+Không chỉ test Coordinator trực tiếp.
+
+RESUME flow:
+START_ATTEMPT execution_mode=RESUME
+-> Backend/control plane resolve resume_from_checkpoint_id thành descriptor tin cậy:
+   resume_checkpoint = {
+     checkpoint_id,
+     source_attempt_id,
+     model_sha256,
+     metadata_sha256
+   }
+-> Runtime không query DB và không nhận arbitrary filesystem path
+-> Runtime validate checkpoint/source identity, derive location duy nhất dưới:
+   checkpoint_root/source_attempt_id/sha256(checkpoint_id)
+-> resolved path phải nằm dưới configured checkpoint_root
+-> load Checkpoint V1 qua existing CheckpointManager/serializer
+-> verify:
+   metadata_sha256 và model_sha256
+   contract_hash
+   dataset_build_id
+   dataset_manifest_hash
+   parameter/model manifest compatibility
+-> restore canonical model bytes
+-> restore model_version
+-> restore RecoveryCursor
+-> create BatchScheduler + WorkloadScheduler
+-> Coordinator(... restored cursor ...)
+-> apply reset_after_resume(cursor)
+-> continue.
+
+Warm-up:
+A. boundary resume, next_batch_ordinal == 0
+   current epoch Equal + collect stats
+   next epoch DBS
+
+B. mid-epoch resume, next_batch_ordinal > 0
+   remainder current epoch Equal, no stats
+   next full epoch Equal + collect stats
+   following epoch DBS
+
+Không:
+- Checkpoint V2;
+- persist DBS stats;
+- persist WorkloadPlan;
+- use partial epoch stats;
+- heuristic fallback.
+
+Cross-feature requirement:
+RESUME/RETRY tạo Attempt mới -> Allocation mới -> join token mới.
+Không reconnect DTP cùng Allocation cũ.
+
+Contract ownership/file targets:
+- src/pbl4/management_protocol/messages.py: additive resume_checkpoint descriptor;
+- src/pbl4/management_backend/repositories/checkpoint_repository.py: trusted lookup;
+- src/pbl4/management_backend/services/attempt_service.py: resolve before START_ATTEMPT;
+- src/pbl4/runtime/checkpoint.py: safe locator + checksum/compatibility verification;
+- src/pbl4/runtime/process.py: restore model/version/cursor before Coordinator construction.
+
+Negative tests bắt buộc:
+- unknown checkpoint_id;
+- invalid source_attempt_id/checkpoint_id và path escape;
+- corrupted metadata/model và checksum mismatch;
+- wrong contract, dataset build/hash, parameter manifest/model compatibility;
+- Runtime restart rồi RESUME thành công.
+
+DBS-04 — E2E claim phải đúng coverage
+Ưu tiên thêm smoke thật:
+RuntimeProcess
+-> ParameterServer socket
+-> WorkerProcess
+-> Dataset provisioning
+-> DatasetCache
+-> StepStart(work_units[])
+-> TrainingLoop
+-> GradientMeta(compute_ms)
+-> DTP/1
+-> Coordinator
+
+Synthetic dataset nhỏ, CPU, 3 worker/process.
+
+Nếu full socket test không khả thi trong test harness hiện tại:
+- rename component-level test;
+- sửa docs/claim;
+- không gọi "full 3-worker E2E";
+- nhưng final integration phase bên dưới vẫn phải có ít nhất 1 real full-flow smoke.
+
+DBS-05 — Canonical docs
+- sync DBS_DESIGN.md từ canonical.
+- rename DBS_IMPLEMENTATION_PLAN.md.md -> DBS_IMPLEMENTATION_PLAN.md.
+- không escape headings.
+- DBS_EXECUTION_BLUEPRINT nếu giữ:
+  NON-NORMATIVE EXECUTION RECORD
+  Cannot override DBS_DESIGN.md or DBS_IMPLEMENTATION_PLAN.md
+- không đánh DONE cho path chưa chạy production.
+
+DBS-06 — StepStart duplicate Work Unit identity
+Reject duplicate (shard_id, batch_id) trong work_units[].
+
+Gate Phase 3:
+- targeted DBS tests pass;
+- StrictBSP vẫn N/N;
+- weighted aggregation vẫn sample_count-weighted;
+- checkpoint schema vẫn V1;
+- no dbs_bsp;
+- no DTP/2.
+
+Commit gợi ý:
+fix(dbs): close work-unit correctness and resume gaps
+
+===============================================================================
+7. PHASE 4 — STANDALONE DATASET MANAGER INTEGRATION
+===============================================================================
+
+Mục tiêu:
+PBL4 là consumer của repo Dataset-Manager standalone.
+Không copy/reimplement Dataset Manager logic vào Runtime/Worker.
+
+Canonical Dataset Manager behavior:
+- immutable Dataset Build;
+- READY là eligibility gate;
+- physical batches + optional tail;
+- shard_id là storage identity, không phải worker_id;
+- Work Unit = physical full batch do Runtime diễn giải;
+- Dataset Manager không có Work Unit API;
+- Dataset Manager không tham gia synchronized step;
+- HF_TOKEN chỉ ở Dataset Manager, không ở Worker/PBL runtime.
+
+DM-01 — Chốt một source of truth
+Audit snapshot đã xác nhận PBL4 không có canonical src/pbl4/dataset_manager hoặc
+pbl4-dataset-manager entrypoint. Không tạo task remove embedded Dataset Manager.
+Giữ regression guard để package/entrypoint đó không quay lại.
+
+DM-02 — Control endpoint configuration
+DATASET_MANAGER_URL là canonical control endpoint hiện tại.
+DATASET_MANAGER_HOST/DATASET_MANAGER_PORT chỉ là legacy fallback có nhận diện rõ.
+
+Không invent config mới nếu không cần.
+Không đưa HF_TOKEN vào PBL4.
+
+Management Backend dùng control API của standalone Dataset Manager để:
+- create/status build;
+- verify/register READY;
+- lưu/pin metadata hiện có.
+
+DM-03 — Artifact origin phải generic
+Dataset Manager có thể trả:
+A. local Dataset Manager artifact origin
+B. Hugging Face resolve artifact origin
+
+PBL4 KHÔNG hard-code Hugging Face hostname.
+PBL4 KHÔNG giả định mọi artifact URL có dạng /artifacts/v1/...
+
+Cần propagate/use:
+- artifact_base_url
+- manifest_uri từ Dataset Manager status/resolve response
+- DatasetAssignment.root_manifest_path ĐÃ tồn tại; không thêm DTP field mới
+
+Runtime root manifest:
+- validate manifest_uri cùng origin và resolve an toàn dưới artifact_base_url;
+- derive root_manifest_path tương đối rồi truyền vào DatasetAssignment field hiện có;
+- chỉ fallback "manifest.json" cho local legacy response đã nhận diện rõ;
+- verify dataset_manifest_hash như hiện tại.
+
+Worker ShardDownloader:
+- honor root_manifest_path;
+- shard manifest URL = join artifact_base_url + root manifest relative_shard_manifest_path;
+- batch URL = join artifact_base_url + shard manifest relative_filename;
+- không tự dựng /shards/{id}/... nếu manifest đã cung cấp relative path.
+
+Bắt buộc URL join an toàn:
+- không double slash lỗi;
+- reject ../, encoded/equivalent traversal, khác scheme/host/port và mọi path escape;
+- relative paths phải remain under artifact origin contract.
+
+Ownership/file targets:
+- src/pbl4/management_backend/gateways/dataset_manager_gateway.py: parse canonical response;
+- src/pbl4/management_backend/services/dataset_build_service.py và persistence hiện có:
+  retain artifact origin descriptor;
+- src/pbl4/management_protocol/messages.py: carry authoritative origin descriptor in
+  START_ATTEMPT execution data, not in frozen training semantics;
+- src/pbl4/runtime/process.py: validate/derive root_manifest_path;
+- src/pbl4/protocol/messages.py: reuse DatasetAssignment.root_manifest_path unchanged;
+- src/pbl4/worker/shard_downloader.py/process.py: consume existing field.
+
+DM-04 — all_shards cho DBS
+Work Unit mode:
+DatasetAssignment.cache_scope = all_shards
+
+Worker:
+- tải/verify tất cả shard reference trong root manifest;
+- DatasetCache chỉ READY sau khi toàn bộ shard cần thiết đã verify;
+- sau N/N SHARD_READY, training chỉ dùng local verified cache.
+
+Không gọi Dataset Manager/HF trong training loop.
+
+DM-05 — Partial batch semantics
+Dataset Manager giữ tail artifact.
+Runtime loại tail khỏi adaptive eligible catalog.
+Không xóa tail trong Dataset Manager.
+Không "sửa" Dataset Manager thành drop_last ở build time.
+
+DM-06 — local + HF compatibility tests
+Bổ sung tests tối thiểu:
+1. local Dataset Manager origin:
+   root -> shard -> batch tải được.
+2. HF-style generic origin bằng fake HTTP server:
+   root_manifest_path != "manifest.json";
+   relative shard/batch paths;
+   Worker tải đúng mà không cần HF_TOKEN.
+3. corrupt hash -> provisioning fail closed.
+4. origin unavailable before SHARD_READY -> cannot RUNNING.
+5. origin unavailable after SHARD_READY -> current training vẫn chạy local cache.
+6. all_shards cache có Work Unit từ shard không trùng worker_id.
+
+Không cần gọi Hugging Face thật trong unit tests.
+
+Commit gợi ý:
+feat(dataset): integrate standalone artifact origin and all-shard provisioning
+
+===============================================================================
+8. PHASE 5 — CROSS-FEATURE SEMANTIC INTEGRATION
+===============================================================================
+
+Đây là phase quan trọng nhất. Không chỉ "tests pass"; phải chứng minh ba subsystem ghép đúng.
+
+Invariant I1 — Ownership
+Management Backend:
+- Job/Attempt orchestration;
+- Node/Allocation management;
+- Dataset build eligibility;
+- command/control/history.
+
+Node Agent:
+- Node liveness/resource;
+- spawn/stop Worker process.
+
+Runtime:
+- Attempt lifecycle owner;
+- WorkerSession;
+- worker_id/session_id;
+- fixed membership;
+- StrictBSP;
+- Work Unit assignment;
+- gradient aggregation;
+- canonical model;
+- checkpoint.
+
+Dataset Manager:
+- immutable dataset build/artifacts only.
+
+Invariant I2 — Training path
+Gradient/parameter chỉ:
+Worker <-> Runtime qua DTP/1
+
+Không:
+Worker -> Backend -> DB -> Runtime
+Không gradient qua REST/WSS/DB/Dataset Manager.
+
+Invariant I3 — Identity domains KHÔNG được nhập làm một
+node_id != allocation_id != worker_id != session_id != shard_id
+
+Không:
+worker_id = node_id
+worker_id = allocation_id
+shard_id = worker_id
+
+Runtime cấp worker_id sau admission.
+shard_id là physical storage identity.
+DBS có thể giao Worker bất kỳ Work Unit từ shard bất kỳ sau all_shards cache.
+
+Invariant I4 — Contract separation
+resolved training contract:
+- có workload policy/K theo canonical DBS contract.
+- KHÔNG chứa worker_join_token.
+- KHÔNG chứa allocation list làm training contract field.
+
+join token:
+- execution/admission credential;
+- ngắn hạn;
+- per Attempt + Allocation + Node.
+
+Invariant I5 — Fixed membership
+StrictBSP N/N không shrink.
+Worker launch failure/disconnect làm Attempt fail/abort theo failure policy.
+Không chạy tiếp N-1.
+
+Invariant I6 — Dataset lifecycle
+Dataset Build phải READY trước Attempt start hợp lệ.
+dataset_build_id + dataset_manifest_hash pinned.
+Không đổi build giữa RUNNING Attempt.
+RESUME phải verify cùng dataset identity.
+
+Invariant I7 — Checkpoint ordering
+N/N gradient
+-> aggregate/update
+-> N/N PARAMETER_APPLIED
+-> checkpoint success
+-> COMMITTED
+-> cursor advance
+-> record DBS stats
+
+Không record stats từ aborted/uncommitted step.
+
+Invariant I8 — Managed startup full sequence
+Backend creates/starts Attempt
+-> Scheduler selects exactly expected_workers ONLINE nodes
+-> AllocationService creates REQUESTED allocations
+-> Runtime receives START_ATTEMPT
+-> Backend sends START_WORKER
+-> Agent persists intent + spawns exactly one process/allocation
+-> Worker DTP HELLO with managed identity/token
+-> Runtime verifies token BEFORE register
+-> Runtime assigns worker_id/session_id
+-> Runtime sends DatasetAssignment(cache_scope=all_shards)
+-> Worker downloads/verifies dataset
+-> SHARD_READY N/N
+-> model sync/READY N/N
+-> freeze membership
+-> RUNNING
+-> Work Unit training.
+
+Invariant I9 — RESUME full sequence
+Old Attempt terminal
+-> new RESUME Attempt
+-> new Allocations
+-> new join tokens
+-> managed admission
+-> pinned same compatible Dataset Build
+-> load Checkpoint V1
+-> restore model/version/cursor
+-> dataset cache/provision
+-> canonical warm-up rule
+-> continue.
+
+===============================================================================
+9. PHASE 6 — DATABASE / MIGRATION / CONFIG GATE
+===============================================================================
+
+Node Agent PR thêm migration 0003_add_nodes_and_allocations.py.
+
+Kiểm tra:
+- một Alembic head duy nhất.
+- migration chain từ current dev -> head.
+- upgrade trên disposable PostgreSQL test DB/schema.
+- downgrade chỉ test nếu project policy yêu cầu.
+- repositories dùng conditional transition cho Allocation.
+- migration không auto-run khi app startup.
+
+Shared PostgreSQL:
+- không chạy destructive test trên DB CLB thật.
+- integration test dùng disposable DB/schema.
+- sau khi pass mới smoke với DATABASE_URL deployment thật.
+
+Config audit:
+Backend:
+- DATABASE_URL
+- runtime management endpoint
+- DTP advertised host/port
+- Dataset Manager host/port
+- admission secret/config theo PR9
+
+Node Agent:
+- backend WSS/HTTP address
+- node identity data dir
+- worker executable/env
+- runtime advertised DTP endpoint nhận từ Backend command
+
+Worker:
+- managed env:
+  attempt_id
+  allocation_id
+  node_id
+  worker_join_token
+- không có HF_TOKEN.
+
+Runtime:
+- DTP advertised/listen separation nếu hiện có.
+- worker admission secret.
+- checkpoint path.
+- không phụ thuộc Dataset Manager control endpoint trong synchronized step.
+
+Không hard-code 127.0.0.1 cho Worker WAN launch.
+
+===============================================================================
+10. PHASE 7 — TEST STRATEGY TỐI ƯU TOKEN/THỜI GIAN
+===============================================================================
+
+Không chạy full suite sau từng chỉnh sửa.
+
+Layer A — cực nhanh sau mỗi fix
+Chạy đúng test file bị ảnh hưởng.
+
+Node Agent:
+- tests/unit/test_allocation_service.py
+- tests/unit/test_node_services.py
+- tests/unit/test_runtime_managed_admission.py
+- tests/unit/test_node_agent_supervisor.py
+- tests/unit/test_node_agent_client.py
+- tests/unit/test_attempt_orchestration.py
+
+DBS:
+- tests/unit/test_workload_policy.py
+- tests/unit/test_workload_scheduler.py
+- tests/unit/test_batch_scheduler.py
+- tests/unit/test_dataset_cache.py
+- tests/unit/test_dtp_messages.py
+- tests/unit/test_parameter_server_contribution.py
+- tests/unit/test_strict_bsp_work_units.py
+- tests/unit/test_training_loop_multi_unit.py
+- tests/unit/test_worker_compute_timing.py
+- tests/unit/test_worker_dataset_provisioning.py
+
+Layer B — integration theo subsystem
+Node:
+- tests/integration/test_agent_backend_integration.py
+- tests/integration/test_attempt_orchestration_integration.py
+- tests/integration/test_node_agent_fault_injection.py
+- tests/integration/test_node_api_and_gateway.py
+- tests/integration/test_node_persistence.py
+
+DBS:
+- tests/integration/test_runtime_dbs_coordination.py
+- tests/integration/test_dbs_checkpoint_resume.py
+- tests/integration/test_dbs_failure_semantics.py
+- heterogeneous cluster test với claim đúng coverage.
+
+Dataset integration:
+- thêm/điều chỉnh test external artifact origin.
+- local origin.
+- HF-style fake origin.
+- hash/cold-cache failure.
+- all-shards provisioning.
+
+Layer C — cross-feature smoke
+Chỉ sau A+B pass:
+- Backend + Runtime + fake/local Dataset Manager + 3 Agents/Workers local processes.
+- ít steps/epochs.
+- CPU only.
+
+Layer D — final regression
+pytest tests/ -q
+python scripts/check_architecture.py
+ruff check src/ tests/
+
+Nếu repo còn dùng:
+python scripts/verify_scaffold.py
+
+Không tiếp tục chạy command ngẫu nhiên sau khi các gate này đã pass.
+
+===============================================================================
+11. PHASE 8 — FULL FLOW E2E BẮT BUỘC
+===============================================================================
+
+E2E-1 — Happy path managed + DBS
+Topology:
+- PostgreSQL test instance/schema
+- standalone Dataset Manager
+- Management Backend
+- Runtime
+- 3 Node Agent instances
+- 3 Worker processes do Agent spawn
+
+Setup:
+- Dataset Build READY
+- full-size Work Units đủ M >= K
+- expected_workers=3
+- training_strategy=strict_bsp
+- workload policy=dbs
+- K > N
+- tiny CPU model/dataset
+
+Assert:
+1. 3 Nodes ONLINE sau AGENT_HELLO.
+2. 3 Allocations:
+   REQUESTED -> DISPATCHED -> STARTED.
+3. Runtime accepts exactly 3 managed Worker HELLO.
+4. 3 unique worker_id/session_id.
+5. all_shards provisioning hoàn tất.
+6. SHARD_READY 3/3 trước RUNNING.
+7. Epoch đầu Equal.
+8. Mỗi synchronized step:
+   - đúng K Work Units toàn cục;
+   - eligible unit sample_count == U;
+   - mỗi Worker đúng 1 contribution;
+   - StrictBSP N/N;
+   - global samples = U*K;
+   - compute_ms finite > 0;
+   - weighted aggregation;
+   - PARAMETER_APPLIED N/N;
+   - checkpoint;
+   - COMMITTED.
+9. Epoch sau DBS thay đổi units_per_worker khi synthetic speed khác nhau.
+10. Model update thành công.
+11. Attempt COMPLETE/terminal đúng owner.
+12. Không có dataset HTTP request trong RUNNING training loop sau provisioning.
+
+E2E-2 — Worker launch timeout
+- 2/3 hoặc 1/3 worker start;
+- worker còn lại DISPATCHED timeout.
+Assert:
+- timed-out Allocation FAILED;
+- Runtime ABORT_ATTEMPT exactly once;
+- other active allocations STOP requested;
+- Attempt không bị Backend tự terminalize.
+
+E2E-3 — Duplicate admission race
+- 2 concurrent DTP HELLO cùng allocation/token.
+Assert:
+- exactly 1 Worker registered.
+
+E2E-4 — Runtime Worker disconnect
+- kill một Worker khi RUNNING.
+Assert:
+- fixed membership breaks;
+- Attempt fails/aborts;
+- không shrink membership;
+- surviving Workers stop/cleanup theo existing failure flow.
+
+E2E-5 — Checkpoint + RESUME
+- chạy vài committed steps;
+- abort/fail;
+- create new RESUME Attempt;
+- new Allocations + new join tokens;
+- restore Checkpoint V1;
+- verify same dataset_build/hash;
+- verify model_version/cursor;
+- verify boundary/mid-epoch warm-up rule;
+- continue.
+
+E2E-6 — Dataset origin
+A. local Dataset Manager origin.
+B. HF-style fake public origin.
+Assert cùng một Worker provisioning abstraction hoạt động cho cả hai.
+
+===============================================================================
+12. PHASE 9 — WAN/HF SMOKE CUỐI (KHÔNG PHẢI FULL BENCHMARK)
+===============================================================================
+
+Chỉ sau local E2E pass.
+
+Dùng Dataset Manager deployment thật + public HF dataset artifact repo nếu sẵn sàng.
+
+Kiểm tra:
+- Dataset Manager publish build.
+- Backend chỉ cho build READY được dùng.
+- Worker ở máy khác tải root/shard/batch qua artifact origin được publish.
+- Worker KHÔNG có HF_TOKEN.
+- checksum đúng.
+- all-shards cache xong mới SHARD_READY.
+- sau SHARD_READY, tạm làm Dataset Manager unavailable:
+  current training vẫn tiếp tục từ local cache.
+
+Không benchmark throughput WAN lớn.
+Mục tiêu là chứng minh contract và deployment path.
+
+===============================================================================
+13. FINAL RELEASE GATE
+===============================================================================
+
+Chỉ coi integration hoàn thành khi TẤT CẢ đúng:
+
+MERGE/ARCHITECTURE
+[ ] PR8 + PR9 đều hiện diện trong integration branch.
+[ ] Không mất logic của 5 overlap files.
+[ ] check_architecture PASS.
+[ ] Không thêm dbs_bsp/DTP2/CheckpointV2.
+[ ] DTP/1 vẫn là only training data path.
+
+NODE AGENT
+[ ] Start timeout -> FAILED + ABORT + STOP others.
+[ ] Terminal Allocation không hồi sinh.
+[ ] Concurrent duplicate admission chỉ register 1.
+[ ] force=False không kill.
+[ ] heartbeat không OFFLINE -> ONLINE.
+[ ] REVOKED terminal.
+[ ] Runtime owner Attempt lifecycle.
+
+DBS
+[ ] eligible Work Unit sample_count == U.
+[ ] mỗi step đúng K units.
+[ ] global samples = U*K.
+[ ] equal K>=N; dbs K>N.
+[ ] StrictBSP N/N unchanged.
+[ ] compute_ms Work Unit mode >0 finite.
+[ ] stats only after COMMITTED.
+[ ] checkpoint-before-cursor-advance.
+[ ] production RESUME thật sự chạy.
+[ ] Checkpoint V1 giữ nguyên.
+[ ] duplicate Work Unit trên wire bị reject.
+
+DATASET MANAGER
+[ ] Standalone Dataset-Manager là source of truth.
+[ ] PBL4 không reimplement build pipeline.
+[ ] READY gate trước Attempt.
+[ ] local artifact origin pass.
+[ ] HF-style artifact origin pass.
+[ ] root_manifest_path/relative paths được honor.
+[ ] Worker không cần HF_TOKEN.
+[ ] all_shards provision + verify trước SHARD_READY.
+[ ] Dataset Manager không nằm trong synchronized step.
+[ ] partial tail artifact được giữ nhưng không vào adaptive catalog.
+
+QUALITY
+[ ] targeted tests pass.
+[ ] subsystem integration tests pass.
+[ ] full pytest pass.
+[ ] ruff pass.
+[ ] architecture pass.
+[ ] full-flow local E2E pass.
+[ ] WAN/HF smoke pass hoặc report chính xác external blocker nếu hạ tầng không sẵn.
+[ ] docs claim đúng coverage, không phóng đại.
+
+===============================================================================
+14. COMMIT STRATEGY
+===============================================================================
+
+Không tạo một commit khổng lồ.
+
+Gợi ý:
+1. chore(integration): merge node-agent feature
+2. chore(integration): merge dbs workload feature
+3. fix(node-agent): close lifecycle and admission correctness gaps
+4. fix(dbs): enforce work-unit invariants and production resume
+5. feat(dataset): integrate standalone artifact origins
+6. test(integration): cover managed dbs end-to-end flow
+7. docs(integration): sync canonical docs and verification evidence
+
+Mỗi commit:
+- focused;
+- tests liên quan pass;
+- không trộn refactor cosmetic.
+
+===============================================================================
+15. FINAL REPORT AGENT PHẢI TRẢ
+===============================================================================
+
+Tạo:
+docs/INTEGRATION_VERIFICATION_REPORT.md
+
+Báo cáo ngắn, bằng chứng được, gồm:
+
+A. Snapshot
+- BASE_DEV_SHA
+- PR8_HEAD_SHA
+- PR9_HEAD_SHA
+- DATASET_MANAGER_MAIN_SHA
+- integration final SHA
+
+B. Merge
+- conflict files
+- conflict semantics
+- resolution ngắn gọn
+
+C. Review issue closure table
+Columns:
+ID | Status | Files | Test evidence | Notes
+
+Bao gồm NA-01..NA-06 và DBS-01..DBS-06.
+
+D. Dataset integration
+- control endpoint
+- artifact origin handling
+- local vs HF-style test
+- all_shards behavior
+- legacy in-repo Dataset Manager status
+
+E. Test evidence
+Không chỉ ghi "all pass".
+Ghi command + pass/fail/skip count + test names quan trọng.
+
+F. E2E evidence
+Ghi sequence và các invariant đã quan sát.
+Không gọi component test là full E2E.
+
+G. Remaining blockers
+Chỉ liệt kê blocker còn thật sự tồn tại.
+Phân biệt:
+- code blocker;
+- environment/deployment blocker;
+- optional follow-up.
+
+Nếu mọi code gate pass nhưng WAN thật không chạy do external credential/network:
+- code integration vẫn có thể được đánh "CODE COMPLETE";
+- WAN/HF thật phải ghi "ENVIRONMENT VERIFICATION PENDING";
+- không giả vờ PASS.
+
+===============================================================================
+16. NHỮNG THỨ TUYỆT ĐỐI KHÔNG LÀM TRONG INTEGRATION NÀY
+===============================================================================
+
+- Không đổi StrictBSP thành elastic/asynchronous.
+- Không shrink N khi Worker fail.
+- Không tạo dbs_bsp.
+- Không tạo DTP/2.
+- Không tạo Checkpoint V2.
+- Không tạo DB table riêng cho DBS.
+- Không persist WorkloadPlan/DBS stats vào checkpoint chỉ để tiện.
+- Không redesign Dataset Manager thành Work Unit service.
+- Không tạo Dataset Manager repartition API mỗi epoch.
+- Không để Backend/DB/Dataset Manager vào gradient critical path.
+- Không đưa join token vào resolved training contract.
+- Không tự restart DTP Worker trong cùng Allocation để lấp slot.
+- Không tạo generic retry daemon.
+- Không tạo IAM platform.
+- Không thêm Kafka/Redis/RabbitMQ/gRPC/Kubernetes.
+- Không refactor package lớn ngoài nhu cầu fix integration.
+- Không benchmark production-scale.
+- Không sửa algorithm DBS sang heuristic tự chế.

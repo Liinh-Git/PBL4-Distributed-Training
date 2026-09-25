@@ -5,7 +5,6 @@ Reference: NODE_AGENT_IMPLEMENTATION_PLAN.md Section 8.1
 
 from __future__ import annotations
 
-import json
 import unittest
 
 from pbl4.agent_protocol.messages import (
@@ -190,7 +189,9 @@ class TestAgentProtocolMessages(unittest.TestCase):
                 command_id="cmd-1",
                 allocation_id="alloc-1",
                 status=status,
-                error_code="ALLOCATION_ALREADY_ACTIVE" if status == COMMAND_STATUS_REJECTED else None,
+                error_code="ALLOCATION_ALREADY_ACTIVE"
+                if status == COMMAND_STATUS_REJECTED
+                else None,
                 error_message="Already running" if status == COMMAND_STATUS_REJECTED else None,
             )
             env = AgentEnvelope(
@@ -204,7 +205,11 @@ class TestAgentProtocolMessages(unittest.TestCase):
             self.assertEqual(parsed.payload.status, status)
 
     def test_worker_status_roundtrip(self) -> None:
-        for state in [WORKER_ACTUAL_STATE_STARTED, WORKER_ACTUAL_STATE_ENDED, WORKER_ACTUAL_STATE_FAILED]:
+        for state in [
+            WORKER_ACTUAL_STATE_STARTED,
+            WORKER_ACTUAL_STATE_ENDED,
+            WORKER_ACTUAL_STATE_FAILED,
+        ]:
             payload = WorkerStatusPayload(
                 allocation_id="alloc-1",
                 attempt_id="attempt-1",
@@ -253,13 +258,15 @@ class TestAgentProtocolMessages(unittest.TestCase):
     def test_invalid_active_allocation_state_rejected(self) -> None:
         # STOPPED and FAILED states are not allowed in AGENT_HELLO active_allocations
         for forbidden_state in ["STOPPED", "FAILED", "ENDED", "UNKNOWN"]:
-            with self.subTest(forbidden_state=forbidden_state):
-                with self.assertRaises(AgentMessageError):
-                    ActiveAllocationItem(
-                        allocation_id="a1",
-                        attempt_id="att1",
-                        local_state=forbidden_state,
-                    )
+            with (
+                self.subTest(forbidden_state=forbidden_state),
+                self.assertRaises(AgentMessageError),
+            ):
+                ActiveAllocationItem(
+                    allocation_id="a1",
+                    attempt_id="att1",
+                    local_state=forbidden_state,
+                )
 
     def test_token_redaction_in_repr_and_logging_path(self) -> None:
         sensitive_token = "super-secret-worker-join-token-999"

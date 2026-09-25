@@ -117,10 +117,7 @@ class WorkloadScheduler:
                 f"for workers {sorted(missing_times)}"
             )
 
-        stats = [
-            WorkerEpochStats(w, samples[w], times[w])
-            for w in self._worker_ids
-        ]
+        stats = [WorkerEpochStats(w, samples[w], times[w]) for w in self._worker_ids]
         return DbsWorkloadPolicy.plan(epoch, self._worker_ids, self._k, stats)
 
     def record_committed(

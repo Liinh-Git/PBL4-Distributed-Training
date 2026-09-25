@@ -33,7 +33,6 @@ from pbl4.management_backend.services import idempotency, job_service
 from pbl4.management_backend.services.allocation_service import AllocationService
 from pbl4.management_backend.services.cluster_scheduler import (
     ClusterScheduler,
-    NodeCapacityUnavailableError,
 )
 from pbl4.management_backend.services.dataset_service import (
     InvalidCursorError as InvalidCursorError,
@@ -243,10 +242,13 @@ def _select_and_create_allocations(
         or expected_workers <= 0
     ):
         raise ValueError(
-            f"Invalid or missing expected_workers in resolved_contract['synchronization']: {expected_workers!r}"
+            "Invalid or missing expected_workers in "
+            f"resolved_contract['synchronization']: {expected_workers!r}"
         )
 
-    online_nodes = node_repository.list_nodes(conn, state=node_repository.NODE_STATE_ONLINE, limit=1000)
+    online_nodes = node_repository.list_nodes(
+        conn, state=node_repository.NODE_STATE_ONLINE, limit=1000
+    )
     active_allocs = allocation_repository.list_active(conn)
     placements = ClusterScheduler.select_placements(
         expected_workers=expected_workers,
@@ -319,7 +321,9 @@ def start_job(conn: psycopg.Connection, job_id: str, note: str | None = None) ->
                 execution_mode="FRESH",
                 created_at=now,
             )
-            _select_and_create_allocations(conn, attempt_id=attempt_id, resolved_contract=res, now=now)
+            _select_and_create_allocations(
+                conn, attempt_id=attempt_id, resolved_contract=res, now=now
+            )
             cmd_row = command_repository.create_command(
                 conn,
                 command_id=command_id,
@@ -381,7 +385,9 @@ def retry_job(conn: psycopg.Connection, job_id: str) -> tuple[dict, dict]:
                 execution_mode="RETRY_FROM_START",
                 created_at=now,
             )
-            _select_and_create_allocations(conn, attempt_id=attempt_id, resolved_contract=res, now=now)
+            _select_and_create_allocations(
+                conn, attempt_id=attempt_id, resolved_contract=res, now=now
+            )
             cmd_row = command_repository.create_command(
                 conn,
                 command_id=command_id,
@@ -422,6 +428,18 @@ def resume_job(conn: psycopg.Connection, job_id: str, checkpoint_id: str) -> tup
             f"Checkpoint contract_hash '{ckpt['contract_hash']}' "
             f"does not match job contract_hash '{job['contract_hash']}'."
         )
+    descriptor_fields = (
+        "created_by_attempt_id",
+        "model_sha256",
+        "metadata_sha256",
+    )
+    if any(
+        not isinstance(ckpt.get(field), str) or not ckpt.get(field) for field in descriptor_fields
+    ):
+        raise CheckpointNotCompleteError(
+            f"Checkpoint '{checkpoint_id}' lacks its durable integrity descriptor.",
+            current_state=ckpt["state"],
+        )
 
     res = job.get("resolved_contract")
     if isinstance(res, str):
@@ -455,6 +473,12 @@ def resume_job(conn: psycopg.Connection, job_id: str, checkpoint_id: str) -> tup
         "resolved_contract": res,
         "contract_hash": job["contract_hash"],
         "resume_from_checkpoint_id": checkpoint_id,
+        "resume_checkpoint": {
+            "checkpoint_id": checkpoint_id,
+            "source_attempt_id": ckpt["created_by_attempt_id"],
+            "model_sha256": ckpt["model_sha256"],
+            "metadata_sha256": ckpt["metadata_sha256"],
+        },
         "requested_at": now.isoformat(),
     }
 
@@ -469,7 +493,9 @@ def resume_job(conn: psycopg.Connection, job_id: str, checkpoint_id: str) -> tup
                 resume_from_checkpoint_id=checkpoint_id,
                 created_at=now,
             )
-            _select_and_create_allocations(conn, attempt_id=attempt_id, resolved_contract=res, now=now)
+            _select_and_create_allocations(
+                conn, attempt_id=attempt_id, resolved_contract=res, now=now
+            )
             cmd_row = command_repository.create_command(
                 conn,
                 command_id=command_id,
@@ -860,7 +886,9 @@ def _dispatch_workers_for_attempt(
                     conn,
                     alloc_id,
                     failure_code="NODE_DISPATCH_FAILED",
-                    failure_message="Cancelled due to prior allocation dispatch failure in attempt.",
+                    failure_message=(
+                        "Cancelled due to a prior allocation dispatch failure in attempt."
+                    ),
                 )
             failed.append(updated)
             continue
@@ -895,7 +923,8 @@ def _dispatch_workers_for_attempt(
 
     if failed:
         logger.warning(
-            "Partial failure dispatching workers for attempt %s (%d succeeded, %d failed). Aborting attempt.",
+            "Partial failure dispatching workers for attempt %s "
+            "(%d succeeded, %d failed). Aborting attempt.",
             attempt_id,
             len(dispatched),
             len(failed),
@@ -915,7 +944,9 @@ def _dispatch_workers_for_attempt(
                         allocation_repository.DESIRED_STATE_STOPPED,
                     )
             except Exception as exc:
-                logger.warning("Failed best-effort STOP_WORKER to node %s: %s", d_alloc.get("node_id"), exc)
+                logger.warning(
+                    "Failed best-effort STOP_WORKER to node %s: %s", d_alloc.get("node_id"), exc
+                )
 
         # Send ABORT_ATTEMPT to Runtime
         try:
@@ -933,10 +964,13 @@ def _dispatch_workers_for_attempt(
                 timeout=5.0,
             )
         except Exception as exc:
-            logger.error("Failed to send ABORT_ATTEMPT to Runtime for attempt %s: %s", attempt_id, exc)
+            logger.error(
+                "Failed to send ABORT_ATTEMPT to Runtime for attempt %s: %s", attempt_id, exc
+            )
 
         raise CommandFailedError(
-            f"Failed to dispatch workers for attempt '{attempt_id}': {len(failed)} worker(s) failed.",
+            f"Failed to dispatch workers for attempt '{attempt_id}': "
+            f"{len(failed)} worker(s) failed.",
             command_id=str(attempt_row.get("command_id") or attempt_id),
             code="WORKER_SPAWN_FAILED",
         )
@@ -1047,7 +1081,9 @@ def execute_start_job(
     with db_module.transaction() as conn:
         job = job_repository.get_job(conn, job_id)
 
-    job_row = job if job is not None else {"resolved_contract": dispatch_payload.get("resolved_contract")}
+    job_row = (
+        job if job is not None else {"resolved_contract": dispatch_payload.get("resolved_contract")}
+    )
     try:
         _dispatch_workers_for_attempt(
             db_module,
@@ -1203,7 +1239,9 @@ def execute_retry_job(
     with db_module.transaction() as conn:
         job = job_repository.get_job(conn, job_id)
 
-    job_row = job if job is not None else {"resolved_contract": dispatch_payload.get("resolved_contract")}
+    job_row = (
+        job if job is not None else {"resolved_contract": dispatch_payload.get("resolved_contract")}
+    )
     try:
         _dispatch_workers_for_attempt(
             db_module,
@@ -1360,7 +1398,9 @@ def execute_resume_job(
     with db_module.transaction() as conn:
         job = job_repository.get_job(conn, job_id)
 
-    job_row = job if job is not None else {"resolved_contract": dispatch_payload.get("resolved_contract")}
+    job_row = (
+        job if job is not None else {"resolved_contract": dispatch_payload.get("resolved_contract")}
+    )
     try:
         _dispatch_workers_for_attempt(
             db_module,

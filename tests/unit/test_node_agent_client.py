@@ -6,11 +6,8 @@ Reference: NODE_AGENT_IMPLEMENTATION_PLAN.md Section 8.1 & User Request Phase 7.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
-import json
 from pathlib import Path
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -18,22 +15,15 @@ from pbl4 import PACKAGE_VERSION
 from pbl4.agent_protocol.messages import (
     COMMAND_STATUS_ACCEPTED,
     COMMAND_STATUS_REJECTED,
-    COMMAND_TYPE_START_WORKER,
-    COMMAND_TYPE_STOP_WORKER,
     ERROR_CODE_ALLOCATION_ALREADY_ACTIVE,
-    ERROR_CODE_ALLOCATION_NOT_FOUND,
     MESSAGE_TYPE_AGENT_HELLO,
     MESSAGE_TYPE_COMMAND,
     MESSAGE_TYPE_COMMAND_ACK,
-    MESSAGE_TYPE_HEARTBEAT,
-    MESSAGE_TYPE_HELLO_ACK,
-    MESSAGE_TYPE_RESOURCE_SNAPSHOT,
     MESSAGE_TYPE_WORKER_STATUS,
     WORKER_ACTUAL_STATE_ENDED,
     WORKER_ACTUAL_STATE_FAILED,
     WORKER_ACTUAL_STATE_STARTED,
     AgentEnvelope,
-    HelloAckPayload,
     StartWorkerPayload,
     StopWorkerPayload,
     parse_agent_envelope,
@@ -112,11 +102,16 @@ def test_agent_hello_advertises_only_active_allocations(
     mock_supervisor: MagicMock,
 ) -> None:
     """Verify AGENT_HELLO includes STARTING and RUNNING allocations, omitting STOPPED and FAILED."""
+
     async def _run() -> None:
         r_starting = LocalAllocationRecord("alloc-1", "att-1", LOCAL_STATE_STARTING, 100.0, pid=101)
         r_running = LocalAllocationRecord("alloc-2", "att-1", LOCAL_STATE_RUNNING, 101.0, pid=102)
-        r_stopped = LocalAllocationRecord("alloc-3", "att-1", LOCAL_STATE_STOPPED, 102.0, pid=103, exit_code=0)
-        r_failed = LocalAllocationRecord("alloc-4", "att-1", LOCAL_STATE_FAILED, 103.0, pid=104, exit_code=1)
+        r_stopped = LocalAllocationRecord(
+            "alloc-3", "att-1", LOCAL_STATE_STOPPED, 102.0, pid=103, exit_code=0
+        )
+        r_failed = LocalAllocationRecord(
+            "alloc-4", "att-1", LOCAL_STATE_FAILED, 103.0, pid=104, exit_code=1
+        )
 
         mock_supervisor.list_records.return_value = [r_starting, r_running, r_stopped, r_failed]
 
@@ -145,7 +140,8 @@ def test_handle_start_worker_success(
     agent_client: NodeAgentClient,
     mock_supervisor: MagicMock,
 ) -> None:
-    """Verify START_WORKER spawns process, sends COMMAND_ACK ACCEPTED, then WORKER_STATUS STARTED."""
+    """START_WORKER spawns, acknowledges, and reports STARTED."""
+
     async def _run() -> None:
         mock_supervisor.get_record.return_value = None  # New allocation
         mock_supervisor.spawn_worker.return_value = (COMMAND_STATUS_ACCEPTED, None)
@@ -195,9 +191,12 @@ def test_handle_duplicate_start_worker_noop(
     agent_client: NodeAgentClient,
     mock_supervisor: MagicMock,
 ) -> None:
-    """Verify duplicate START_WORKER on active allocation returns ACCEPTED without duplicate WORKER_STATUS."""
+    """Duplicate active START_WORKER is an accepted no-op."""
+
     async def _run() -> None:
-        existing_rec = LocalAllocationRecord("alloc-dup", "att-1", LOCAL_STATE_RUNNING, 100.0, pid=555)
+        existing_rec = LocalAllocationRecord(
+            "alloc-dup", "att-1", LOCAL_STATE_RUNNING, 100.0, pid=555
+        )
         mock_supervisor.get_record.return_value = existing_rec
         mock_supervisor.spawn_worker.return_value = (COMMAND_STATUS_ACCEPTED, None)
 
@@ -237,8 +236,11 @@ def test_handle_start_worker_terminal_rejected(
     mock_supervisor: MagicMock,
 ) -> None:
     """Verify START_WORKER on terminal allocation returns REJECTED."""
+
     async def _run() -> None:
-        existing_rec = LocalAllocationRecord("alloc-dead", "att-1", LOCAL_STATE_STOPPED, 100.0, exit_code=0)
+        existing_rec = LocalAllocationRecord(
+            "alloc-dead", "att-1", LOCAL_STATE_STOPPED, 100.0, exit_code=0
+        )
         mock_supervisor.get_record.return_value = existing_rec
         mock_supervisor.spawn_worker.return_value = (
             COMMAND_STATUS_REJECTED,
@@ -280,10 +282,15 @@ def test_handle_stop_worker_success(
     agent_client: NodeAgentClient,
     mock_supervisor: MagicMock,
 ) -> None:
-    """Verify STOP_WORKER stops worker, replies with COMMAND_ACK ACCEPTED, then WORKER_STATUS ENDED."""
+    """STOP_WORKER stops, acknowledges, and reports ENDED."""
+
     async def _run() -> None:
-        rec_before = LocalAllocationRecord("alloc-stop", "att-1", LOCAL_STATE_RUNNING, 100.0, pid=666)
-        rec_after = LocalAllocationRecord("alloc-stop", "att-1", LOCAL_STATE_STOPPED, 100.0, exit_code=0)
+        rec_before = LocalAllocationRecord(
+            "alloc-stop", "att-1", LOCAL_STATE_RUNNING, 100.0, pid=666
+        )
+        rec_after = LocalAllocationRecord(
+            "alloc-stop", "att-1", LOCAL_STATE_STOPPED, 100.0, exit_code=0
+        )
 
         # get_record returns rec_before on first call, rec_after on second call
         mock_supervisor.get_record.side_effect = [rec_before, rec_after]
@@ -331,8 +338,11 @@ def test_unexpected_worker_crash_reported_failed(
     mock_supervisor: MagicMock,
 ) -> None:
     """Verify supervisor.poll detecting FAILED process sends WORKER_STATUS FAILED."""
+
     async def _run() -> None:
-        r_crashed = LocalAllocationRecord("alloc-crash", "att-9", LOCAL_STATE_FAILED, 100.0, exit_code=137)
+        r_crashed = LocalAllocationRecord(
+            "alloc-crash", "att-9", LOCAL_STATE_FAILED, 100.0, exit_code=137
+        )
         mock_supervisor.poll.return_value = [r_crashed]
 
         sent_frames: list[str] = []
@@ -342,9 +352,13 @@ def test_unexpected_worker_crash_reported_failed(
         # Run one pass of monitor logic
         records = mock_supervisor.poll()
         for r in records:
-            if r.local_state == LOCAL_STATE_FAILED and r.allocation_id not in agent_client._reported_failures:
+            if (
+                r.local_state == LOCAL_STATE_FAILED
+                and r.allocation_id not in agent_client._reported_failures
+            ):
                 agent_client._reported_failures.add(r.allocation_id)
                 from pbl4.agent_protocol.messages import WorkerStatusPayload
+
                 payload = WorkerStatusPayload(
                     allocation_id=r.allocation_id,
                     attempt_id=r.attempt_id,
@@ -370,7 +384,10 @@ def test_unexpected_worker_crash_reported_failed(
         # Second pass: already reported, must NOT resend
         sent_frames.clear()
         for r in records:
-            if r.local_state == LOCAL_STATE_FAILED and r.allocation_id not in agent_client._reported_failures:
+            if (
+                r.local_state == LOCAL_STATE_FAILED
+                and r.allocation_id not in agent_client._reported_failures
+            ):
                 agent_client._reported_failures.add(r.allocation_id)
                 await agent_client._send_envelope(mock_ws, env)
         assert len(sent_frames) == 0

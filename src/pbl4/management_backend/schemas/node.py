@@ -16,8 +16,8 @@ Invariants:
 
 from __future__ import annotations
 
-from datetime import datetime
 import json
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -104,7 +104,9 @@ class EnrollmentCodeCreateRequest(StrictWriteModel):
 class EnrollmentCodeCreateResponse(BaseModel):
     """Response returned when an enrollment code is successfully generated."""
 
-    enrollment_code: str = Field(description="Plaintext one-time code to be distributed to node operator.")
+    enrollment_code: str = Field(
+        description="Plaintext one-time code to be distributed to node operator."
+    )
     code_hash: str = Field(description="SHA-256 digest persisted in backend.")
     created_at: datetime
     expires_at: datetime
@@ -113,8 +115,12 @@ class EnrollmentCodeCreateResponse(BaseModel):
 class NodeEnrollRequest(StrictWriteModel):
     """Payload sent by Node Agent or operator to enroll a new node."""
 
-    enrollment_code: str = Field(min_length=1, description="One-time enrollment code issued by backend.")
-    display_name: str | None = Field(default=None, max_length=128, description="Optional human-readable label.")
+    enrollment_code: str = Field(
+        min_length=1, description="One-time enrollment code issued by backend."
+    )
+    display_name: str | None = Field(
+        default=None, max_length=128, description="Optional human-readable label."
+    )
     capabilities: dict[str, Any] = Field(
         default_factory=dict,
         description="Static node hardware capabilities (CPU, RAM, GPUs).",
@@ -127,5 +133,7 @@ class NodeEnrollResponse(BaseModel):
     """Response returned upon successful enrollment. Contains node_secret exactly once."""
 
     node_id: str
-    node_secret: str = Field(description="Secret token for outbound WSS control authentication. Shown only once.")
+    node_secret: str = Field(
+        description="Secret token for outbound WSS control authentication. Shown only once."
+    )
     node: NodeItem

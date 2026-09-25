@@ -163,6 +163,83 @@ def test_restore_requires_new_attempt_and_same_pinned_contract(tmp_path):
         )
 
 
+def test_descriptor_load_survives_manager_restart_and_rejects_bad_identity(tmp_path):
+    manager = CheckpointManager.for_attempt(tmp_path, "attempt", TestOnlySerializer())
+    complete = manager.write(snapshot("checkpoint-1"))
+
+    restarted = CheckpointManager.for_attempt(tmp_path, "attempt", TestOnlySerializer())
+    loaded = restarted.load(
+        "checkpoint-1",
+        model_sha256=complete.model_sha256,
+        metadata_sha256=complete.metadata_sha256,
+    )
+    assert loaded.snapshot == snapshot("checkpoint-1")
+    assert (
+        restarted.restore(
+            loaded,
+            replace(snapshot("checkpoint-1"), created_by_attempt_id="new-attempt"),
+        ).model.model_version
+        == 8
+    )
+
+    with pytest.raises(ValueError, match="source attempt identity"):
+        CheckpointManager.for_attempt(tmp_path, "../escape", TestOnlySerializer())
+    with pytest.raises(ValueError, match="checkpoint identity"):
+        restarted.load(
+            "../escape",
+            model_sha256=complete.model_sha256,
+            metadata_sha256=complete.metadata_sha256,
+        )
+    with pytest.raises(ValueError, match="hash mismatch"):
+        restarted.load(
+            "checkpoint-1",
+            model_sha256="0" * 64,
+            metadata_sha256=complete.metadata_sha256,
+        )
+
+
+def test_descriptor_load_rejects_unknown_checkpoint(tmp_path):
+    manager = CheckpointManager.for_attempt(tmp_path, "attempt", TestOnlySerializer())
+    with pytest.raises(ValueError, match="Unknown checkpoint identity"):
+        manager.load(
+            "unknown-checkpoint",
+            model_sha256="0" * 64,
+            metadata_sha256="1" * 64,
+        )
+
+
+def test_descriptor_load_rejects_corrupt_metadata_with_matching_outer_hash(tmp_path):
+    manager = CheckpointManager.for_attempt(tmp_path, "attempt", TestOnlySerializer())
+    complete = manager.write(snapshot("checkpoint-metadata"))
+    metadata_path = complete.directory / "checkpoint.json"
+    record = json.loads(metadata_path.read_bytes())
+    record["body"]["contract_hash"] = "tampered-contract"
+    corrupted = canonical_json_bytes(record)
+    metadata_path.write_bytes(corrupted)
+
+    with pytest.raises(ValueError, match="metadata integrity"):
+        manager.load(
+            "checkpoint-metadata",
+            model_sha256=complete.model_sha256,
+            metadata_sha256=sha256_bytes(corrupted),
+        )
+
+
+def test_descriptor_load_rejects_corrupt_model_with_matching_outer_hash(tmp_path):
+    manager = CheckpointManager.for_attempt(tmp_path, "attempt", TestOnlySerializer())
+    complete = manager.write(snapshot("checkpoint-model"))
+    model_path = complete.directory / "model.bin"
+    corrupted = b"CORRUPTED:" + model_path.read_bytes()
+    model_path.write_bytes(corrupted)
+
+    with pytest.raises(ValueError, match="payload integrity"):
+        manager.load(
+            "checkpoint-model",
+            model_sha256=sha256_bytes(corrupted),
+            metadata_sha256=complete.metadata_sha256,
+        )
+
+
 def test_policy_requires_both_gates_and_caps_retries():
     policy = CheckpointPolicy()
     assert not policy.requires_checkpoint(update_completed=True, synchronization_complete=False)

@@ -151,9 +151,7 @@ class _SingleShardCacheWrapper:
     def __contains__(self, shard_id: int) -> bool:
         return shard_id == self.shard_id
 
-    def load_work_unit(
-        self, unit: WorkUnitRef
-    ) -> tuple[np.ndarray, np.ndarray, Sequence[str]]:
+    def load_work_unit(self, unit: WorkUnitRef) -> tuple[np.ndarray, np.ndarray, Sequence[str]]:
         if unit.shard_id != self.shard_id:
             raise KeyError(f"Shard {unit.shard_id} not available")
         return self._shard.load_batch(unit.batch_id)
@@ -202,6 +200,16 @@ class TrainingLoop:
     @property
     def dataset_cache(self) -> DatasetCache:
         return self._dataset_cache
+
+    def initialize_parameters(self, target_model_version: int, bundle: TensorBundle) -> None:
+        """Install the Runtime's initial canonical snapshot, including resume versions."""
+        with self._lock:
+            if self._pending is not None or self._eligibility is not None:
+                raise ValueError("Cannot initialize parameters while a Step is active")
+            if type(target_model_version) is not int or target_model_version < 0:
+                raise ValueError("Initial canonical model version must be non-negative")
+            self._adapter.apply_parameters(bundle)
+            self._model_version = target_model_version
 
     def compute(self, assignment: StepAssignment) -> ComputedGradient:
         with self._lock:

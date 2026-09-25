@@ -5,7 +5,6 @@ Reference: NODE_AGENT_IMPLEMENTATION_PLAN.md Section 8.1 & User Request Phase 7.
 
 from __future__ import annotations
 
-import io
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -69,12 +68,17 @@ def test_cli_enroll_success(
 ) -> None:
     mock_enroll.return_value = NodeIdentity(node_id="node-new-123", node_secret="secret-abc-789")
 
-    code = main([
-        "enroll",
-        "--backend-url", "http://127.0.0.1:8000",
-        "--code", "one-time-token",
-        "--var-dir", str(tmp_path),
-    ])
+    code = main(
+        [
+            "enroll",
+            "--backend-url",
+            "http://127.0.0.1:8000",
+            "--code",
+            "one-time-token",
+            "--var-dir",
+            str(tmp_path),
+        ]
+    )
     assert code == 0
     captured = capsys.readouterr()
     assert "Host successfully enrolled! Assigned node_id: node-new-123" in captured.out
@@ -97,12 +101,17 @@ def test_cli_enroll_already_enrolled_blocks_unless_force(
     save_identity(tmp_path, NodeIdentity(node_id="existing-node", node_secret="secret-old"))
 
     # Without --force -> blocked
-    code = main([
-        "enroll",
-        "--backend-url", "http://127.0.0.1:8000",
-        "--code", "one-time-token",
-        "--var-dir", str(tmp_path),
-    ])
+    code = main(
+        [
+            "enroll",
+            "--backend-url",
+            "http://127.0.0.1:8000",
+            "--code",
+            "one-time-token",
+            "--var-dir",
+            str(tmp_path),
+        ]
+    )
     assert code == 1
     mock_enroll.assert_not_called()
     captured = capsys.readouterr()
@@ -110,13 +119,18 @@ def test_cli_enroll_already_enrolled_blocks_unless_force(
 
     # With --force -> allowed
     mock_enroll.return_value = NodeIdentity(node_id="overwritten-node", node_secret="secret-new")
-    code_force = main([
-        "enroll",
-        "--backend-url", "http://127.0.0.1:8000",
-        "--code", "one-time-token",
-        "--var-dir", str(tmp_path),
-        "--force",
-    ])
+    code_force = main(
+        [
+            "enroll",
+            "--backend-url",
+            "http://127.0.0.1:8000",
+            "--code",
+            "one-time-token",
+            "--var-dir",
+            str(tmp_path),
+            "--force",
+        ]
+    )
     assert code_force == 0
     mock_enroll.assert_called_once()
     saved = load_identity(tmp_path)

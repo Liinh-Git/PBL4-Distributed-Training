@@ -136,6 +136,7 @@ _ALLOWED: dict[ConnectionPhase, frozenset[int]] = {
             MESSAGE_TYPE_GRADIENT_META,
             MESSAGE_TYPE_GRADIENT_CHUNK,
             MESSAGE_TYPE_GRADIENT_END,
+            MESSAGE_TYPE_HEARTBEAT,
             MESSAGE_TYPE_STOP,
             MESSAGE_TYPE_ERROR,
         }
@@ -144,12 +145,18 @@ _ALLOWED: dict[ConnectionPhase, frozenset[int]] = {
         {
             MESSAGE_TYPE_PARAMETER_META,
             MESSAGE_TYPE_PARAMETER_CHUNK,
+            MESSAGE_TYPE_HEARTBEAT,
             MESSAGE_TYPE_STOP,
             MESSAGE_TYPE_ERROR,
         }
     ),
     ConnectionPhase.APPLYING: frozenset(
-        {MESSAGE_TYPE_PARAMETER_APPLIED, MESSAGE_TYPE_STOP, MESSAGE_TYPE_ERROR}
+        {
+            MESSAGE_TYPE_PARAMETER_APPLIED,
+            MESSAGE_TYPE_HEARTBEAT,
+            MESSAGE_TYPE_STOP,
+            MESSAGE_TYPE_ERROR,
+        }
     ),
     ConnectionPhase.WAITING_NEXT: frozenset(
         {

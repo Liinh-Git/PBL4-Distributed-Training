@@ -10,14 +10,11 @@ import socket
 import threading
 import time
 import unittest
-from unittest.mock import MagicMock, patch
 
 from pbl4.common.errors import ProtocolError
 from pbl4.common.worker_admission import issue_worker_join_token
 from pbl4.protocol.codec import DTPFrame
 from pbl4.protocol.constants import (
-    MESSAGE_TYPE_ERROR,
-    MESSAGE_TYPE_HELLO_ACK,
     UNASSIGNED_WORKER_ID,
 )
 from pbl4.protocol.messages import (
@@ -126,7 +123,7 @@ class TestHelloManagedValidation(unittest.TestCase):
 
 
 class TestRuntimeAdmissionGate(unittest.TestCase):
-    """Test cases 8 - 18: Runtime admission verification before register, duplicate admission, ordering."""
+    """Runtime admission verification, ordering, and duplicate rejection."""
 
     def setUp(self) -> None:
         self.secret = "admission-secret-key-123"
@@ -146,7 +143,9 @@ class TestRuntimeAdmissionGate(unittest.TestCase):
             require_worker_admission=True,
         )
 
-    def _send_hello_and_get_reply(self, server_sock: socket.socket, client_sock: socket.socket, hello_msg: Hello):
+    def _send_hello_and_get_reply(
+        self, server_sock: socket.socket, client_sock: socket.socket, hello_msg: Hello
+    ):
         # Run server._serve_connection in background thread
         thread = threading.Thread(
             target=self.server._serve_connection,
@@ -171,7 +170,9 @@ class TestRuntimeAdmissionGate(unittest.TestCase):
                 conn.terminal_stop_sent = True
             thread.join(timeout=1.0)
 
-    def _make_valid_hello(self, allocation_id: str | None = None, exp_offset: float = 600.0) -> Hello:
+    def _make_valid_hello(
+        self, allocation_id: str | None = None, exp_offset: float = 600.0
+    ) -> Hello:
         alloc = allocation_id or self.allocation_id
         token = issue_worker_join_token(
             self.secret,
@@ -419,7 +420,7 @@ class TestRuntimeAdmissionGate(unittest.TestCase):
             c_sock.close()
 
     def test_16_17_18_duplicate_allocation_rejection(self) -> None:
-        """Test same allocation admitted once, duplicate rejected, and rejected even after disconnect."""
+        """Keep one allocation id admitted after acceptance and disconnect."""
         # 16. First admission accepted
         s1, c1 = socket.socketpair()
         try:
@@ -453,6 +454,60 @@ class TestRuntimeAdmissionGate(unittest.TestCase):
         finally:
             s3.close()
             c3.close()
+
+    def test_concurrent_duplicate_allocation_admits_exactly_once(self) -> None:
+        """Concurrent HELLO messages cannot race past allocation idempotency."""
+        pairs = [socket.socketpair(), socket.socketpair()]
+        threads: list[threading.Thread] = []
+        barrier = threading.Barrier(3)
+
+        def send_hello(client_sock: socket.socket) -> None:
+            barrier.wait()
+            build_control_frame(
+                self._make_valid_hello("alloc-concurrent"),
+                session_id=0,
+                worker_id=UNASSIGNED_WORKER_ID,
+            ).write_to(client_sock, lambda sock, payload: sock.sendall(payload))
+
+        try:
+            for index, (server_sock, client_sock) in enumerate(pairs):
+                client_sock.settimeout(2.0)
+                thread = threading.Thread(
+                    target=self.server._serve_connection,
+                    args=(server_sock, ("127.0.0.1", 20000 + index)),
+                    daemon=True,
+                )
+                thread.start()
+                threads.append(thread)
+                threading.Thread(
+                    target=send_hello,
+                    args=(client_sock,),
+                    daemon=True,
+                ).start()
+
+            barrier.wait()
+            replies = [
+                decode_control_message(frame.header.message_type, frame.payload)
+                for frame in (DTPFrame.read_from(client, recv_exact) for _, client in pairs)
+            ]
+
+            assert sum(isinstance(reply, HelloAck) for reply in replies) == 1
+            errors = [reply for reply in replies if isinstance(reply, Error)]
+            assert len(errors) == 1
+            assert errors[0].error_code == ERROR_CODE_WORKER_ADMISSION_INVALID
+            assert "already been admitted" in errors[0].message
+            assert len(self.registry.snapshot()) == 1
+            assert self.server._admitted_allocation_ids == {"alloc-concurrent"}
+        finally:
+            for connection in list(self.server._connections.values()):
+                connection.terminal_stop_sent = True
+            for server_sock, client_sock in pairs:
+                with contextlib.suppress(OSError):
+                    client_sock.shutdown(socket.SHUT_RDWR)
+                server_sock.close()
+                client_sock.close()
+            for thread in threads:
+                thread.join(timeout=1.0)
 
 
 class TestRuntimeModes(unittest.TestCase):
@@ -494,7 +549,9 @@ class TestRuntimeModes(unittest.TestCase):
                 }
             )
             # Background serve
-            t = threading.Thread(target=server._serve_connection, args=(s, ("127.0.0.1", 1)), daemon=True)
+            t = threading.Thread(
+                target=server._serve_connection, args=(s, ("127.0.0.1", 1)), daemon=True
+            )
             t.start()
             frame = build_control_frame(hello, session_id=0, worker_id=UNASSIGNED_WORKER_ID)
             frame.write_to(c, lambda sk, b: sk.sendall(b))
@@ -535,9 +592,13 @@ class TestRuntimeModes(unittest.TestCase):
                     "supported_strategy_capabilities": ["strict_bsp"],
                 }
             )
-            t = threading.Thread(target=server._serve_connection, args=(s, ("127.0.0.1", 1)), daemon=True)
+            t = threading.Thread(
+                target=server._serve_connection, args=(s, ("127.0.0.1", 1)), daemon=True
+            )
             t.start()
-            frame = build_control_frame(unmanaged_hello, session_id=0, worker_id=UNASSIGNED_WORKER_ID)
+            frame = build_control_frame(
+                unmanaged_hello, session_id=0, worker_id=UNASSIGNED_WORKER_ID
+            )
             frame.write_to(c, lambda sk, b: sk.sendall(b))
 
             frame_reply = DTPFrame.read_from(c, recv_exact)
@@ -576,9 +637,13 @@ class TestRuntimeModes(unittest.TestCase):
                     "supported_strategy_capabilities": ["strict_bsp"],
                 }
             )
-            t = threading.Thread(target=server._serve_connection, args=(s, ("127.0.0.1", 1)), daemon=True)
+            t = threading.Thread(
+                target=server._serve_connection, args=(s, ("127.0.0.1", 1)), daemon=True
+            )
             t.start()
-            frame = build_control_frame(unmanaged_hello, session_id=0, worker_id=UNASSIGNED_WORKER_ID)
+            frame = build_control_frame(
+                unmanaged_hello, session_id=0, worker_id=UNASSIGNED_WORKER_ID
+            )
             frame.write_to(c, lambda sk, b: sk.sendall(b))
 
             frame_reply = DTPFrame.read_from(c, recv_exact)
@@ -593,7 +658,7 @@ class TestRuntimeModes(unittest.TestCase):
             c.close()
 
     def test_22_and_23_unmanaged_mode_verifies_managed_hello(self) -> None:
-        """In explicit unmanaged mode, if a worker sends managed credentials, they MUST be verified."""
+        """Verify managed credentials even in explicit unmanaged mode."""
         server = ParameterServer(
             "127.0.0.1",
             0,
@@ -624,7 +689,9 @@ class TestRuntimeModes(unittest.TestCase):
                     "worker_join_token": token,
                 }
             )
-            t1 = threading.Thread(target=server._serve_connection, args=(s1, ("127.0.0.1", 1)), daemon=True)
+            t1 = threading.Thread(
+                target=server._serve_connection, args=(s1, ("127.0.0.1", 1)), daemon=True
+            )
             t1.start()
             build_control_frame(hello1).write_to(c1, lambda sk, b: sk.sendall(b))
             frame1 = DTPFrame.read_from(c1, recv_exact)
@@ -656,7 +723,9 @@ class TestRuntimeModes(unittest.TestCase):
                     "worker_join_token": bad_token,
                 }
             )
-            t2 = threading.Thread(target=server._serve_connection, args=(s2, ("127.0.0.1", 1)), daemon=True)
+            t2 = threading.Thread(
+                target=server._serve_connection, args=(s2, ("127.0.0.1", 1)), daemon=True
+            )
             t2.start()
             build_control_frame(hello2).write_to(c2, lambda sk, b: sk.sendall(b))
             frame2 = DTPFrame.read_from(c2, recv_exact)
@@ -672,7 +741,7 @@ class TestRuntimeModes(unittest.TestCase):
 
 
 class TestWorkerIdentityAndClient(unittest.TestCase):
-    """Test cases 24 - 28: WorkerConfig, client_instance_id stability, and initialization_seed requirement."""
+    """Worker identity stability and initialization-seed requirements."""
 
     def test_24_worker_config_all_or_none(self) -> None:
         # All present
@@ -730,7 +799,7 @@ class TestWorkerIdentityAndClient(unittest.TestCase):
         # client_instance_id is stable and matches passed ID
         self.assertEqual(client.client_instance_id, fixed_uuid)
 
-        # Test that client instantiated without client_instance_id still creates a single stable UUID
+        # An implicit client_instance_id is also stable for the client lifetime.
         client2 = WorkerClient(
             "127.0.0.1",
             9000,

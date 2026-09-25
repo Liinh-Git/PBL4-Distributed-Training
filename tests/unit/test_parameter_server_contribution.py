@@ -108,6 +108,7 @@ def test_parameter_server_to_contribution_with_compute_ms() -> None:
         parameter_applied_handler=lambda a: None,
         model_init_handler=lambda t: None,
         disconnect_handler=lambda w, s: None,
+        require_compute_ms=True,
     )
 
     grad = np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32)
@@ -140,7 +141,7 @@ def test_parameter_server_to_contribution_with_compute_ms() -> None:
     assert contribution.compute_ms == 250.75
     assert np.allclose(contribution.gradient, grad)
 
-    # Legacy transfer without compute_ms defaults to 0.0
+    # Work Unit transfer without compute_ms fails before admission/aggregation.
     meta_legacy = dict(meta)
     del meta_legacy["compute_ms"]
     transfer_legacy = CompletedTensorTransfer(
@@ -149,5 +150,16 @@ def test_parameter_server_to_contribution_with_compute_ms() -> None:
         metadata=meta_legacy,
         data=grad.tobytes(),
     )
-    c_legacy = ps._to_contribution(transfer_legacy)
-    assert c_legacy.compute_ms == 0.0
+    with pytest.raises(ValueError, match="requires compute_ms"):
+        ps._to_contribution(transfer_legacy)
+
+    for invalid in (0.0, float("nan"), float("inf")):
+        invalid_meta = {**meta, "compute_ms": invalid}
+        invalid_transfer = CompletedTensorTransfer(
+            kind="GRADIENT",
+            identity=identity,
+            metadata=invalid_meta,
+            data=grad.tobytes(),
+        )
+        with pytest.raises(ValueError, match="positive and finite"):
+            ps._to_contribution(invalid_transfer)

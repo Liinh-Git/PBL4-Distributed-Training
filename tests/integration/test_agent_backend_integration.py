@@ -3,7 +3,7 @@
 Reference: NODE_AGENT_IMPLEMENTATION_PLAN.md Section 8.2 & User Request Phase 7.
 
 Validates end-to-end integration against live Backend and PostgreSQL database:
-1. Enrollment CLI flow (one-time code, hardware capabilities, persistent identity, initial OFFLINE state).
+1. Enrollment CLI flow with persistent identity and initial OFFLINE state.
 2. Start CLI validation (fails cleanly with exit code 1 if not enrolled).
 3. Status CLI safety (shows node_id and allocation status with zero secret leaks).
 4. Agent WSS connection & Handshake:
@@ -43,17 +43,15 @@ Validates end-to-end integration against live Backend and PostgreSQL database:
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 import json
 import os
-from pathlib import Path
-import subprocess
-import sys
 import threading
 import time
+import uuid
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
-import uuid
 
 import httpx
 import psycopg
@@ -61,18 +59,6 @@ import pytest
 import uvicorn
 
 from pbl4 import PACKAGE_VERSION
-from pbl4.agent_protocol.messages import (
-    COMMAND_STATUS_ACCEPTED,
-    COMMAND_TYPE_START_WORKER,
-    MESSAGE_TYPE_COMMAND,
-    MESSAGE_TYPE_COMMAND_ACK,
-    MESSAGE_TYPE_WORKER_STATUS,
-    WORKER_ACTUAL_STATE_ENDED,
-    WORKER_ACTUAL_STATE_FAILED,
-    WORKER_ACTUAL_STATE_STARTED,
-    AgentEnvelope,
-    parse_agent_envelope,
-)
 from pbl4.management_backend.app import create_app
 from pbl4.management_backend.gateways.node_control_gateway import (
     get_node_control_gateway,
@@ -83,8 +69,6 @@ from pbl4.management_backend.repositories import (
 )
 from pbl4.management_backend.services import (
     allocation_service,
-    node_enrollment_service,
-    node_service,
 )
 from pbl4.node_agent.client import NodeAgentClient
 from pbl4.node_agent.config import NodeAgentConfig
@@ -93,9 +77,7 @@ from pbl4.node_agent.identity import NodeIdentity, load_identity, save_identity
 from pbl4.node_agent.supervisor import (
     LOCAL_STATE_FAILED,
     LOCAL_STATE_RUNNING,
-    LOCAL_STATE_STARTING,
     LOCAL_STATE_STOPPED,
-    LocalAllocationRecord,
     WorkerProcessSupervisor,
 )
 
@@ -128,7 +110,13 @@ def live_server():
     os.environ["NODE_TELEMETRY_INTERVAL_SECONDS"] = "1.0"
     os.environ["NODE_HEARTBEAT_INTERVAL_SECONDS"] = "1.0"
     app = create_app()
-    config = uvicorn.Config(app=app, host="127.0.0.1", port=0, log_level="error")
+    config = uvicorn.Config(
+        app=app,
+        host="127.0.0.1",
+        port=0,
+        log_level="error",
+        http="h11",
+    )
     server = uvicorn.Server(config)
 
     thread = threading.Thread(target=server.run, daemon=True)
@@ -168,10 +156,16 @@ def pg_conn():
 def clean_active_attempts(pg_conn: psycopg.Connection):
     """Ensure no active attempt leaks across tests or test files."""
     with pg_conn.cursor() as cur:
-        cur.execute("UPDATE attempts SET state = 'COMPLETED' WHERE state NOT IN ('COMPLETED', 'FAILED', 'ABORTED')")
+        cur.execute(
+            "UPDATE attempts SET state = 'COMPLETED' "
+            "WHERE state NOT IN ('COMPLETED', 'FAILED', 'ABORTED')"
+        )
     yield
     with pg_conn.cursor() as cur:
-        cur.execute("UPDATE attempts SET state = 'COMPLETED' WHERE state NOT IN ('COMPLETED', 'FAILED', 'ABORTED')")
+        cur.execute(
+            "UPDATE attempts SET state = 'COMPLETED' "
+            "WHERE state NOT IN ('COMPLETED', 'FAILED', 'ABORTED')"
+        )
 
 
 def _create_test_job_and_attempt(conn: psycopg.Connection) -> tuple[str, str]:
@@ -181,7 +175,10 @@ def _create_test_job_and_attempt(conn: psycopg.Connection) -> tuple[str, str]:
     now = datetime.now(UTC)
 
     with conn.cursor() as cur:
-        cur.execute("UPDATE attempts SET state = 'COMPLETED' WHERE state NOT IN ('COMPLETED', 'FAILED', 'ABORTED')")
+        cur.execute(
+            "UPDATE attempts SET state = 'COMPLETED' "
+            "WHERE state NOT IN ('COMPLETED', 'FAILED', 'ABORTED')"
+        )
         cur.execute(
             """
             INSERT INTO jobs (
@@ -195,10 +192,12 @@ def _create_test_job_and_attempt(conn: psycopg.Connection) -> tuple[str, str]:
                 "Job for Node Agent integration tests",
                 "READY",
                 json.dumps({"dataset_build_id": "bld-test"}),
-                json.dumps({
-                    "training": {"training_seed": 42},
-                    "synchronization": {"expected_workers": 1},
-                }),
+                json.dumps(
+                    {
+                        "training": {"training_seed": 42},
+                        "synchronization": {"expected_workers": 1},
+                    }
+                ),
                 "hash-agent-test",
                 now,
                 now,
@@ -228,6 +227,7 @@ def _wait_until(predicate, timeout: float = 3.0, interval: float = 0.05):
 
 # ─── 1. CLI Tests ─────────────────────────────────────────────────────────────
 
+
 def test_01_cli_enrollment_persists_identity_and_creates_offline_node(
     live_server: str,
     http_client: httpx.Client,
@@ -242,12 +242,17 @@ def test_01_cli_enrollment_persists_identity_and_creates_offline_node(
     enrollment_code = code_data["enrollment_code"]
 
     # 2. Run pbl4-agent enroll CLI command
-    exit_code = main([
-        "enroll",
-        "--backend-url", live_server,
-        "--code", enrollment_code,
-        "--var-dir", str(tmp_path),
-    ])
+    exit_code = main(
+        [
+            "enroll",
+            "--backend-url",
+            live_server,
+            "--code",
+            enrollment_code,
+            "--var-dir",
+            str(tmp_path),
+        ]
+    )
     assert exit_code == 0
 
     # 3. Verify identity file created locally
@@ -284,7 +289,9 @@ def test_03_cli_status_displays_safe_metadata_without_secrets(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    save_identity(tmp_path, NodeIdentity(node_id="node-test-status", node_secret="secret-never-expose!"))
+    save_identity(
+        tmp_path, NodeIdentity(node_id="node-test-status", node_secret="secret-never-expose!")
+    )
 
     exit_code = main(["status", "--var-dir", str(tmp_path)])
     assert exit_code == 0
@@ -295,6 +302,7 @@ def test_03_cli_status_displays_safe_metadata_without_secrets(
 
 
 # ─── 2. WSS Connection & Handshake ────────────────────────────────────────────
+
 
 def test_04_agent_connect_and_handshake_transitions_node_to_online(
     live_server: str,
@@ -383,6 +391,7 @@ def test_05_agent_connect_with_invalid_credentials_rejected(
 
 # ─── 3. Heartbeat & Resource Telemetry ────────────────────────────────────────
 
+
 def test_06_heartbeat_and_telemetry_persisted(
     live_server: str,
     http_client: httpx.Client,
@@ -431,6 +440,7 @@ def test_06_heartbeat_and_telemetry_persisted(
 
 # ─── 4. Command Handling: START, STOP, Crashes, Duplicate ─────────────────────
 
+
 def test_07_start_worker_and_env_token(
     live_server: str,
     http_client: httpx.Client,
@@ -439,7 +449,9 @@ def test_07_start_worker_and_env_token(
 ) -> None:
     # 1. Enroll node
     c_res = http_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    e_res = http_client.post("/api/v1/nodes/enroll", json={"enrollment_code": c_res.json()["data"]["enrollment_code"]})
+    e_res = http_client.post(
+        "/api/v1/nodes/enroll", json={"enrollment_code": c_res.json()["data"]["enrollment_code"]}
+    )
     node_id = e_res.json()["data"]["node_id"]
     node_secret = e_res.json()["data"]["node_secret"]
 
@@ -454,7 +466,14 @@ def test_07_start_worker_and_env_token(
     captured_env: dict[str, str] = {}
     captured_args: list[str] = []
 
-    def _mock_popen(cmd_args: list[str], env: dict[str, str], **kwargs: Any) -> MagicMock:
+    def _mock_popen(
+        cmd_args: list[str], env: dict[str, str] | None = None, **kwargs: Any
+    ) -> MagicMock:
+        if env is None:
+            probe = MagicMock()
+            probe.communicate.return_value = (b"", b"")
+            probe.returncode = 0
+            return probe
         captured_args.extend(cmd_args)
         captured_env.update(env)
         proc = MagicMock()
@@ -472,13 +491,16 @@ def test_07_start_worker_and_env_token(
 
             # 4. Now that node is ONLINE, setup job, attempt, and allocation in DB
             job_id, attempt_id = _create_test_job_and_attempt(pg_conn)
-            alloc = allocation_service.create_allocation(pg_conn, attempt_id=attempt_id, node_id=node_id, device="cpu")
+            alloc = allocation_service.create_allocation(
+                pg_conn, attempt_id=attempt_id, node_id=node_id, device="cpu"
+            )
             allocation_id = alloc["allocation_id"]
 
             # 5. Backend builds START_WORKER command and dispatches via gateway
             job = {"job_id": job_id, "resolved_contract": {"training": {"training_seed": 42}}}
             start_cmd = allocation_service.build_start_worker_command(allocation=alloc, job=job)
             gw = get_node_control_gateway()
+            allocation_service.record_dispatched(pg_conn, allocation_id)
             success = gw.send_start_worker(node_id, command=start_cmd)
             assert success is True
 
@@ -508,7 +530,9 @@ def test_08_duplicate_start_worker_noop(
     tmp_path: Path,
 ) -> None:
     c_res = http_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    e_res = http_client.post("/api/v1/nodes/enroll", json={"enrollment_code": c_res.json()["data"]["enrollment_code"]})
+    e_res = http_client.post(
+        "/api/v1/nodes/enroll", json={"enrollment_code": c_res.json()["data"]["enrollment_code"]}
+    )
     node_id = e_res.json()["data"]["node_id"]
     node_secret = e_res.json()["data"]["node_secret"]
 
@@ -521,8 +545,15 @@ def test_08_duplicate_start_worker_noop(
 
     spawn_count = 0
 
-    def _mock_popen(cmd_args: list[str], env: dict[str, str], **kwargs: Any) -> MagicMock:
+    def _mock_popen(
+        cmd_args: list[str], env: dict[str, str] | None = None, **kwargs: Any
+    ) -> MagicMock:
         nonlocal spawn_count
+        if env is None:
+            probe = MagicMock()
+            probe.communicate.return_value = (b"", b"")
+            probe.returncode = 0
+            return probe
         spawn_count += 1
         proc = MagicMock()
         proc.pid = 88822
@@ -538,7 +569,9 @@ def test_08_duplicate_start_worker_noop(
             _wait_until(lambda: client.is_connected, timeout=5.0)
 
             job_id, attempt_id = _create_test_job_and_attempt(pg_conn)
-            alloc = allocation_service.create_allocation(pg_conn, attempt_id=attempt_id, node_id=node_id, device="cpu")
+            alloc = allocation_service.create_allocation(
+                pg_conn, attempt_id=attempt_id, node_id=node_id, device="cpu"
+            )
             allocation_id = alloc["allocation_id"]
 
             job = {"job_id": job_id, "resolved_contract": {"training": {"training_seed": 42}}}
@@ -546,9 +579,13 @@ def test_08_duplicate_start_worker_noop(
             gw = get_node_control_gateway()
 
             # First START_WORKER
+            allocation_service.record_dispatched(pg_conn, allocation_id)
             gw.send_start_worker(node_id, command=start_cmd)
             _wait_until(
-                lambda: allocation_repository.get_allocation(pg_conn, allocation_id)["actual_state"] == "STARTED",
+                lambda: (
+                    allocation_repository.get_allocation(pg_conn, allocation_id)["actual_state"]
+                    == "STARTED"
+                ),
                 timeout=5.0,
             )
             assert spawn_count == 1
@@ -570,7 +607,9 @@ def test_09_stop_worker_graceful(
     tmp_path: Path,
 ) -> None:
     c_res = http_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    e_res = http_client.post("/api/v1/nodes/enroll", json={"enrollment_code": c_res.json()["data"]["enrollment_code"]})
+    e_res = http_client.post(
+        "/api/v1/nodes/enroll", json={"enrollment_code": c_res.json()["data"]["enrollment_code"]}
+    )
     node_id = e_res.json()["data"]["node_id"]
     node_secret = e_res.json()["data"]["node_secret"]
 
@@ -595,22 +634,30 @@ def test_09_stop_worker_graceful(
             _wait_until(lambda: client.is_connected, timeout=5.0)
 
             job_id, attempt_id = _create_test_job_and_attempt(pg_conn)
-            alloc = allocation_service.create_allocation(pg_conn, attempt_id=attempt_id, node_id=node_id, device="cpu")
+            alloc = allocation_service.create_allocation(
+                pg_conn, attempt_id=attempt_id, node_id=node_id, device="cpu"
+            )
             allocation_id = alloc["allocation_id"]
 
             # Start worker
             job = {"job_id": job_id, "resolved_contract": {"training": {"training_seed": 42}}}
             start_cmd = allocation_service.build_start_worker_command(allocation=alloc, job=job)
             gw = get_node_control_gateway()
+            allocation_service.record_dispatched(pg_conn, allocation_id)
             gw.send_start_worker(node_id, command=start_cmd)
 
             _wait_until(
-                lambda: allocation_repository.get_allocation(pg_conn, allocation_id)["actual_state"] == "STARTED",
+                lambda: (
+                    allocation_repository.get_allocation(pg_conn, allocation_id)["actual_state"]
+                    == "STARTED"
+                ),
                 timeout=5.0,
             )
 
             # Stop worker
-            stop_cmd = allocation_service.build_stop_worker_command(allocation=alloc, grace_period_seconds=1.0)
+            stop_cmd = allocation_service.build_stop_worker_command(
+                allocation=alloc, grace_period_seconds=1.0
+            )
             gw.send_stop_worker(node_id, command=stop_cmd)
 
             # Allocation must transition to ENDED
@@ -631,7 +678,9 @@ def test_10_worker_crash_detected_and_reported_failed(
     tmp_path: Path,
 ) -> None:
     c_res = http_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    e_res = http_client.post("/api/v1/nodes/enroll", json={"enrollment_code": c_res.json()["data"]["enrollment_code"]})
+    e_res = http_client.post(
+        "/api/v1/nodes/enroll", json={"enrollment_code": c_res.json()["data"]["enrollment_code"]}
+    )
     node_id = e_res.json()["data"]["node_id"]
     node_secret = e_res.json()["data"]["node_secret"]
 
@@ -655,16 +704,22 @@ def test_10_worker_crash_detected_and_reported_failed(
             _wait_until(lambda: client.is_connected, timeout=5.0)
 
             job_id, attempt_id = _create_test_job_and_attempt(pg_conn)
-            alloc = allocation_service.create_allocation(pg_conn, attempt_id=attempt_id, node_id=node_id, device="cpu")
+            alloc = allocation_service.create_allocation(
+                pg_conn, attempt_id=attempt_id, node_id=node_id, device="cpu"
+            )
             allocation_id = alloc["allocation_id"]
 
             job = {"job_id": job_id, "resolved_contract": {"training": {"training_seed": 42}}}
             start_cmd = allocation_service.build_start_worker_command(allocation=alloc, job=job)
             gw = get_node_control_gateway()
+            allocation_service.record_dispatched(pg_conn, allocation_id)
             gw.send_start_worker(node_id, command=start_cmd)
 
             _wait_until(
-                lambda: allocation_repository.get_allocation(pg_conn, allocation_id)["actual_state"] == "STARTED",
+                lambda: (
+                    allocation_repository.get_allocation(pg_conn, allocation_id)["actual_state"]
+                    == "STARTED"
+                ),
                 timeout=5.0,
             )
 
@@ -687,6 +742,7 @@ def test_10_worker_crash_detected_and_reported_failed(
 
 # ─── 5. Reconnect & Worker Survival Invariant ─────────────────────────────────
 
+
 def test_11_reconnect_and_worker_survival_invariant(
     live_server: str,
     http_client: httpx.Client,
@@ -694,7 +750,9 @@ def test_11_reconnect_and_worker_survival_invariant(
     tmp_path: Path,
 ) -> None:
     c_res = http_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    e_res = http_client.post("/api/v1/nodes/enroll", json={"enrollment_code": c_res.json()["data"]["enrollment_code"]})
+    e_res = http_client.post(
+        "/api/v1/nodes/enroll", json={"enrollment_code": c_res.json()["data"]["enrollment_code"]}
+    )
     node_id = e_res.json()["data"]["node_id"]
     node_secret = e_res.json()["data"]["node_secret"]
 
@@ -723,17 +781,23 @@ def test_11_reconnect_and_worker_survival_invariant(
             _wait_until(lambda: client.is_connected, timeout=5.0)
 
             job_id, attempt_id = _create_test_job_and_attempt(pg_conn)
-            alloc = allocation_service.create_allocation(pg_conn, attempt_id=attempt_id, node_id=node_id, device="cpu")
+            alloc = allocation_service.create_allocation(
+                pg_conn, attempt_id=attempt_id, node_id=node_id, device="cpu"
+            )
             allocation_id = alloc["allocation_id"]
 
             # Start worker
             job = {"job_id": job_id, "resolved_contract": {"training": {"training_seed": 42}}}
             start_cmd = allocation_service.build_start_worker_command(allocation=alloc, job=job)
             gw = get_node_control_gateway()
+            allocation_service.record_dispatched(pg_conn, allocation_id)
             gw.send_start_worker(node_id, command=start_cmd)
 
             _wait_until(
-                lambda: allocation_repository.get_allocation(pg_conn, allocation_id)["actual_state"] == "STARTED",
+                lambda: (
+                    allocation_repository.get_allocation(pg_conn, allocation_id)["actual_state"]
+                    == "STARTED"
+                ),
                 timeout=5.0,
             )
 

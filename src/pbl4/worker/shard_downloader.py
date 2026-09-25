@@ -6,9 +6,10 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
+from pbl4.common.artifact_origin import resolve_artifact_url
 from pbl4.common.hashing import canonical_json_bytes, sha256_bytes
 from pbl4.worker.shard_cache import CachedShard, ShardCache, ShardCacheKey
 
@@ -27,6 +28,7 @@ class ShardDownloader:
         cache: ShardCache,
         temporary_root: Path,
         *,
+        root_manifest_path: str = "manifest.json",
         timeout_seconds: float = 15.0,
         retries: int = 3,
         chunk_size: int = 1024 * 1024,
@@ -40,6 +42,7 @@ class ShardDownloader:
         ):
             raise ValueError("Invalid shard downloader configuration")
         self._base_url = artifact_base_url.rstrip("/")
+        self._root_manifest_path = root_manifest_path
         self._cache = cache
         self._temporary_root = Path(temporary_root).resolve()
         self._timeout = timeout_seconds
@@ -52,10 +55,13 @@ class ShardDownloader:
             return ShardDownloadResult(self._cache.load(key), True, 0)
         except (OSError, ValueError):
             pass
-        build = quote(key.dataset_build_id, safe="")
-        if not self._base_url.endswith(f"/{build}"):
+        if (
+            not unquote(urlsplit(self._base_url).path)
+            .rstrip("/")
+            .endswith("/" + key.dataset_build_id)
+        ):
             raise ValueError("artifact_base_url does not match dataset_build_id")
-        root_url = f"{self._base_url}/manifest.json"
+        root_url = resolve_artifact_url(self._base_url, self._root_manifest_path)
         root_bytes = self._fetch(root_url, key.dataset_manifest_hash)
         root = self._canonical_object(root_bytes)
         references = root.get("shards")
@@ -72,7 +78,13 @@ class ShardDownloader:
             or not isinstance(reference.get("shard_manifest_sha256"), str)
         ):
             raise ValueError("Root Dataset Manifest contains an invalid shard reference")
-        shard_url = f"{self._base_url}/shards/{key.shard_id}/manifest.json"
+        relative_shard_path = reference.get("relative_shard_manifest_path")
+        if self._uses_legacy_local_routes():
+            shard_url = f"{self._base_url}/shards/{key.shard_id}/manifest.json"
+        else:
+            if not isinstance(relative_shard_path, str):
+                raise ValueError("Root Dataset Manifest lacks relative shard manifest path")
+            shard_url = resolve_artifact_url(self._base_url, relative_shard_path)
         shard_bytes = self._fetch(shard_url, reference["shard_manifest_sha256"])
         shard = self._canonical_object(shard_bytes)
         if (
@@ -86,12 +98,24 @@ class ShardDownloader:
         for entry in shard["batches"]:
             if not isinstance(entry, dict):
                 raise ValueError("Shard Manifest contains an invalid batch reference")
-            batch_url = f"{self._base_url}/shards/{key.shard_id}/batches/{entry['batch_id']}"
+            relative_filename = entry.get("relative_filename")
+            if not isinstance(relative_filename, str):
+                raise ValueError("Shard Manifest batch lacks relative_filename")
+            if self._uses_legacy_local_routes():
+                batch_url = f"{self._base_url}/shards/{key.shard_id}/batches/{entry['batch_id']}"
+            else:
+                batch_url = resolve_artifact_url(self._base_url, relative_filename)
             content = self._fetch(batch_url, entry["sha256"], entry["byte_size"])
             batch_bytes[entry["relative_filename"]] = content
             downloaded += len(content)
         cached = self._cache.publish(key, root_bytes, shard_bytes, batch_bytes)
         return ShardDownloadResult(cached, False, downloaded)
+
+    def _uses_legacy_local_routes(self) -> bool:
+        """Recognize the standalone V1 service's explicit artifact routes."""
+        return self._root_manifest_path == "manifest.json" and (
+            "/artifacts/v1/dataset-builds/" in unquote(urlsplit(self._base_url).path)
+        )
 
     def _fetch(self, url: str, expected_hash: str, expected_size: int | None = None) -> bytes:
         self._temporary_root.mkdir(parents=True, exist_ok=True)

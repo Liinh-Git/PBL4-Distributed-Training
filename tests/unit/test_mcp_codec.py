@@ -278,6 +278,27 @@ class PayloadSchemaTest(unittest.TestCase):
             "requested_at": "2026-09-08T00:00:00Z",
         }
         StartAttempt.from_dict(base)
+        resume = {
+            **base,
+            "execution_mode": "RESUME",
+            "resume_from_checkpoint_id": "checkpoint-1",
+            "resume_checkpoint": {
+                "checkpoint_id": "checkpoint-1",
+                "source_attempt_id": "attempt-1",
+                "model_sha256": "a" * 64,
+                "metadata_sha256": "b" * 64,
+            },
+        }
+        StartAttempt.from_dict(resume)
+        with self.assertRaises(ProtocolError):
+            StartAttempt.from_dict({**resume, "resume_checkpoint": None})
+        escaped = dict(resume)
+        escaped["resume_checkpoint"] = {
+            **resume["resume_checkpoint"],
+            "checkpoint_id": "different",
+        }
+        with self.assertRaises(ProtocolError):
+            StartAttempt.from_dict(escaped)
         bad = dict(base)
         bad["execution_mode"] = "fresh"
         with self.assertRaises(ProtocolError):

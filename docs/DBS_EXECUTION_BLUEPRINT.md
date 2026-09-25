@@ -1,8 +1,12 @@
 # Execution Blueprint: Dynamic Batch Size (DBS) & Work Unit Implementation
 
-> **Skill Applied**: `implementation-planner`  
-> **Target Subsystems**: `src/pbl4/runtime/`, `src/pbl4/worker/`, `src/pbl4/protocol/`, `src/pbl4/management_backend/`  
-> **Status**: APPROVED EXECUTION BLUEPRINT (Pre-Implementation Baseline)
+> **NON-NORMATIVE EXECUTION NOTE**: Tài liệu này chỉ lưu dấu kế hoạch thực thi
+> tại snapshot cũ. Nó không thể override kiến trúc canonical,
+> `docs/DBS_DESIGN.md` hoặc `docs/DBS_IMPLEMENTATION_PLAN.md`.
+
+> **Skill Applied**: `implementation-planner`
+> **Target Subsystems**: `src/pbl4/runtime/`, `src/pbl4/worker/`, `src/pbl4/protocol/`, `src/pbl4/management_backend/`
+> **Status**: NON-NORMATIVE HISTORICAL EXECUTION BLUEPRINT
 
 ---
 
@@ -10,9 +14,9 @@
 
 | Attribute | Value / Reference |
 | :--- | :--- |
-| **Approved Plan Source** | [docs/DBS_IMPLEMENTATION_PLAN.md.md](file:///d:/HKI%2026-27/PBL4/demo/docs/DBS_IMPLEMENTATION_PLAN.md.md) |
-| **Governing Canonical Design** | [docs/DBS_DESIGN.md](file:///d:/HKI%2026-27/PBL4/demo/docs/DBS_DESIGN.md) (Normative specification for Work Unit & DBS algorithm) |
-| **Governing Architecture & Contract** | [AGENTS.md](file:///d:/HKI%2026-27/PBL4/demo/AGENTS.md) (Normative Rules 1–17, esp. Rule 17: *DBS is workload scheduling under StrictBSP*), [docs/IMPLEMENTATION_CONTRACT.md](file:///d:/HKI%2026-27/PBL4/demo/docs/IMPLEMENTATION_CONTRACT.md) |
+| **Approved Plan Source** | [docs/DBS_IMPLEMENTATION_PLAN.md](../docs/DBS_IMPLEMENTATION_PLAN.md) |
+| **Governing Canonical Design** | [docs/DBS_DESIGN.md](../docs/DBS_DESIGN.md) (Normative specification for Work Unit & DBS algorithm) |
+| **Governing Architecture & Contract** | [AGENTS.md](../AGENTS.md) (Normative Rules 1–17, esp. Rule 17: *DBS is workload scheduling under StrictBSP*), [docs/IMPLEMENTATION_CONTRACT.md](../docs/IMPLEMENTATION_CONTRACT.md) |
 | **Current Repository Branch** | `feature/dynamic-batch-size-algorithm` |
 | **Current HEAD Commit** | `197cb478468d88d7f40365d79ce70d402d53d2f5` (`chore: update agent system for Node Agent and DBS architecture`) |
 | **Plan Audit Commit** | `50796b2afe5c3ea46e05a038df27d4da9b09c468` (`fix(management_backend): keep runtime snapshots during DB outage and document DTP/MCP host config`) |
@@ -28,13 +32,13 @@
    - `training_strategy` remains `"strict_bsp"` exclusively.
    - Do NOT introduce `dbs_bsp`, `DbsStrictBSP`, or custom synchronization strategies.
    - Worker membership is fixed ($N$ workers). Barrier requires full $N/N$ gradient contributions and full $N/N$ `PARAMETER_APPLIED` acknowledgments.
-   - *Source*: [AGENTS.md#Rule-17](file:///d:/HKI%2026-27/PBL4/demo/AGENTS.md), [docs/DBS_DESIGN.md §4](file:///d:/HKI%2026-27/PBL4/demo/docs/DBS_DESIGN.md#L54-L87).
+   - *Source*: [AGENTS.md#Rule-17](../AGENTS.md), [docs/DBS_DESIGN.md §4](../docs/DBS_DESIGN.md#L54-L87).
 
 2. **DBS is Runtime-Owned Workload Scheduling**:
    - DBS policy (`"equal" | "dbs"`) lives in Runtime memory only and determines *how many* Work Units worker $i$ processes ($k_i$) for a step.
    - The global Work Unit set for step $s$ (size $K$) is identical regardless of whether policy is `"equal"` or `"dbs"`.
    - Node Agent, Management Backend, and Database are NEVER in the training critical path.
-   - *Source*: [AGENTS.md#Rule-4](file:///d:/HKI%2026-27/PBL4/demo/AGENTS.md), [AGENTS.md#Rule-17](file:///d:/HKI%2026-27/PBL4/demo/AGENTS.md), [docs/DBS_DESIGN.md §3, §8](file:///d:/HKI%2026-27/PBL4/demo/docs/DBS_DESIGN.md#L30-L53).
+   - *Source*: [AGENTS.md#Rule-4](../AGENTS.md), [AGENTS.md#Rule-17](../AGENTS.md), [docs/DBS_DESIGN.md §3, §8](../docs/DBS_DESIGN.md#L30-L53).
 
 3. **Single Logical Contribution Per Worker**:
    - Each worker processes $k_i$ Work Units sequentially, averages gradients locally weighted by unit sample counts:
@@ -42,7 +46,7 @@
    - The worker sends exactly **one** logical gradient contribution with `sample_count` $= \sum_u n_u$.
    - Global aggregation remains sample-weighted:
      $$g_{\text{global}} = \frac{\sum_i n_i g_{\text{local}, i}}{\sum_i n_i}$$
-   - *Source*: [docs/DBS_DESIGN.md §9](file:///d:/HKI%2026-27/PBL4/demo/docs/DBS_DESIGN.md#L230-L253).
+   - *Source*: [docs/DBS_DESIGN.md §9](../docs/DBS_DESIGN.md#L230-L253).
 
 4. **Zero Protocol Version Bump (DTP/1 Retained)**:
    - DTP version remains 1 (`protocol_version = 1`), 48-byte binary framing unchanged, message catalogue unchanged.
@@ -50,14 +54,14 @@
    - `ShardReady`: NO field additions. Under `cache_scope="all_shards"`, sent only after all shards are cached and verified.
    - `StepStart`: optional `work_units: list[dict]` added. Existing `shard_id`, `batch_id` populated with the first Work Unit for logging/backward compatibility.
    - `GradientMeta`: `compute_ms: float > 0` must be populated with measured compute time.
-   - *Source*: [AGENTS.md#Rule-3](file:///d:/HKI%2026-27/PBL4/demo/AGENTS.md), [docs/DBS_DESIGN.md §10](file:///d:/HKI%2026-27/PBL4/demo/docs/DBS_DESIGN.md#L254-L285).
+   - *Source*: [AGENTS.md#Rule-3](../AGENTS.md), [docs/DBS_DESIGN.md §10](../docs/DBS_DESIGN.md#L254-L285).
 
 5. **No State Machine Extensions & No DB Schema Changes**:
    - Coordinator states: `CREATED -> WAITING_WORKERS -> PROVISIONING -> INITIALIZING -> RUNNING -> COMPLETING -> COMPLETED`.
    - WorkerSession states: `CONNECTING -> REGISTERING -> PROVISIONING -> SHARD_READY -> MODEL_SYNCING -> READY`.
    - Step states: `COLLECTING_GRADIENTS -> AGGREGATING -> UPDATING -> WAITING_PARAMETER_APPLIED -> CHECKPOINTING -> COMMITTED`.
    - No DB tables or new DB columns for DBS metrics.
-   - *Source*: [docs/DBS_DESIGN.md §4.1, §14](file:///d:/HKI%2026-27/PBL4/demo/docs/DBS_DESIGN.md#L68-L74).
+   - *Source*: [docs/DBS_DESIGN.md §4.1, §14](../docs/DBS_DESIGN.md#L68-L74).
 
 6. **Checkpoint V1 Preserved (No Checkpoint V2)**:
    - Checkpoint V1 schema remains unchanged (`RecoveryCursor(epoch, next_batch_ordinal)`).
@@ -65,7 +69,7 @@
    - Resume rule:
      - Boundary resume (`next_batch_ordinal == 0`): current epoch runs `"equal"` and collects stats; subsequent epoch runs `"dbs"`.
      - Mid-epoch resume (`next_batch_ordinal > 0`): remainder of current epoch runs `"equal"` (no stats collection); next full epoch runs `"equal"` and collects stats; subsequent epoch runs `"dbs"`.
-   - *Source*: [docs/DBS_DESIGN.md §12](file:///d:/HKI%2026-27/PBL4/demo/docs/DBS_DESIGN.md#L310-L332).
+   - *Source*: [docs/DBS_DESIGN.md §12](../docs/DBS_DESIGN.md#L310-L332).
 
 7. **Paper Algorithm Rigor (arXiv:2007.11831)**:
    - $d_i^j = \frac{\text{samples}_i^j}{\text{total\_samples}^j}$
@@ -73,7 +77,7 @@
    - $r_i = \frac{p_i}{\sum p_i}$, ideal batch allocation $q_i = r_i \times K$.
    - Integer projection: initial $k_i = 1$; remaining $K - N$ units assigned greedily to minimize $\sum (k_i - q_i)^2$; tie-break by smaller `worker_id`.
    - Golden test: $K=64, N=4$, ideal $[13.7, 16.5, 19.6, 14.2] \to [14, 16, 20, 14]$.
-   - *Source*: [docs/DBS_DESIGN.md §7](file:///d:/HKI%2026-27/PBL4/demo/docs/DBS_DESIGN.md#L137-L211).
+   - *Source*: [docs/DBS_DESIGN.md §7](../docs/DBS_DESIGN.md#L137-L211).
 
 ---
 
@@ -172,7 +176,7 @@ graph TD
 ```text
 TASK: T0.1
 WHY: Establish verification baseline before touching any files.
-SOURCE: docs/DBS_IMPLEMENTATION_PLAN.md.md §18 (Phase 0)
+SOURCE: docs/DBS_IMPLEMENTATION_PLAN.md §18 (Phase 0)
 FILES/SYMBOLS: tests/, scripts/check_architecture.py
 DEPENDS ON: None
 EXPECTED CHANGE: Execute test suite and architecture check; confirm clean pass.
@@ -198,7 +202,7 @@ DONE WHEN: Test passes, preventing regression on strategy immutability.
 ```text
 TASK: T1.1
 WHY: Pure mathematical implementation of DBS formulation from arXiv:2007.11831 and integer error minimization projection.
-SOURCE: docs/DBS_DESIGN.md §7, docs/DBS_IMPLEMENTATION_PLAN.md.md §5
+SOURCE: docs/DBS_DESIGN.md §7, docs/DBS_IMPLEMENTATION_PLAN.md §5
 FILES/SYMBOLS: src/pbl4/runtime/workload_policy.py (NEW)
 DEPENDS ON: T0.2
 EXPECTED CHANGE: Implement WorkerEpochStats, WorkloadPlan, project_units(), EqualWorkloadPolicy, and DbsWorkloadPolicy with zero external imports (no torch, no db, no network).
@@ -207,7 +211,7 @@ DONE WHEN: Fully tested: golden test [13.7, 16.5, 19.6, 14.2] -> [14, 16, 20, 14
 
 TASK: T1.2
 WHY: Expand job contracts to declare workload policy ("equal" | "dbs") and work_units_per_step (K).
-SOURCE: docs/DBS_DESIGN.md §11, docs/DBS_IMPLEMENTATION_PLAN.md.md §3
+SOURCE: docs/DBS_DESIGN.md §11, docs/DBS_IMPLEMENTATION_PLAN.md §3
 FILES/SYMBOLS: src/pbl4/management_backend/schemas/job.py, src/pbl4/management_backend/services/contract_resolver.py
 DEPENDS ON: T1.1
 EXPECTED CHANGE: Add workload_policy and work_units_per_step to RequestedContractV1/Patch. Add ResolvedWorkload to ResolvedContractV1. Resolver enforces K >= N (equal) and K > N (dbs).
@@ -224,7 +228,7 @@ DONE WHEN: Valid requests resolve correctly; invalid configurations (e.g. K <= N
 ```text
 TASK: T2.1
 WHY: Introduce immutable WorkUnitRef and evolve BatchAssignment to represent multiple units per step per worker.
-SOURCE: docs/DBS_DESIGN.md §5.1, docs/DBS_IMPLEMENTATION_PLAN.md.md §4
+SOURCE: docs/DBS_DESIGN.md §5.1, docs/DBS_IMPLEMENTATION_PLAN.md §4
 FILES/SYMBOLS: src/pbl4/runtime/synchronization/context.py
 DEPENDS ON: T1.2
 EXPECTED CHANGE: Add WorkUnitRef(shard_id, batch_id, sample_count). Update BatchAssignment(worker_id, batch_ordinal, work_units, sample_count). Provide backward-compatible shard_id/batch_id properties.
@@ -233,7 +237,7 @@ DONE WHEN: WorkUnitRef and BatchAssignment validate immutability, positive sampl
 
 TASK: T2.2
 WHY: Replace per-worker shard partition assumption with global Work Unit catalog ordering and deterministic $K$-unit assignment.
-SOURCE: docs/DBS_DESIGN.md §8, docs/DBS_IMPLEMENTATION_PLAN.md.md §7
+SOURCE: docs/DBS_DESIGN.md §8, docs/DBS_IMPLEMENTATION_PLAN.md §7
 FILES/SYMBOLS: src/pbl4/runtime/batch_scheduler.py
 DEPENDS ON: T2.1
 EXPECTED CHANGE: BatchScheduler accepts global tuple[WorkUnitRef], seed, epochs, K. Orders catalog via sha256([seed, epoch, shard_id, batch_id]). Computes steps_per_epoch = floor(M / K). assignments(cursor, plan) slices K units and partitions by plan.units_per_worker.
@@ -250,7 +254,7 @@ DONE WHEN: Tests pass: equal and dbs select identical global K units at same cur
 ```text
 TASK: T3.1
 WHY: Provide a thread-safe multi-shard container for workers to access any WorkUnitRef.
-SOURCE: docs/DBS_DESIGN.md §6, docs/DBS_IMPLEMENTATION_PLAN.md.md §8.2
+SOURCE: docs/DBS_DESIGN.md §6, docs/DBS_IMPLEMENTATION_PLAN.md §8.2
 FILES/SYMBOLS: src/pbl4/worker/dataset_cache.py (NEW)
 DEPENDS ON: T2.1
 EXPECTED CHANGE: Create DatasetCache holding dict[int, CachedShard]. Implement load_work_unit(unit: WorkUnitRef), verify_all(), eligible_work_unit_count.
@@ -259,7 +263,7 @@ DONE WHEN: Loading valid WorkUnitRef returns correct (x, y, sample_ids) with len
 
 TASK: T3.2
 WHY: Allow worker to provision all dataset shards on demand when instructed by Runtime.
-SOURCE: docs/DBS_DESIGN.md §6, docs/DBS_IMPLEMENTATION_PLAN.md.md §8.3
+SOURCE: docs/DBS_DESIGN.md §6, docs/DBS_IMPLEMENTATION_PLAN.md §8.3
 FILES/SYMBOLS: src/pbl4/protocol/messages.py, src/pbl4/worker/process.py
 DEPENDS ON: T3.1
 EXPECTED CHANGE: Add optional cache_scope: str = "assigned_shard" to DatasetAssignment. In worker/process.py, if cache_scope == "all_shards", iterate all shard references in root manifest, download and verify each via ShardDownloader + ShardCache, and instantiate DatasetCache before sending SHARD_READY.
@@ -276,7 +280,7 @@ DONE WHEN: Worker successfully provisions and caches all shards under cache_scop
 ```text
 TASK: T4.1
 WHY: Expand StepStart message to carry assigned work_units and GradientMeta to carry compute_ms.
-SOURCE: docs/DBS_DESIGN.md §10, docs/DBS_IMPLEMENTATION_PLAN.md.md §9
+SOURCE: docs/DBS_DESIGN.md §10, docs/DBS_IMPLEMENTATION_PLAN.md §9
 FILES/SYMBOLS: src/pbl4/protocol/messages.py
 DEPENDS ON: T2.2, T3.2
 EXPECTED CHANGE: Add optional work_units: list[dict] to StepStart; validate non-empty, sum(sample_count) == expected_sample_count. Validate GradientMeta.compute_ms > 0 in Work Unit mode.
@@ -285,7 +289,7 @@ DONE WHEN: Serialization and deserialization roundtrip perfectly; invalid payloa
 
 TASK: T4.2
 WHY: Support processing multiple Work Units in a single step and aggregating local gradients by sample weight.
-SOURCE: docs/DBS_DESIGN.md §9, docs/DBS_IMPLEMENTATION_PLAN.md.md §10
+SOURCE: docs/DBS_DESIGN.md §9, docs/DBS_IMPLEMENTATION_PLAN.md §10
 FILES/SYMBOLS: src/pbl4/worker/training_loop.py
 DEPENDS ON: T4.1
 EXPECTED CHANGE: StepAssignment holds work_units tuple. TrainingLoop.compute() iterates over work_units, loads data from DatasetCache, invokes adapter.compute_loss_and_gradients(), accumulates gradients in FP64: sum(n_u * g_u) / sum(n_u), casts to FP32, returns single LocalGradient with total sample_count.
@@ -294,7 +298,7 @@ DONE WHEN: Unit test confirms: 1 unit equals standard behavior; multi-unit produ
 
 TASK: T4.3
 WHY: Accurately measure pure computation time (forward + backward + local accumulation) and transmit over DTP/1.
-SOURCE: docs/DBS_DESIGN.md §7.2, §10, docs/DBS_IMPLEMENTATION_PLAN.md.md §11
+SOURCE: docs/DBS_DESIGN.md §7.2, §10, docs/DBS_IMPLEMENTATION_PLAN.md §11
 FILES/SYMBOLS: src/pbl4/worker/process.py, src/pbl4/worker/worker_client.py
 DEPENDS ON: T4.2
 EXPECTED CHANGE: In worker/process.py, wrap loop.compute() with time.perf_counter() to compute compute_ms = (t_end - t_start) * 1000. Pass compute_ms into worker_client.send_gradient().
@@ -311,7 +315,7 @@ DONE WHEN: compute_ms strictly reflects compute duration (excluding network tran
 ```text
 TASK: T5.1
 WHY: Transfer compute_ms from incoming GradientMeta into Runtime Contribution dataclass.
-SOURCE: docs/DBS_IMPLEMENTATION_PLAN.md.md §11
+SOURCE: docs/DBS_IMPLEMENTATION_PLAN.md §11
 FILES/SYMBOLS: src/pbl4/runtime/contribution.py, src/pbl4/runtime/parameter_server.py
 DEPENDS ON: T4.3
 EXPECTED CHANGE: Add compute_ms: float to Contribution. In ParameterServer._to_contribution(), extract compute_ms from GradientMeta and populate Contribution.
@@ -320,7 +324,7 @@ DONE WHEN: Incoming gradient messages successfully construct Contribution with v
 
 TASK: T5.2
 WHY: Validate incoming contributions against canonical multi-unit BatchAssignment in StrictBSP.
-SOURCE: docs/DBS_DESIGN.md §4, §13, docs/DBS_IMPLEMENTATION_PLAN.md.md §12
+SOURCE: docs/DBS_DESIGN.md §4, §13, docs/DBS_IMPLEMENTATION_PLAN.md §12
 FILES/SYMBOLS: src/pbl4/runtime/synchronization/strict_bsp.py
 DEPENDS ON: T5.1
 EXPECTED CHANGE: In StrictBSP admission check, verify contribution.batch_ordinal == assignment.batch_ordinal and contribution.sample_count == assignment.sample_count. Keep N/N barrier logic unchanged.
@@ -329,7 +333,7 @@ DONE WHEN: Contributions matching canonical assignment admitted; mismatched samp
 
 TASK: T5.3
 WHY: Manage in-memory WorkloadPlan, record committed step metrics, and transition plans at epoch boundaries.
-SOURCE: docs/DBS_DESIGN.md §7, §12, docs/DBS_IMPLEMENTATION_PLAN.md.md §6
+SOURCE: docs/DBS_DESIGN.md §7, §12, docs/DBS_IMPLEMENTATION_PLAN.md §6
 FILES/SYMBOLS: src/pbl4/runtime/workload_scheduler.py (NEW)
 DEPENDS ON: T1.1, T5.1
 EXPECTED CHANGE: Implement WorkloadScheduler to track active WorkloadPlan per epoch, collect metrics from COMMITTED contributions only, evaluate new plan at epoch completion, and reject invalid stats (e.g. compute_ms <= 0).
@@ -338,7 +342,7 @@ DONE WHEN: Correctly transitions from Equal in epoch 0 to DBS in epoch 1 based o
 
 TASK: T5.4
 WHY: Wire WorkloadScheduler, BatchScheduler, and ParameterServer in Coordinator and RuntimeProcess.
-SOURCE: docs/DBS_DESIGN.md §4.2, §13, docs/DBS_IMPLEMENTATION_PLAN.md.md §13, §14
+SOURCE: docs/DBS_DESIGN.md §4.2, §13, docs/DBS_IMPLEMENTATION_PLAN.md §13, §14
 FILES/SYMBOLS: src/pbl4/runtime/coordinator.py, src/pbl4/runtime/process.py
 DEPENDS ON: T5.2, T5.3
 EXPECTED CHANGE: In RuntimeProcess, fetch all shard manifests to build global WorkUnit catalog, send cache_scope="all_shards" in DatasetAssignment, initialize WorkloadScheduler + BatchScheduler, pass active plan to open_step(), record stats on step COMMITTED, and transition epoch plans.
@@ -355,7 +359,7 @@ DONE WHEN: Coordinator smoothly runs multi-step training, opens steps with plan-
 ```text
 TASK: T6.1
 WHY: Enforce the canonical resume rule: boundary resume uses Equal for 1 epoch before DBS; mid-epoch resume runs Equal without stats collection.
-SOURCE: docs/DBS_DESIGN.md §12, docs/DBS_IMPLEMENTATION_PLAN.md.md §6, §16
+SOURCE: docs/DBS_DESIGN.md §12, docs/DBS_IMPLEMENTATION_PLAN.md §6, §16
 FILES/SYMBOLS: src/pbl4/runtime/workload_scheduler.py, src/pbl4/runtime/coordinator.py
 DEPENDS ON: T5.4
 EXPECTED CHANGE: Implement WorkloadScheduler.reset_after_resume(cursor). If cursor.next_batch_ordinal == 0, current epoch is Equal with stats collection enabled. If cursor.next_batch_ordinal > 0, current epoch is Equal with stats collection disabled. Checkpoint schema remains strictly V1.
@@ -364,7 +368,7 @@ DONE WHEN: Resuming at boundary or mid-epoch reproduces exact warm-up semantics 
 
 TASK: T6.2
 WHY: Emit observability event when WorkloadPlan changes at epoch boundary for benchmarking and UI visibility.
-SOURCE: docs/DBS_DESIGN.md §15, docs/DBS_IMPLEMENTATION_PLAN.md.md §15
+SOURCE: docs/DBS_DESIGN.md §15, docs/DBS_IMPLEMENTATION_PLAN.md §15
 FILES/SYMBOLS: src/pbl4/runtime/coordinator.py
 DEPENDS ON: T6.1
 EXPECTED CHANGE: When active WorkloadPlan changes at epoch boundary, emit workload.plan_changed event with epoch, policy, units_per_worker, and target_ratios. Do not add DB tables or alter snapshot schema.
@@ -381,7 +385,7 @@ DONE WHEN: Event is emitted on plan transition; failure to emit event does not b
 ```text
 TASK: T7.1
 WHY: End-to-end verification of DBS dynamic batch allocation with synthetic worker speed differences.
-SOURCE: docs/DBS_DESIGN.md §2, §7, docs/DBS_IMPLEMENTATION_PLAN.md.md §18 (Phase 7)
+SOURCE: docs/DBS_DESIGN.md §2, §7, docs/DBS_IMPLEMENTATION_PLAN.md §18 (Phase 7)
 FILES/SYMBOLS: tests/integration/test_dbs_heterogeneous_cluster.py (NEW)
 DEPENDS ON: T6.2
 EXPECTED CHANGE: Launch 3-worker cluster with synthetic compute delays (e.g. 10ms vs 20ms vs 40ms). Verify: epoch 0 runs Equal; epoch 1 shifts units to faster worker; N/N StrictBSP barrier holds; global model updates successfully.
@@ -390,7 +394,7 @@ DONE WHEN: Faster workers receive proportionally more Work Units; total K units 
 
 TASK: T7.2
 WHY: Negative path testing: worker disconnect, cache corruption, invalid compute_ms, and insufficient units.
-SOURCE: docs/DBS_DESIGN.md §13, docs/DBS_IMPLEMENTATION_PLAN.md.md §17
+SOURCE: docs/DBS_DESIGN.md §13, docs/DBS_IMPLEMENTATION_PLAN.md §17
 FILES/SYMBOLS: tests/integration/test_dbs_failure_semantics.py (NEW)
 DEPENDS ON: T7.1
 EXPECTED CHANGE: Verify that: worker disconnect fails attempt immediately; invalid compute_ms (<=0 or NaN) fails attempt at epoch boundary; cache miss after RUNNING fails attempt.
@@ -399,7 +403,7 @@ DONE WHEN: All failure paths trigger deterministic failure without hanging or si
 
 TASK: T7.3
 WHY: Final pre-merge verification across architecture boundaries, code formatting, and full regression test suite.
-SOURCE: docs/DBS_IMPLEMENTATION_PLAN.md.md §21 (Definition of Done)
+SOURCE: docs/DBS_IMPLEMENTATION_PLAN.md §21 (Definition of Done)
 FILES/SYMBOLS: scripts/check_architecture.py, src/, tests/
 DEPENDS ON: T7.2
 EXPECTED CHANGE: Run full test suite, architecture checker, and linter.
@@ -425,13 +429,13 @@ DONE WHEN: 100% tests pass, architecture check passes, ruff check passes with ze
 
 3. **Double-Precision FP64 Local Gradient Accumulation**:
    - *Decision*: In `TrainingLoop.compute()`, accumulate multiple Work Unit gradients as $\sum n_u \cdot g_u$ using float64 tensors before dividing by $\sum n_u$ and casting back to float32.
-   - *Evidence*: `docs/DBS_IMPLEMENTATION_PLAN.md.md §10` specifies: "total = sum(n_u * gradient_u) bằng FP64 accumulator; divide by total_sample_count; cast FP32".
+   - *Evidence*: `docs/DBS_IMPLEMENTATION_PLAN.md §10` specifies: "total = sum(n_u * gradient_u) bằng FP64 accumulator; divide by total_sample_count; cast FP32".
    - *Why implementation detail*: Numerical precision optimization preventing floating point drift across multiple small batches.
    - *Alternatives rejected*: Accumulating in pure FP32 (rejected: prone to accumulation truncation errors when $K$ is large).
 
 4. **Deriving Epoch Boundary in Coordinator**:
    - *Decision*: Determine epoch boundary transition directly when `next_cursor.epoch > operation.epoch` after checkpoint progression.
-   - *Evidence*: `docs/DBS_IMPLEMENTATION_PLAN.md.md §7, §13` specifies that `RecoveryCursor` progression is already the canonical source of truth for step and epoch progression.
+   - *Evidence*: `docs/DBS_IMPLEMENTATION_PLAN.md §7, §13` specifies that `RecoveryCursor` progression is already the canonical source of truth for step and epoch progression.
    - *Why implementation detail*: Eliminates the need for separate boolean flags or extra state variables.
    - *Alternatives rejected*: Adding custom epoch counter variables inside `Coordinator` (rejected: risks state desynchronization with `RecoveryCursor`).
 

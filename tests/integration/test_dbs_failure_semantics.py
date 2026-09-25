@@ -312,9 +312,7 @@ def test_failure_cache_miss_after_running_raises(tmp_path) -> None:
         input_shape=(3, 2, 2),
     )
     shard_cache = ShardCache(tmp_path / "cache")
-    key0 = ShardCacheKey(
-        artifacts.dataset_build_id, artifacts.dataset_manifest_hash, shard_id=0
-    )
+    key0 = ShardCacheKey(artifacts.dataset_build_id, artifacts.dataset_manifest_hash, shard_id=0)
     cached0 = shard_cache.publish(
         key0,
         artifacts.root_manifest_bytes,
