@@ -200,6 +200,24 @@ def test_03_concurrent_start_collision_mapping(pg_conn):
                 now,
             ),
         )
+        for i in range(3):
+            cur.execute(
+                """
+                INSERT INTO nodes (
+                    node_id, display_name, credential_hash, credential_created_at,
+                    capabilities_jsonb, enrolled_at, state
+                ) VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s)
+                """,
+                (
+                    f"node-coll-{job_id}-{i}",
+                    f"Node {i}",
+                    "dummy_hash",
+                    now,
+                    "{}",
+                    now,
+                    "ONLINE",
+                ),
+            )
         pg_conn.commit()
 
     barrier = threading.Barrier(2)

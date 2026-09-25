@@ -169,6 +169,12 @@ class DtpControlMessage:
         return cls(value)
 
 
+ERROR_CODE_WORKER_ADMISSION_REQUIRED: str = "WORKER_ADMISSION_REQUIRED"
+ERROR_CODE_WORKER_ADMISSION_INVALID: str = "WORKER_ADMISSION_INVALID"
+ERROR_CODE_WORKER_ADMISSION_EXPIRED: str = "WORKER_ADMISSION_EXPIRED"
+ERROR_CODE_WORKER_ADMISSION_SCOPE_MISMATCH: str = "WORKER_ADMISSION_SCOPE_MISMATCH"
+
+
 class Hello(DtpControlMessage):
     MESSAGE_TYPE = MESSAGE_TYPE_HELLO
     REQUIRED = {
@@ -180,6 +186,12 @@ class Hello(DtpControlMessage):
         "supported_tensor_encoding": "string_list",
         "supported_strategy_capabilities": "string_list",
     }
+    OPTIONAL = {
+        "attempt_id": "string",
+        "allocation_id": "string",
+        "node_id": "string",
+        "worker_join_token": "string",
+    }
     ENUMS = {"role": frozenset({"worker"})}
 
     def _validate(self, data: dict[str, object]) -> None:
@@ -187,6 +199,25 @@ class Hello(DtpControlMessage):
             raise ProtocolError("HELLO protocol_version must be 1")
         if TENSOR_ENCODING_FP32_LE_V1 not in data["supported_tensor_encoding"]:
             raise ProtocolError("HELLO must advertise fp32_le_v1")
+
+        managed_fields = {"attempt_id", "allocation_id", "node_id", "worker_join_token"}
+        present_managed = managed_fields.intersection(data.keys())
+        if present_managed and len(present_managed) != len(managed_fields):
+            missing = sorted(managed_fields - present_managed)
+            raise ProtocolError(
+                f"Managed identity fields in HELLO must be all-or-none; missing: {missing}"
+            )
+
+    @property
+    def is_managed(self) -> bool:
+        """Indicate whether the worker connected with managed control-plane credentials."""
+        return "attempt_id" in self.values
+
+    def __repr__(self) -> str:
+        d = dict(self.values)
+        if "worker_join_token" in d:
+            d["worker_join_token"] = "***REDACTED***"
+        return f"Hello({d})"
 
 
 class HelloAck(DtpControlMessage):

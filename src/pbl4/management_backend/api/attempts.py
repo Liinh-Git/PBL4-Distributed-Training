@@ -68,6 +68,8 @@ def _session_to_item(row: dict) -> WorkerSessionItem:
         last_heartbeat_at=row.get("last_heartbeat_at"),
         disconnected_at=row.get("disconnected_at"),
         failure_code=row.get("failure_code"),
+        node_id=row.get("node_id"),
+        allocation_id=row.get("allocation_id"),
     )
 
 

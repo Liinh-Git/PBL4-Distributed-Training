@@ -49,6 +49,33 @@ class BackendSettings(BaseSettings):
     # ─── Training Cluster Defaults ────────────────────────────────────────────
     expected_workers: int = Field(default=3, alias="EXPECTED_WORKERS")
 
+    # ─── Worker Admission & Node Agent ────────────────────────────────────────
+    worker_admission_secret: str | None = Field(
+        default=None,
+        alias="PBL4_WORKER_ADMISSION_SECRET",
+        repr=False,
+    )
+    worker_join_token_ttl_seconds: int = Field(
+        default=600,
+        alias="WORKER_JOIN_TOKEN_TTL_SECONDS",
+    )
+    node_heartbeat_timeout_seconds: float = Field(
+        default=15.0,
+        alias="NODE_HEARTBEAT_TIMEOUT_SECONDS",
+    )
+    node_heartbeat_interval_seconds: float = Field(
+        default=5.0,
+        alias="NODE_HEARTBEAT_INTERVAL_SECONDS",
+    )
+    node_telemetry_interval_seconds: float = Field(
+        default=5.0,
+        alias="NODE_TELEMETRY_INTERVAL_SECONDS",
+    )
+    worker_start_timeout_seconds: float = Field(
+        default=60.0,
+        alias="WORKER_START_TIMEOUT_SECONDS",
+    )
+
     # ─── Logging ──────────────────────────────────────────────────────────────
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
@@ -84,6 +111,7 @@ class BackendSettings(BaseSettings):
         "runtime_management_port",
         "dataset_manager_port",
         "runtime_advertised_host",
+        "worker_admission_secret",
         mode="before",
     )
     @classmethod

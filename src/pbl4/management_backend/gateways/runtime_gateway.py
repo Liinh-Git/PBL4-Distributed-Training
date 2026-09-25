@@ -307,7 +307,10 @@ class RuntimeGateway:
     def handle_state_snapshot(self, snapshot: dict[str, Any]) -> None:
         """STATE_SNAPSHOT -> authoritative Runtime projection reconciliation."""
         try:
-            snapshot = StateSnapshot.from_dict(snapshot).to_dict()
+            if isinstance(snapshot, StateSnapshot):
+                snapshot = snapshot.to_dict()
+            else:
+                snapshot = StateSnapshot.from_dict(snapshot).to_dict()
         except ProtocolError as exc:
             logger.warning("Ignoring malformed STATE_SNAPSHOT: %s", exc)
             return
@@ -408,6 +411,8 @@ class RuntimeGateway:
                         node_label=worker["node_label"],
                         state=worker["state"],
                         last_heartbeat_at=heartbeat,
+                        node_id=worker.get("node_id"),
+                        allocation_id=worker.get("allocation_id"),
                     )
                     if updated is None:
                         protocol_version = worker.get("protocol_version")
@@ -430,6 +435,8 @@ class RuntimeGateway:
                             state=worker["state"],
                             connected_at=connected_at,
                             last_heartbeat_at=heartbeat,
+                            node_id=worker.get("node_id"),
+                            allocation_id=worker.get("allocation_id"),
                         )
         except (psycopg.OperationalError, psycopg_pool.PoolTimeout) as exc:
             logger.warning(

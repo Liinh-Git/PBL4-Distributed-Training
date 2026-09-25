@@ -46,10 +46,26 @@ def main() -> None:
     parser.add_argument("--checkpoint-dir", required=True)
     parser.add_argument("--parameter-manifest", required=True)
     parser.add_argument("--heartbeat-timeout", type=float, default=120.0)
+    parser.add_argument(
+        "--allow-unmanaged-workers",
+        action="store_true",
+        default=False,
+        help="Allow unmanaged workers without join tokens (for local testing/dev only).",
+    )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
     if args.port is None or args.management_port is None:
         parser.error("--port and --management-port are required")
+
+    import os
+
+    worker_admission_secret = os.getenv("PBL4_WORKER_ADMISSION_SECRET")
+    require_worker_admission = not args.allow_unmanaged_workers
+    if require_worker_admission and not worker_admission_secret:
+        parser.error(
+            "PBL4_WORKER_ADMISSION_SECRET environment variable is required unless "
+            "--allow-unmanaged-workers is explicitly enabled"
+        )
 
     from pbl4.runtime.process import RuntimeProcess, load_parameter_manifest
 
@@ -65,6 +81,8 @@ def main() -> None:
         checkpoint_dir=Path(args.checkpoint_dir),
         parameter_manifest=load_parameter_manifest(Path(args.parameter_manifest)),
         heartbeat_timeout_seconds=args.heartbeat_timeout,
+        worker_admission_secret=worker_admission_secret,
+        require_worker_admission=require_worker_admission,
     )
     signal.signal(signal.SIGINT, lambda *_: process.stop())
     signal.signal(signal.SIGTERM, lambda *_: process.stop())
