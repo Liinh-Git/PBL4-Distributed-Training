@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from pbl4.adapter.pytorch_adapter import PyTorchAdapter
 from pbl4.protocol.messages import DatasetAssignment, Error, ShardReady, StepStart, Stop
 from pbl4.protocol.transfer import CompletedTensorTransfer
 from pbl4.worker.config import WorkerConfig
+from pbl4.worker.dataset_cache import DatasetCache
 from pbl4.worker.shard_cache import ShardCache, ShardCacheKey
 from pbl4.worker.shard_downloader import ShardDownloader
 from pbl4.worker.training_loop import StepAssignment, TrainingLoop
@@ -54,6 +56,7 @@ class WorkerProcess:
         initialization_seed: int,
         device: str = "cpu",
         connect_timeout_seconds: float = 60.0,
+        opener: Callable[..., object] | None = None,
     ) -> None:
         self._config = config
         self._adapter = PyTorchAdapter(
@@ -63,12 +66,14 @@ class WorkerProcess:
         )
         self._initialization_seed = initialization_seed
         self._connect_timeout = connect_timeout_seconds
+        self._opener = opener
         self._stop = threading.Event()
         self._failed = threading.Event()
         self._busy = threading.Event()
         self._lock = threading.Lock()
         self._loop: TrainingLoop | None = None
         self._shard_key: ShardCacheKey | None = None
+        self._dataset_cache: DatasetCache | None = None
         self._pending: StepAssignment | None = None
         self._last_operation: int | None = None
         self._last_step: int | None = None
@@ -83,6 +88,11 @@ class WorkerProcess:
             parameter_handler=self._on_parameters,
             disconnect_handler=self._on_disconnect,
         )
+
+    @property
+    def dataset_cache(self) -> DatasetCache | None:
+        with self._lock:
+            return self._dataset_cache
 
     @property
     def manifest_hash(self) -> str:
@@ -160,15 +170,50 @@ class WorkerProcess:
             int(assignment.shard_id),
         )
         cache_root = Path(self._config.cache_dir)
-        result = ShardDownloader(
+        downloader_kwargs: dict[str, object] = {"timeout_seconds": 60.0}
+        if self._opener is not None:
+            downloader_kwargs["opener"] = self._opener
+        downloader = ShardDownloader(
             str(assignment.artifact_base_url),
             ShardCache(cache_root),
             cache_root / ".downloads",
-            timeout_seconds=60.0,
-        ).provision(key)
+            **downloader_kwargs,
+        )
+        result = downloader.provision(key)
+        dataset_cache: DatasetCache | None = None
+        if assignment.cache_scope == "all_shards":
+            cached_shards = {key.shard_id: result.shard}
+            references = result.shard.root_manifest.get("shards")
+            if not isinstance(references, list) or not references:
+                raise ValueError("Root Dataset Manifest contains no shards")
+            for ref in references:
+                if not isinstance(ref, dict) or "shard_id" not in ref:
+                    raise ValueError("Root Dataset Manifest contains an invalid shard reference")
+                s_id = int(ref["shard_id"])
+                if s_id not in cached_shards:
+                    s_key = ShardCacheKey(
+                        str(assignment.dataset_build_id),
+                        str(assignment.dataset_manifest_hash),
+                        s_id,
+                    )
+                    s_result = downloader.provision(s_key)
+                    cached_shards[s_id] = s_result.shard
+            dataset_cache = DatasetCache(
+                str(assignment.dataset_build_id),
+                str(assignment.dataset_manifest_hash),
+                cached_shards,
+                root_manifest=result.shard.root_manifest,
+            )
+            dataset_cache.verify_all()
+
         with self._lock:
-            self._loop = TrainingLoop(self._adapter, result.shard, 0)
+            self._loop = TrainingLoop(
+                self._adapter,
+                dataset_cache if dataset_cache is not None else result.shard,
+                0,
+            )
             self._shard_key = key
+            self._dataset_cache = dataset_cache
         shard_manifest = result.shard.shard_manifest
         root_reference = result.shard.root_manifest["shards"][key.shard_id]
         self._client.send_shard_ready(
@@ -192,12 +237,13 @@ class WorkerProcess:
                 initialization_seed=self._initialization_seed,
             )
         logger.info(
-            "Shard ready shard_id=%s samples=%s batches=%s cache_reused=%s bytes=%s",
+            "Shard ready shard_id=%s samples=%s batches=%s cache_reused=%s bytes=%s cache_scope=%s",
             key.shard_id,
             shard_manifest["sample_count"],
             shard_manifest["batch_count"],
             result.cache_reused,
             result.bytes_downloaded,
+            assignment.cache_scope,
         )
 
     def _compute(self, message: StepStart, operation_id: int) -> None:
@@ -214,12 +260,13 @@ class WorkerProcess:
                 operation_id=operation_id,
                 step_id=int(message.step_id),
                 input_model_version=int(message.model_version),
-                shard_id=int(message.shard_id),
-                batch_id=int(message.batch_id),
                 batch_ordinal=int(message.batch_ordinal),
+                work_units=message.work_units,
                 expected_sample_count=int(message.expected_sample_count),
             )
+            t_start = time.perf_counter()
             computed = loop.compute(assignment)
+            compute_ms = max((time.perf_counter() - t_start) * 1000.0, 0.001)
             with self._lock:
                 self._pending = assignment
                 self._epoch = int(message.epoch)
@@ -234,6 +281,7 @@ class WorkerProcess:
                 sample_count=computed.local_gradient.sample_count,
                 tensor_id=self._client.worker_id,
                 loss=computed.local_gradient.loss,
+                compute_ms=compute_ms,
             )
         except Exception:
             self._busy.clear()

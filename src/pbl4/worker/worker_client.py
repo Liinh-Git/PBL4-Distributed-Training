@@ -228,6 +228,7 @@ class WorkerClient:
         sample_count: int,
         tensor_id: int = 0,
         loss: float | None = None,
+        compute_ms: float | None = None,
     ) -> None:
         session_id, worker_id = self._identity()
         chunk_count = (len(data) + self.max_tensor_chunk_bytes - 1) // self.max_tensor_chunk_bytes
@@ -246,6 +247,8 @@ class WorkerClient:
         }
         if loss is not None:
             values["loss"] = loss
+        if compute_ms is not None and compute_ms > 0:
+            values["compute_ms"] = float(compute_ms)
         meta = GradientMeta.from_dict(values)
         end = GradientEnd.from_dict(
             {

@@ -113,6 +113,53 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
         errors.append("training_seed is required.")
     elif isinstance(training_seed, bool) or not isinstance(training_seed, int):
         errors.append("training_seed must be an integer (boolean values are rejected).")
+    expected_workers = 3
+    workload_policy = requested_contract.get("workload_policy", "equal")
+    if workload_policy not in {"equal", "dbs"}:
+        errors.append(f"Unsupported workload_policy '{workload_policy}'. Must be 'equal' or 'dbs'.")
+
+    raw_wups = requested_contract.get("work_units_per_step")
+    wups: int | None = None
+    if isinstance(raw_wups, bool):
+        errors.append("work_units_per_step must be an integer (boolean values are rejected).")
+    elif raw_wups is not None and (not isinstance(raw_wups, int) or raw_wups <= 0):
+        errors.append("work_units_per_step must be a positive integer.")
+    elif raw_wups is not None:
+        wups = raw_wups
+
+    if workload_policy == "equal":
+        k = wups if wups is not None else expected_workers
+        if k < expected_workers:
+            errors.append(
+                f"work_units_per_step ({k}) must be >= expected_workers "
+                f"({expected_workers}) for equal policy."
+            )
+    elif workload_policy == "dbs":
+        if wups is None:
+            errors.append("work_units_per_step is required when workload_policy is 'dbs'.")
+            k = expected_workers + 1
+        else:
+            k = wups
+            if k <= expected_workers:
+                errors.append(
+                    f"work_units_per_step ({k}) must be strictly greater than "
+                    f"expected_workers ({expected_workers}) for dbs policy."
+                )
+    else:
+        k = expected_workers
+
+    if build is not None:
+        batch_size = build.get("batch_size")
+        if (
+            batch_size is None
+            or isinstance(batch_size, bool)
+            or not isinstance(batch_size, int)
+            or batch_size <= 0
+        ):
+            errors.append(
+                f"Dataset build '{dsb_id}' must have a positive integer batch_size, "
+                f"got {batch_size}."
+            )
 
     if errors or build is None or model_meta is None:
         raise ContractResolutionError("Contract resolution failed", errors)
@@ -208,6 +255,10 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
             "epochs": epochs,
             "learning_rate": float(lr),
             "training_seed": training_seed,
+        },
+        "workload": {
+            "policy": workload_policy,
+            "work_units_per_step": k,
         },
         "synchronization": {
             "training_strategy": "strict_bsp",

@@ -426,6 +426,7 @@ class ParameterServer:
     def _to_contribution(self, transfer: CompletedTensorTransfer) -> Contribution:
         meta = transfer.metadata
         identity = transfer.identity
+        compute_ms = float(meta["compute_ms"]) if "compute_ms" in meta else 0.0
         return Contribution.from_gradient(
             np.frombuffer(transfer.data, dtype="<f4").astype(np.float32, copy=True),
             attempt_id=str(meta["attempt_id"]),
@@ -440,6 +441,7 @@ class ParameterServer:
             sample_count=int(meta["sample_count"]),
             parameter_manifest_hash=str(meta["parameter_manifest_hash"]),
             tensor_id=identity.tensor_id,
+            compute_ms=compute_ms,
         )
 
     @staticmethod
