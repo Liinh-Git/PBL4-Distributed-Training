@@ -141,6 +141,8 @@ class WorkerSessionItem(BaseModel):
     last_heartbeat_at: datetime | None = None
     disconnected_at: datetime | None = None
     failure_code: str | None = None
+    node_id: str | None = None
+    allocation_id: str | None = None
 
 
 class WorkerDetail(BaseModel):

@@ -19,15 +19,22 @@ import psycopg.errors
 
 from pbl4.management_backend.gateways.runtime_gateway import RuntimeUnavailableError, get_gateway
 from pbl4.management_backend.repositories import (
+    allocation_repository,
     attempt_repository,
     checkpoint_repository,
     command_repository,
     event_repository,
     job_repository,
+    node_repository,
     step_repository,
     worker_session_repository,
 )
 from pbl4.management_backend.services import idempotency, job_service
+from pbl4.management_backend.services.allocation_service import AllocationService
+from pbl4.management_backend.services.cluster_scheduler import (
+    ClusterScheduler,
+    NodeCapacityUnavailableError,
+)
 from pbl4.management_backend.services.dataset_service import (
     InvalidCursorError as InvalidCursorError,
 )
@@ -49,6 +56,8 @@ PUBLIC_COMMAND_ERROR_CODES = {
     "COMMAND_REJECTED",
     "INVALID_STATE",
     "JOB_NOT_READY",
+    "NODE_CAPACITY_UNAVAILABLE",
+    "WORKER_SPAWN_FAILED",
 }
 
 
@@ -219,6 +228,40 @@ def _new_command_id() -> str:
     return str(uuid.uuid4())
 
 
+def _select_and_create_allocations(
+    conn: psycopg.Connection,
+    attempt_id: str,
+    resolved_contract: dict[str, Any] | None,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    sync_cfg = (resolved_contract or {}).get("synchronization") or {}
+    expected_workers = sync_cfg.get("expected_workers")
+    if (
+        expected_workers is None
+        or not isinstance(expected_workers, int)
+        or isinstance(expected_workers, bool)
+        or expected_workers <= 0
+    ):
+        raise ValueError(
+            f"Invalid or missing expected_workers in resolved_contract['synchronization']: {expected_workers!r}"
+        )
+
+    online_nodes = node_repository.list_nodes(conn, state=node_repository.NODE_STATE_ONLINE, limit=1000)
+    active_allocs = allocation_repository.list_active(conn)
+    placements = ClusterScheduler.select_placements(
+        expected_workers=expected_workers,
+        nodes=online_nodes,
+        active_allocations=active_allocs,
+    )
+
+    return AllocationService.create_allocations_for_attempt(
+        conn,
+        attempt_id=attempt_id,
+        placements=placements,
+        now=now,
+    )
+
+
 # ─── Start / Retry / Resume ──────────────────────────────────────────────────
 
 
@@ -266,16 +309,6 @@ def start_job(conn: psycopg.Connection, job_id: str, note: str | None = None) ->
         "note": note,
     }
 
-    cmd_row = command_repository.create_command(
-        conn,
-        command_id=command_id,
-        command_type="START_ATTEMPT",
-        target_type="ATTEMPT",
-        target_id=attempt_id,
-        request=request_payload,
-        requested_at=now,
-    )
-
     try:
         with conn.transaction():
             attempt_row = attempt_repository.create_attempt(
@@ -285,6 +318,16 @@ def start_job(conn: psycopg.Connection, job_id: str, note: str | None = None) ->
                 contract_hash=job["contract_hash"],
                 execution_mode="FRESH",
                 created_at=now,
+            )
+            _select_and_create_allocations(conn, attempt_id=attempt_id, resolved_contract=res, now=now)
+            cmd_row = command_repository.create_command(
+                conn,
+                command_id=command_id,
+                command_type="START_ATTEMPT",
+                target_type="ATTEMPT",
+                target_id=attempt_id,
+                request=request_payload,
+                requested_at=now,
             )
     except psycopg.errors.UniqueViolation as exc:
         raise AttemptConflictError(
@@ -328,16 +371,6 @@ def retry_job(conn: psycopg.Connection, job_id: str) -> tuple[dict, dict]:
         "requested_at": now.isoformat(),
     }
 
-    cmd_row = command_repository.create_command(
-        conn,
-        command_id=command_id,
-        command_type="START_ATTEMPT",
-        target_type="ATTEMPT",
-        target_id=attempt_id,
-        request=request_payload,
-        requested_at=now,
-    )
-
     try:
         with conn.transaction():
             attempt_row = attempt_repository.create_attempt(
@@ -347,6 +380,16 @@ def retry_job(conn: psycopg.Connection, job_id: str) -> tuple[dict, dict]:
                 contract_hash=job["contract_hash"],
                 execution_mode="RETRY_FROM_START",
                 created_at=now,
+            )
+            _select_and_create_allocations(conn, attempt_id=attempt_id, resolved_contract=res, now=now)
+            cmd_row = command_repository.create_command(
+                conn,
+                command_id=command_id,
+                command_type="START_ATTEMPT",
+                target_type="ATTEMPT",
+                target_id=attempt_id,
+                request=request_payload,
+                requested_at=now,
             )
     except psycopg.errors.UniqueViolation as exc:
         raise AttemptConflictError(
@@ -415,16 +458,6 @@ def resume_job(conn: psycopg.Connection, job_id: str, checkpoint_id: str) -> tup
         "requested_at": now.isoformat(),
     }
 
-    cmd_row = command_repository.create_command(
-        conn,
-        command_id=command_id,
-        command_type="START_ATTEMPT",
-        target_type="ATTEMPT",
-        target_id=attempt_id,
-        request=request_payload,
-        requested_at=now,
-    )
-
     try:
         with conn.transaction():
             attempt_row = attempt_repository.create_attempt(
@@ -435,6 +468,16 @@ def resume_job(conn: psycopg.Connection, job_id: str, checkpoint_id: str) -> tup
                 execution_mode="RESUME",
                 resume_from_checkpoint_id=checkpoint_id,
                 created_at=now,
+            )
+            _select_and_create_allocations(conn, attempt_id=attempt_id, resolved_contract=res, now=now)
+            cmd_row = command_repository.create_command(
+                conn,
+                command_id=command_id,
+                command_type="START_ATTEMPT",
+                target_type="ATTEMPT",
+                target_id=attempt_id,
+                request=request_payload,
+                requested_at=now,
             )
     except psycopg.errors.UniqueViolation as exc:
         raise AttemptConflictError(
@@ -782,6 +825,123 @@ def _extract_command_payload(cmd_row: dict[str, Any]) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _dispatch_workers_for_attempt(
+    db_module: Any,
+    *,
+    attempt_id: str,
+    job: dict[str, Any] | None,
+    attempt_row: dict[str, Any],
+    node_gateway: Any | None = None,
+    runtime_gateway: Any | None = None,
+) -> None:
+    from pbl4.management_backend.gateways.node_control_gateway import get_node_control_gateway
+
+    node_gw = node_gateway or get_node_control_gateway()
+    rt_gw = runtime_gateway or get_gateway()
+
+    with db_module.transaction() as conn:
+        allocations = AllocationService.list_for_attempt(conn, attempt_id)
+
+    dispatched: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+
+    for alloc in allocations:
+        alloc_id = str(alloc["allocation_id"])
+        if alloc.get("actual_state") in (
+            allocation_repository.ACTUAL_STATE_DISPATCHED,
+            allocation_repository.ACTUAL_STATE_STARTED,
+        ):
+            dispatched.append(alloc)
+            continue
+
+        if failed:
+            with db_module.transaction() as conn:
+                updated = AllocationService.record_failed(
+                    conn,
+                    alloc_id,
+                    failure_code="NODE_DISPATCH_FAILED",
+                    failure_message="Cancelled due to prior allocation dispatch failure in attempt.",
+                )
+            failed.append(updated)
+            continue
+
+        try:
+            start_cmd = AllocationService.build_start_worker_command(
+                allocation=alloc,
+                job=job,
+                attempt=attempt_row,
+            )
+            with db_module.transaction() as conn:
+                updated = AllocationService.dispatch_allocation(
+                    conn,
+                    alloc_id,
+                    command=start_cmd,
+                    gateway=node_gw,
+                )
+            if updated.get("actual_state") == allocation_repository.ACTUAL_STATE_FAILED:
+                failed.append(updated)
+            else:
+                dispatched.append(updated)
+        except Exception as exc:
+            logger.error("Failed to build/dispatch START_WORKER for alloc %s: %s", alloc_id, exc)
+            with db_module.transaction() as conn:
+                updated = AllocationService.record_failed(
+                    conn,
+                    alloc_id,
+                    failure_code="NODE_DISPATCH_FAILED",
+                    failure_message=f"Dispatch failed: {exc}",
+                )
+            failed.append(updated)
+
+    if failed:
+        logger.warning(
+            "Partial failure dispatching workers for attempt %s (%d succeeded, %d failed). Aborting attempt.",
+            attempt_id,
+            len(dispatched),
+            len(failed),
+        )
+        # Send STOP_WORKER best-effort to already dispatched allocations
+        for d_alloc in dispatched:
+            try:
+                stop_cmd = AllocationService.build_stop_worker_command(
+                    allocation=d_alloc,
+                    force=True,
+                )
+                node_gw.send_stop_worker(str(d_alloc["node_id"]), command=stop_cmd)
+                with db_module.transaction() as conn:
+                    allocation_repository.update_desired_state(
+                        conn,
+                        str(d_alloc["allocation_id"]),
+                        allocation_repository.DESIRED_STATE_STOPPED,
+                    )
+            except Exception as exc:
+                logger.warning("Failed best-effort STOP_WORKER to node %s: %s", d_alloc.get("node_id"), exc)
+
+        # Send ABORT_ATTEMPT to Runtime
+        try:
+            with db_module.transaction() as conn:
+                abort_cmd_row = abort_attempt(
+                    conn,
+                    attempt_id,
+                    reason="Partial worker dispatch failure",
+                )
+            rt_gw.send_command_and_wait_result(
+                command_type="ABORT_ATTEMPT",
+                command_id=str(abort_cmd_row["command_id"]),
+                target_id=attempt_id,
+                payload=_extract_command_payload(abort_cmd_row),
+                timeout=5.0,
+            )
+        except Exception as exc:
+            logger.error("Failed to send ABORT_ATTEMPT to Runtime for attempt %s: %s", attempt_id, exc)
+
+        raise CommandFailedError(
+            f"Failed to dispatch workers for attempt '{attempt_id}': {len(failed)} worker(s) failed.",
+            command_id=str(attempt_row.get("command_id") or attempt_id),
+            code="WORKER_SPAWN_FAILED",
+        )
+
+
 def execute_start_job(
     db_module: Any,
     job_id: str,
@@ -871,6 +1031,52 @@ def execute_start_job(
         raise
 
     cmd_state = cmd_result["state"]
+    if cmd_state in ("REJECTED", "FAILED"):
+        _handle_command_outcome(
+            db_module,
+            cmd_result=cmd_result,
+            command_id=command_id,
+            target_id=attempt_id,
+            scope="JOB_START",
+            effective_key=effective_key,
+            success_response_payload={},
+            default_reject_code="ACTIVE_ATTEMPT_EXISTS",
+        )
+
+    # Runtime ACCEPTED -> Dispatch START_WORKER to selected Nodes
+    with db_module.transaction() as conn:
+        job = job_repository.get_job(conn, job_id)
+
+    job_row = job if job is not None else {"resolved_contract": dispatch_payload.get("resolved_contract")}
+    try:
+        _dispatch_workers_for_attempt(
+            db_module,
+            attempt_id=attempt_id,
+            job=job_row,
+            attempt_row=attempt_row,
+            runtime_gateway=gw,
+        )
+    except Exception as exc:
+        err_code = getattr(exc, "code", "WORKER_SPAWN_FAILED")
+        err_payload = {
+            "error": {
+                "code": err_code,
+                "message": str(exc),
+                "command_id": command_id,
+            }
+        }
+        with db_module.transaction() as conn:
+            idempotency.complete_record(
+                conn,
+                endpoint_semantic_scope="JOB_START",
+                idempotency_key=effective_key,
+                response_status_code=502,
+                response_body=err_payload,
+                command_id=command_id,
+                resource_id=attempt_id,
+            )
+        raise
+
     resp_payload = {
         "command_id": command_id,
         "command_type": "START_ATTEMPT",
@@ -981,6 +1187,52 @@ def execute_retry_job(
         raise
 
     cmd_state = cmd_result["state"]
+    if cmd_state in ("REJECTED", "FAILED"):
+        _handle_command_outcome(
+            db_module,
+            cmd_result=cmd_result,
+            command_id=command_id,
+            target_id=attempt_id,
+            scope="JOB_RETRY",
+            effective_key=effective_key,
+            success_response_payload={},
+            default_reject_code="ACTIVE_ATTEMPT_EXISTS",
+        )
+
+    # Runtime ACCEPTED -> Dispatch START_WORKER to selected Nodes
+    with db_module.transaction() as conn:
+        job = job_repository.get_job(conn, job_id)
+
+    job_row = job if job is not None else {"resolved_contract": dispatch_payload.get("resolved_contract")}
+    try:
+        _dispatch_workers_for_attempt(
+            db_module,
+            attempt_id=attempt_id,
+            job=job_row,
+            attempt_row=attempt_row,
+            runtime_gateway=gw,
+        )
+    except Exception as exc:
+        err_code = getattr(exc, "code", "WORKER_SPAWN_FAILED")
+        err_payload = {
+            "error": {
+                "code": err_code,
+                "message": str(exc),
+                "command_id": command_id,
+            }
+        }
+        with db_module.transaction() as conn:
+            idempotency.complete_record(
+                conn,
+                endpoint_semantic_scope="JOB_RETRY",
+                idempotency_key=effective_key,
+                response_status_code=502,
+                response_body=err_payload,
+                command_id=command_id,
+                resource_id=attempt_id,
+            )
+        raise
+
     resp_payload = {
         "command_id": command_id,
         "command_type": "START_ATTEMPT",
@@ -1092,6 +1344,52 @@ def execute_resume_job(
         raise
 
     cmd_state = cmd_result["state"]
+    if cmd_state in ("REJECTED", "FAILED"):
+        _handle_command_outcome(
+            db_module,
+            cmd_result=cmd_result,
+            command_id=command_id,
+            target_id=attempt_id,
+            scope="JOB_RESUME",
+            effective_key=effective_key,
+            success_response_payload={},
+            default_reject_code="CHECKPOINT_NOT_COMPLETE",
+        )
+
+    # Runtime ACCEPTED -> Dispatch START_WORKER to selected Nodes
+    with db_module.transaction() as conn:
+        job = job_repository.get_job(conn, job_id)
+
+    job_row = job if job is not None else {"resolved_contract": dispatch_payload.get("resolved_contract")}
+    try:
+        _dispatch_workers_for_attempt(
+            db_module,
+            attempt_id=attempt_id,
+            job=job_row,
+            attempt_row=attempt_row,
+            runtime_gateway=gw,
+        )
+    except Exception as exc:
+        err_code = getattr(exc, "code", "WORKER_SPAWN_FAILED")
+        err_payload = {
+            "error": {
+                "code": err_code,
+                "message": str(exc),
+                "command_id": command_id,
+            }
+        }
+        with db_module.transaction() as conn:
+            idempotency.complete_record(
+                conn,
+                endpoint_semantic_scope="JOB_RESUME",
+                idempotency_key=effective_key,
+                response_status_code=502,
+                response_body=err_payload,
+                command_id=command_id,
+                resource_id=attempt_id,
+            )
+        raise
+
     resp_payload = {
         "command_id": command_id,
         "command_type": "START_ATTEMPT",

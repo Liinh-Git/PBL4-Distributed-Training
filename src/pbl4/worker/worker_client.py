@@ -62,6 +62,11 @@ class WorkerClient:
         *,
         node_label: str,
         manifest: ParameterManifest,
+        client_instance_id: str | None = None,
+        attempt_id: str | None = None,
+        allocation_id: str | None = None,
+        node_id: str | None = None,
+        worker_join_token: str | None = None,
         message_handler: MessageHandler | None = None,
         parameter_handler: ParameterHandler | None = None,
         disconnect_handler: DisconnectHandler | None = None,
@@ -69,6 +74,11 @@ class WorkerClient:
         self._transport = TcpClient(host, port, timeout=None, connect_timeout=5.0)
         self.node_label = node_label
         self.manifest = manifest
+        self.client_instance_id = client_instance_id or str(uuid4())
+        self.managed_attempt_id = attempt_id
+        self.allocation_id = allocation_id
+        self.node_id = node_id
+        self.worker_join_token = worker_join_token
         self._message_handler = message_handler
         self._parameter_handler = parameter_handler
         self._disconnect_handler = disconnect_handler
@@ -90,23 +100,30 @@ class WorkerClient:
 
     def connect(self) -> HelloAck:
         self._transport.connect()
-        hello = Hello.from_dict(
-            {
-                "node_label": self.node_label,
-                "client_instance_id": str(uuid4()),
-                "role": "worker",
-                "protocol_version": 1,
-                "framework_adapter": "pytorch",
-                "supported_tensor_encoding": ["fp32_le_v1"],
-                "supported_strategy_capabilities": ["strict_bsp"],
-            }
-        )
+        hello_data: dict[str, object] = {
+            "node_label": self.node_label,
+            "client_instance_id": self.client_instance_id,
+            "role": "worker",
+            "protocol_version": 1,
+            "framework_adapter": "pytorch",
+            "supported_tensor_encoding": ["fp32_le_v1"],
+            "supported_strategy_capabilities": ["strict_bsp"],
+        }
+        if self.managed_attempt_id is not None:
+            hello_data["attempt_id"] = self.managed_attempt_id
+            hello_data["allocation_id"] = self.allocation_id
+            hello_data["node_id"] = self.node_id
+            hello_data["worker_join_token"] = self.worker_join_token
+
+        hello = Hello.from_dict(hello_data)
         self._write_frame(
             self._transport.sock,
             build_control_frame(hello),
         )
         frame = DTPFrame.read_from(self._transport.sock, recv_exact)
         message = decode_control_message(frame.header.message_type, frame.payload)
+        if isinstance(message, Error):
+            raise ProtocolError(f"Runtime rejected admission ({message.error_code}): {message.message}")
         if not isinstance(message, HelloAck):
             raise ProtocolError("Runtime did not reply with HELLO_ACK")
         self.session_id = int(message.session_id)

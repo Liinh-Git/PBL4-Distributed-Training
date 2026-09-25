@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import socket
 import threading
 import time
@@ -12,7 +13,10 @@ from datetime import UTC, datetime
 
 import numpy as np
 
+logger = logging.getLogger(__name__)
+
 from pbl4.common.errors import ProtocolError, TransportError
+from pbl4.common.worker_admission import WorkerAdmissionError, verify_worker_join_token
 from pbl4.protocol.codec import DTPFrame
 from pbl4.protocol.constants import (
     MESSAGE_TYPE_ERROR,
@@ -30,10 +34,15 @@ from pbl4.protocol.constants import (
     MESSAGE_TYPE_SHARD_ERROR,
     MESSAGE_TYPE_SHARD_READY,
     NO_OPERATION,
+    UNASSIGNED_WORKER_ID,
 )
 from pbl4.protocol.messages import (
     DatasetAssignment,
     DtpControlMessage,
+    ERROR_CODE_WORKER_ADMISSION_EXPIRED,
+    ERROR_CODE_WORKER_ADMISSION_INVALID,
+    ERROR_CODE_WORKER_ADMISSION_REQUIRED,
+    ERROR_CODE_WORKER_ADMISSION_SCOPE_MISMATCH,
     Error,
     GradientEnd,
     GradientMeta,
@@ -87,6 +96,8 @@ class _Connection:
     shard_id: int | None = None
     local_model_version: int | None = None
     last_seen: float = 0.0
+    node_id: str | None = None
+    allocation_id: str | None = None
 
 
 class ParameterServer:
@@ -110,6 +121,8 @@ class ParameterServer:
         heartbeat_interval_ms: int = 5_000,
         heartbeat_timeout_ms: int = 15_000,
         max_tensor_chunk_bytes: int = 1024 * 1024,
+        worker_admission_secret: str | None = None,
+        require_worker_admission: bool = False,
     ) -> None:
         if heartbeat_timeout_ms <= heartbeat_interval_ms:
             raise ValueError("heartbeat timeout must exceed interval")
@@ -126,9 +139,12 @@ class ParameterServer:
         self._heartbeat_interval_ms = heartbeat_interval_ms
         self._heartbeat_timeout_ms = heartbeat_timeout_ms
         self._max_chunk = max_tensor_chunk_bytes
+        self._worker_admission_secret = worker_admission_secret
+        self._require_worker_admission = require_worker_admission
         self._server = TcpServer(host, port, self._serve_connection)
         self._lock = threading.Lock()
         self._connections: dict[int, _Connection] = {}
+        self._admitted_allocation_ids: set[str] = set()
         self._manifest_workers: set[int] = set()
         self._next_session_id = 1
         self._membership_changed = threading.Condition(self._lock)
@@ -172,6 +188,8 @@ class ParameterServer:
                     "last_heartbeat_at": connection.last_heartbeat_at,
                     "shard_id": connection.shard_id,
                     "local_model_version": connection.local_model_version,
+                    "node_id": connection.node_id,
+                    "allocation_id": connection.allocation_id,
                 }
                 for worker_id, connection in sorted(self._connections.items())
                 if worker_id in sessions
@@ -199,10 +217,63 @@ class ParameterServer:
             validator = ConnectionProtocolValidator(inbound_peer=PeerRole.WORKER)
             validator.validate(first.header, hello)
 
+            # Admission check strictly BEFORE WorkerRegistry.register()
+            is_managed = hello.is_managed
+            if self._require_worker_admission and not is_managed:
+                self._send_admission_error(
+                    sock,
+                    ERROR_CODE_WORKER_ADMISSION_REQUIRED,
+                    "Managed worker admission is required; missing join credentials",
+                )
+                sock.close()
+                return
+
+            if is_managed:
+                if not self._worker_admission_secret:
+                    self._send_admission_error(
+                        sock,
+                        ERROR_CODE_WORKER_ADMISSION_INVALID,
+                        "Runtime has no admission secret configured",
+                    )
+                    sock.close()
+                    return
+
+                try:
+                    verify_worker_join_token(
+                        secret=self._worker_admission_secret,
+                        token=str(hello.worker_join_token),
+                        expected_attempt_id=self.attempt_id,
+                        expected_allocation_id=str(hello.allocation_id),
+                        expected_node_id=str(hello.node_id),
+                    )
+                except WorkerAdmissionError as exc:
+                    err_msg = str(exc)
+                    if "expired" in err_msg.lower():
+                        err_code = ERROR_CODE_WORKER_ADMISSION_EXPIRED
+                    elif "mismatch" in err_msg.lower():
+                        err_code = ERROR_CODE_WORKER_ADMISSION_SCOPE_MISMATCH
+                    else:
+                        err_code = ERROR_CODE_WORKER_ADMISSION_INVALID
+                    self._send_admission_error(sock, err_code, err_msg)
+                    sock.close()
+                    return
+
+                with self._lock:
+                    if hello.allocation_id in self._admitted_allocation_ids:
+                        self._send_admission_error(
+                            sock,
+                            ERROR_CODE_WORKER_ADMISSION_INVALID,
+                            f"Allocation '{hello.allocation_id}' has already been admitted in this attempt",
+                        )
+                        sock.close()
+                        return
+
             with self._membership_changed:
                 session_id = self._next_session_id
                 self._next_session_id += 1
                 registered = self.registry.register(session_id, time.monotonic())
+                if is_managed:
+                    self._admitted_allocation_ids.add(str(hello.allocation_id))
                 self.registry.transition(
                     registered.worker_id,
                     session_id,
@@ -233,6 +304,8 @@ class ParameterServer:
                     connected_at=connected_at,
                     last_heartbeat_at=connected_at,
                     last_seen=time.monotonic(),
+                    node_id=str(hello.node_id) if is_managed else None,
+                    allocation_id=str(hello.allocation_id) if is_managed else None,
                 )
                 self._connections[registered.worker_id] = connection
                 self._membership_changed.notify_all()
@@ -392,9 +465,6 @@ class ParameterServer:
                 connection.validator.set_phase(ConnectionPhase.READY)
             elif frame.header.message_type == MESSAGE_TYPE_HEARTBEAT:
                 assert isinstance(message, Heartbeat)
-                self.registry.heartbeat(
-                    connection.worker_id, connection.session_id, time.monotonic()
-                )
                 connection.local_model_version = int(message.local_model_version)
             elif frame.header.message_type == MESSAGE_TYPE_GRADIENT_META:
                 assert identity is not None and isinstance(message, GradientMeta)
@@ -564,3 +634,18 @@ class ParameterServer:
                 if connection is not None:
                     with self._lock:
                         connection.terminal_stop_sent = False
+
+    def _send_admission_error(self, sock: socket.socket, error_code: str, message: str) -> None:
+        logger.warning("Rejected worker admission: code=%s, reason=%s", error_code, message)
+        err = Error.from_dict(
+            {
+                "error_code": error_code,
+                "scope": "SESSION",
+                "severity": "ERROR",
+                "message": message,
+                "retryable": False,
+            }
+        )
+        frame = build_control_frame(err, session_id=0, worker_id=UNASSIGNED_WORKER_ID)
+        with contextlib.suppress(Exception):
+            frame.write_to(sock, send_all)

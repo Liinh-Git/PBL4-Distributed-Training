@@ -52,6 +52,8 @@ class RuntimeProcess:
         checkpoint_dir: Path,
         parameter_manifest: ParameterManifest,
         heartbeat_timeout_seconds: float = 120.0,
+        worker_admission_secret: str | None = None,
+        require_worker_admission: bool = True,
     ) -> None:
         self._host = host
         self._dtp_port = dtp_port
@@ -59,6 +61,8 @@ class RuntimeProcess:
         self._checkpoint_dir = Path(checkpoint_dir)
         self._manifest = parameter_manifest
         self._heartbeat_timeout = heartbeat_timeout_seconds
+        self._worker_admission_secret = worker_admission_secret
+        self._require_worker_admission = require_worker_admission
         self._lock = threading.Lock()
         self._active: _AttemptRunner | None = None
         self._stopping = threading.Event()
@@ -257,6 +261,8 @@ class _AttemptRunner:
                 expected_workers=expected_workers,
                 manifest=self._process._manifest,
                 registry=registry,
+                worker_admission_secret=self._process._worker_admission_secret,
+                require_worker_admission=self._process._require_worker_admission,
                 gradient_handler=self._on_gradient,
                 parameter_applied_handler=self._on_parameter_applied,
                 model_init_handler=self._on_model_init,
@@ -608,6 +614,8 @@ class _AttemptRunner:
                 "last_heartbeat_at": item["last_heartbeat_at"],
                 "shard_id": item["shard_id"],
                 "local_model_version": item["local_model_version"],
+                "node_id": item.get("node_id"),
+                "allocation_id": item.get("allocation_id"),
             }
             for item in raw_workers
         ]
