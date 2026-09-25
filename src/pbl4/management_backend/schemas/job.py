@@ -23,8 +23,10 @@ class RequestedContractV1(StrictWriteModel):
     learning_rate: float = Field(gt=0)
     training_seed: int
     training_strategy: str = "strict_bsp"
+    workload_policy: str = "equal"
+    work_units_per_step: int | None = Field(default=None, ge=1)
 
-    @field_validator("epochs", "training_seed", mode="before")
+    @field_validator("epochs", "training_seed", "work_units_per_step", mode="before")
     @classmethod
     def reject_bool_int(cls, v: Any) -> Any:
         if isinstance(v, bool):
@@ -47,6 +49,13 @@ class RequestedContractV1(StrictWriteModel):
             raise ValueError(f"Unsupported training_strategy '{v}'. V1 only supports 'strict_bsp'.")
         return v
 
+    @field_validator("workload_policy")
+    @classmethod
+    def validate_workload_policy(cls, v: str) -> str:
+        if v not in {"equal", "dbs"}:
+            raise ValueError(f"Unsupported workload_policy '{v}'. Must be 'equal' or 'dbs'.")
+        return v
+
 
 class RequestedContractPatchV1(StrictWriteModel):
     dataset_build_id: str | None = None
@@ -55,8 +64,10 @@ class RequestedContractPatchV1(StrictWriteModel):
     learning_rate: float | None = Field(default=None, gt=0)
     training_seed: int | None = None
     training_strategy: str | None = None
+    workload_policy: str | None = None
+    work_units_per_step: int | None = Field(default=None, ge=1)
 
-    @field_validator("epochs", "training_seed", mode="before")
+    @field_validator("epochs", "training_seed", "work_units_per_step", mode="before")
     @classmethod
     def reject_bool_int(cls, v: Any) -> Any:
         if isinstance(v, bool):
@@ -77,6 +88,13 @@ class RequestedContractPatchV1(StrictWriteModel):
     def validate_strategy(cls, v: str | None) -> str | None:
         if v is not None and v != "strict_bsp":
             raise ValueError(f"Unsupported training_strategy '{v}'. V1 only supports 'strict_bsp'.")
+        return v
+
+    @field_validator("workload_policy")
+    @classmethod
+    def validate_workload_policy(cls, v: str | None) -> str | None:
+        if v is not None and v not in {"equal", "dbs"}:
+            raise ValueError(f"Unsupported workload_policy '{v}'. Must be 'equal' or 'dbs'.")
         return v
 
 
@@ -107,6 +125,11 @@ class ResolvedTraining(BaseModel):
     training_seed: int
 
 
+class ResolvedWorkload(BaseModel):
+    policy: str = "equal"
+    work_units_per_step: int = 3
+
+
 class ResolvedSynchronization(BaseModel):
     training_strategy: str
     expected_workers: int
@@ -130,6 +153,9 @@ class ResolvedContractV1(BaseModel):
     dataset: ResolvedDataset
     model: ResolvedModel
     training: ResolvedTraining
+    workload: ResolvedWorkload = Field(
+        default_factory=lambda: ResolvedWorkload(policy="equal", work_units_per_step=3)
+    )
     synchronization: ResolvedSynchronization
     update_policy: ResolvedUpdatePolicy
     checkpoint_policy: ResolvedCheckpointPolicy

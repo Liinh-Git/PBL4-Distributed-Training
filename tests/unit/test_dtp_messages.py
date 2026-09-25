@@ -1284,6 +1284,121 @@ class RuntimeSeamTest(unittest.TestCase):
             server_sock.close()
             client_sock.close()
 
+    def test_step_start_with_work_units_roundtrip(self) -> None:
+        data = {
+            "attempt_id": "attempt-test",
+            "epoch": 0,
+            "step_id": 1,
+            "batch_ordinal": 0,
+            "model_version": 1,
+            "shard_id": 0,
+            "batch_id": 1,
+            "expected_sample_count": 8,
+            "training_strategy": "strict_bsp",
+            "parameter_manifest_hash": "a" * 64,
+            "work_units": [
+                {"shard_id": 0, "batch_id": 1, "sample_count": 4},
+                {"shard_id": 1, "batch_id": 2, "sample_count": 4},
+            ],
+        }
+        msg = StepStart.from_dict(data)
+        self.assertEqual(len(msg.work_units), 2)
+        self.assertEqual(msg.work_units[0].shard_id, 0)
+        self.assertEqual(msg.work_units[0].batch_id, 1)
+        self.assertEqual(msg.work_units[0].sample_count, 4)
+        self.assertEqual(msg.work_units[1].shard_id, 1)
+        self.assertEqual(msg.work_units[1].batch_id, 2)
+        self.assertEqual(msg.work_units[1].sample_count, 4)
+
+        decoded = decode_control_message(StepStart.MESSAGE_TYPE, msg.to_bytes())
+        self.assertEqual(decoded, msg)
+
+    def test_step_start_legacy_without_work_units(self) -> None:
+        data = {
+            "attempt_id": "attempt-test",
+            "epoch": 0,
+            "step_id": 1,
+            "batch_ordinal": 0,
+            "model_version": 1,
+            "shard_id": 2,
+            "batch_id": 3,
+            "expected_sample_count": 16,
+            "training_strategy": "strict_bsp",
+            "parameter_manifest_hash": "a" * 64,
+        }
+        msg = StepStart.from_dict(data)
+        self.assertEqual(len(msg.work_units), 1)
+        self.assertEqual(msg.work_units[0].shard_id, 2)
+        self.assertEqual(msg.work_units[0].batch_id, 3)
+        self.assertEqual(msg.work_units[0].sample_count, 16)
+
+    def test_step_start_work_units_validation_errors(self) -> None:
+        base = {
+            "attempt_id": "attempt-test",
+            "epoch": 0,
+            "step_id": 1,
+            "batch_ordinal": 0,
+            "model_version": 1,
+            "shard_id": 0,
+            "batch_id": 1,
+            "expected_sample_count": 8,
+            "training_strategy": "strict_bsp",
+            "parameter_manifest_hash": "a" * 64,
+        }
+        # Empty work_units
+        with self.assertRaises(ProtocolError):
+            StepStart.from_dict({**base, "work_units": []})
+
+        # Sample count sum mismatch (4 != 8)
+        with self.assertRaises(ProtocolError):
+            StepStart.from_dict(
+                {**base, "work_units": [{"shard_id": 0, "batch_id": 1, "sample_count": 4}]}
+            )
+
+        # First work unit does not match compatibility fields (shard_id 1 != 0)
+        with self.assertRaises(ProtocolError):
+            StepStart.from_dict(
+                {
+                    **base,
+                    "work_units": [
+                        {"shard_id": 1, "batch_id": 1, "sample_count": 4},
+                        {"shard_id": 1, "batch_id": 2, "sample_count": 4},
+                    ],
+                }
+            )
+
+    def test_gradient_meta_compute_ms(self) -> None:
+        data = {
+            "attempt_id": "a",
+            "model_version": 4,
+            "shard_id": 0,
+            "batch_id": 1,
+            "batch_ordinal": 1,
+            "sample_count": 8,
+            "parameter_manifest_hash": "b" * 64,
+            "tensor_encoding": "fp32_le_v1",
+            "total_numel": 3,
+            "total_bytes": 12,
+            "chunk_count": 2,
+            "compute_ms": 45.67,
+        }
+        msg = GradientMeta.from_dict(data)
+        self.assertEqual(msg.compute_ms, 45.67)
+
+        decoded = decode_control_message(GradientMeta.MESSAGE_TYPE, msg.to_bytes())
+        self.assertEqual(decoded, msg)
+
+        # Without compute_ms defaults to 0.0
+        no_timing = {k: v for k, v in data.items() if k != "compute_ms"}
+        msg_no_timing = GradientMeta.from_dict(no_timing)
+        self.assertEqual(msg_no_timing.compute_ms, 0.0)
+
+        # Reject negative or zero compute_ms
+        with self.assertRaises(ProtocolError):
+            GradientMeta.from_dict({**data, "compute_ms": 0.0})
+        with self.assertRaises(ProtocolError):
+            GradientMeta.from_dict({**data, "compute_ms": -1.5})
+
 
 if __name__ == "__main__":
     unittest.main()

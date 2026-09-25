@@ -20,6 +20,7 @@ class Contribution:
     parameter_manifest_hash: str
     tensor_id: int
     _gradient_bytes: bytes = field(repr=False)
+    compute_ms: float = 0.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_gradient_bytes", bytes(self._gradient_bytes))
@@ -27,6 +28,12 @@ class Contribution:
             raise ValueError("A complete nonempty FP32 gradient is required")
         if not np.isfinite(self.gradient).all():
             raise ValueError("Nonfinite gradient")
+        if (
+            not isinstance(self.compute_ms, (int, float))
+            or self.compute_ms < 0
+            or not np.isfinite(self.compute_ms)
+        ):
+            raise ValueError("compute_ms must be non-negative and finite")
 
     @classmethod
     def from_gradient(cls, gradient: np.ndarray, **identity: object) -> "Contribution":

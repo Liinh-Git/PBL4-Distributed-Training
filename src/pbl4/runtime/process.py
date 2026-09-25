@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from pbl4.common.hashing import canonical_json_bytes, sha256_bytes
+from pbl4.common.work_unit import WorkUnitRef
 from pbl4.protocol.messages import DatasetAssignment, StepStart
 from pbl4.protocol.parameter_manifest import ParameterManifest
 from pbl4.protocol.transfer import CompletedTensorTransfer
@@ -29,10 +30,11 @@ from pbl4.runtime.heartbeat import HeartbeatMonitor
 from pbl4.runtime.management_endpoint import ManagementEndpoint
 from pbl4.runtime.parameter_server import ParameterServer
 from pbl4.runtime.snapshot import CheckpointSnapshot
-from pbl4.runtime.synchronization.context import BatchAssignment, Member, StrategyContext
+from pbl4.runtime.synchronization.context import Member, StrategyContext
 from pbl4.runtime.synchronization.registry import create_policy
 from pbl4.runtime.update_engine import UpdateEngine
 from pbl4.runtime.worker_registry import SessionState, WorkerRegistry
+from pbl4.runtime.workload_scheduler import WorkloadScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -309,6 +311,7 @@ class _AttemptRunner:
                             "profile": dataset_contract.get(
                                 "profile", "CNN_IMAGE_CLASSIFICATION_V1"
                             ),
+                            "cache_scope": "all_shards",
                         }
                     ),
                 )
@@ -350,7 +353,32 @@ class _AttemptRunner:
                 self._process._manifest.total_numel,
                 members,
             )
-            schedule = self._schedule(shard_manifests)
+            work_units = self._extract_work_units(shard_manifests)
+
+            workload_config = contract.get("workload")
+            if isinstance(workload_config, dict):
+                workload_policy = str(workload_config.get("policy", "equal"))
+                work_units_per_step = int(
+                    workload_config.get("work_units_per_step", expected_workers)
+                )
+            else:
+                workload_policy = "equal"
+                work_units_per_step = expected_workers
+
+            worker_ids = sorted(item.worker_id for item in registry.snapshot())
+
+            batch_scheduler = BatchScheduler(
+                work_units=work_units,
+                training_seed=int(contract["training"]["training_seed"]),
+                epochs=int(contract["training"]["epochs"]),
+                work_units_per_step=work_units_per_step,
+                worker_ids=worker_ids,
+            )
+            workload_scheduler = WorkloadScheduler(
+                policy=workload_policy,
+                worker_ids=worker_ids,
+                work_units_per_step=work_units_per_step,
+            )
             model = CanonicalModel(initial, 0, self._process._manifest.parameter_manifest_hash)
             events = EventEmitter(self.attempt_id, self.job_id)
             self._events = events
@@ -387,11 +415,7 @@ class _AttemptRunner:
                     str(contract["update_policy"]["type"]),
                     float(contract["training"]["learning_rate"]),
                 ),
-                BatchScheduler(
-                    schedule,
-                    int(contract["training"]["training_seed"]),
-                    int(contract["training"]["epochs"]),
-                ),
+                batch_scheduler,
                 CheckpointPolicy(str(contract["checkpoint_policy"]["type"])),
                 CheckpointManager(
                     self._process._checkpoint_dir / self.attempt_id,
@@ -399,6 +423,7 @@ class _AttemptRunner:
                 ),
                 checkpoint_template,
                 events,
+                workload_scheduler=workload_scheduler,
             )
             self._coordinator = coordinator
             coordinator.advance_initialization()
@@ -491,6 +516,7 @@ class _AttemptRunner:
                             "parameter_manifest_hash": (
                                 self._process._manifest.parameter_manifest_hash
                             ),
+                            "work_units": [u.to_dict() for u in assignment.work_units],
                         }
                     ),
                 )
@@ -674,6 +700,17 @@ class _AttemptRunner:
             or protocols.get("mcp_version") != 1
         ):
             raise ValueError("START_ATTEMPT contract is incompatible with Runtime V1")
+        workload = contract.get("workload")
+        if workload is not None:
+            if not isinstance(workload, dict):
+                raise ValueError("START_ATTEMPT contract workload must be an object")
+            if workload.get("policy") not in {"equal", "dbs"}:
+                raise ValueError("START_ATTEMPT contract workload policy must be 'equal' or 'dbs'")
+            k = workload.get("work_units_per_step")
+            if type(k) is not int or k <= 0:
+                raise ValueError(
+                    "START_ATTEMPT contract work_units_per_step must be positive integer"
+                )
         return contract
 
     def _fetch_shard_manifests(self, root: PinnedDatasetManifest) -> tuple[dict[str, object], ...]:
@@ -707,21 +744,23 @@ class _AttemptRunner:
         return tuple(manifests)
 
     @staticmethod
-    def _schedule(manifests: tuple[dict[str, object], ...]) -> tuple[BatchAssignment, ...]:
-        assignments = []
+    def _extract_work_units(manifests: tuple[dict[str, object], ...]) -> tuple[WorkUnitRef, ...]:
+        units = []
         for manifest in manifests:
-            worker_id = int(manifest["shard_id"])
+            shard_id = int(manifest["shard_id"])
             for entry in manifest["batches"]:
-                assignments.append(
-                    BatchAssignment(
-                        worker_id,
-                        worker_id,
-                        int(entry["batch_id"]),
-                        int(entry["batch_id"]),
-                        int(entry["sample_count"]),
+                units.append(
+                    WorkUnitRef(
+                        shard_id=shard_id,
+                        batch_id=int(entry["batch_id"]),
+                        sample_count=int(entry["sample_count"]),
                     )
                 )
-        return tuple(assignments)
+        return tuple(units)
+
+    @classmethod
+    def _schedule(cls, manifests: tuple[dict[str, object], ...]) -> tuple[WorkUnitRef, ...]:
+        return cls._extract_work_units(manifests)
 
     def _wait_for(self, predicate, timeout: float, description: str) -> None:
         deadline = time.monotonic() + timeout

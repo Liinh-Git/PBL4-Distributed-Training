@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from pbl4.runtime.batch_scheduler import BatchScheduler, RecoveryCursor
-from pbl4.runtime.synchronization.context import BatchAssignment
+from pbl4.runtime.synchronization.context import WorkUnitRef
 from pbl4.runtime.worker_registry import SessionState, WorkerRegistry
 
 
@@ -65,25 +65,37 @@ def test_pre_run_reconnect_requires_new_session():
 
 
 def test_epoch_permutation_resume_no_repeat_or_skip():
-    batches = tuple(
-        BatchAssignment(w, w, batch_id, batch_id, w + 1) for w in range(3) for batch_id in range(7)
+    units = tuple(
+        WorkUnitRef(shard_id=w, batch_id=batch_id, sample_count=10)
+        for w in range(3)
+        for batch_id in range(7)
     )
-    scheduler = BatchScheduler(batches, -100, 3)
+    scheduler = BatchScheduler(units, -100, 3, work_units_per_step=3, worker_ids=[0, 1, 2])
     cursor = RecoveryCursor(0, 0)
     seen = []
     for epoch in range(3):
-        epoch_ids = []
+        epoch_unit_ids = []
         for ordinal in range(7):
             assert cursor == RecoveryCursor(epoch, ordinal)
             assigned = scheduler.assignments(cursor)
-            assert len({a.batch_id for a in assigned}) == 1
-            assert [a.sample_count for a in assigned] == [1, 2, 3]
-            epoch_ids.append(assigned[0].batch_id)
+            assert len(assigned) == 3
+            # Each step assigns K=3 distinct units
+            step_units = [u for a in assigned for u in a.work_units]
+            assert len(step_units) == 3
+            assert len(set(step_units)) == 3
+            assert [a.sample_count for a in assigned] == [10, 10, 10]
+            epoch_unit_ids.extend((u.shard_id, u.batch_id) for u in step_units)
             # A new scheduler recreates the assignment exactly from the saved cursor.
-            assert BatchScheduler(batches, -100, 3).assignments(cursor) == assigned
+            assert (
+                BatchScheduler(
+                    units, -100, 3, work_units_per_step=3, worker_ids=[0, 1, 2]
+                ).assignments(cursor)
+                == assigned
+            )
             seen.append(assigned)
             cursor = scheduler.next_cursor(cursor)
-        assert sorted(epoch_ids) == list(range(7))
+        # All 21 units in the catalog are scheduled exactly once per epoch (no repeat, no skip)
+        assert len(set(epoch_unit_ids)) == 21
     assert cursor == RecoveryCursor(3, 0)
     with pytest.raises(StopIteration):
         scheduler.assignments(cursor)
@@ -91,9 +103,9 @@ def test_epoch_permutation_resume_no_repeat_or_skip():
 
 
 def test_invalid_physical_batch_selection():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="No physical batches"):
         BatchScheduler((), 1, 1)
-    with pytest.raises(ValueError):
-        BatchScheduler((BatchAssignment(0, 0, 0, 0, 1),) * 2, 1, 1)
-    with pytest.raises(ValueError):
-        BatchScheduler((BatchAssignment(0, 0, 0, 0, 1), BatchAssignment(1, 1, 1, 0, 1)), 1, 1)
+    with pytest.raises(ValueError, match="Duplicate"):
+        BatchScheduler((WorkUnitRef(0, 0, 1), WorkUnitRef(0, 0, 1)), 1, 1)
+    with pytest.raises(ValueError, match="Not enough work units"):
+        BatchScheduler((WorkUnitRef(0, 0, 1),), 1, 1, work_units_per_step=2)
