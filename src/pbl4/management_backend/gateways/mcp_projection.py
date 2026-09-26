@@ -23,19 +23,19 @@ def project_command(
         raise ProtocolError("Durable attempt_id does not match dispatch target")
 
     if command_type == "START_ATTEMPT":
-        return StartAttempt.from_dict(
-            {
-                "command_id": command_id,
-                "job_id": source.get("job_id"),
-                "attempt_id": target_id,
-                "execution_mode": source.get("execution_mode"),
-                "resolved_contract": source.get("resolved_contract"),
-                "contract_hash": source.get("contract_hash"),
-                "resume_from_checkpoint_id": source.get("resume_from_checkpoint_id"),
-                "resume_checkpoint": source.get("resume_checkpoint"),
-                "requested_at": source.get("requested_at"),
-            }
-        ).to_dict()
+        start_payload: dict[str, Any] = {
+            "command_id": command_id,
+            "job_id": source.get("job_id"),
+            "attempt_id": target_id,
+            "execution_mode": source.get("execution_mode"),
+            "resolved_contract": source.get("resolved_contract"),
+            "contract_hash": source.get("contract_hash"),
+            "resume_from_checkpoint_id": source.get("resume_from_checkpoint_id"),
+            "requested_at": source.get("requested_at"),
+        }
+        if source.get("resume_checkpoint") is not None:
+            start_payload["resume_checkpoint"] = source["resume_checkpoint"]
+        return StartAttempt.from_dict(start_payload).to_dict()
     if command_type == "ABORT_ATTEMPT":
         return AbortAttempt.from_dict(
             {

@@ -295,7 +295,11 @@ class WorkerProcessSupervisor:
                 spawn_kwargs["start_new_session"] = True
 
             try:
-                proc = subprocess.Popen(cmd_args, env=env, **spawn_kwargs)
+                log_file_path = self.var_dir / f"worker-{command.allocation_id}.log"
+                with open(log_file_path, "a", encoding="utf-8") as log_file:
+                    proc = subprocess.Popen(
+                        cmd_args, env=env, stdout=log_file, stderr=subprocess.STDOUT, **spawn_kwargs
+                    )
                 self._subprocesses[command.allocation_id] = proc
                 record.pid = proc.pid
 

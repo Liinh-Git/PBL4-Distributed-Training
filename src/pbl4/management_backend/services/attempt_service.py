@@ -718,7 +718,35 @@ def get_step(conn: psycopg.Connection, attempt_id: str, step_id: int) -> dict:
     if step is None:
         raise AttemptNotFoundError(f"Step {step_id} not found for attempt '{attempt_id}'.")
     worker_steps = step_repository.get_worker_steps(conn, attempt_id, step_id)
-    return {**step, "worker_steps": worker_steps}
+
+    metrics = step.get("metrics")
+    if metrics is None:
+        loss = step.get("loss")
+        accuracy = step.get("accuracy")
+        if loss is None and worker_steps:
+            valid_losses = [
+                (float(ws["loss"]), int(ws["sample_count"]))
+                for ws in worker_steps
+                if ws.get("loss") is not None
+            ]
+            if valid_losses:
+                total_s = sum(s for _, s in valid_losses)
+                if total_s > 0:
+                    loss = round(sum(val * s for val, s in valid_losses) / total_s, 4)
+        if accuracy is None and worker_steps:
+            valid_accs = [
+                (float(ws["accuracy"]), int(ws["sample_count"]))
+                for ws in worker_steps
+                if ws.get("accuracy") is not None
+            ]
+            if valid_accs:
+                total_s = sum(s for _, s in valid_accs)
+                if total_s > 0:
+                    accuracy = round(sum(acc * s for acc, s in valid_accs) / total_s, 4)
+        if loss is not None or accuracy is not None:
+            metrics = {"loss": loss, "accuracy": accuracy}
+
+    return {**step, "metrics": metrics, "worker_steps": worker_steps}
 
 
 # ─── Commands ────────────────────────────────────────────────────────────────
@@ -1513,21 +1541,39 @@ def execute_abort_attempt(
     except RuntimeUnavailableError:
         logger.warning(
             "Runtime dispatch/acceptance failed for abort_attempt "
-            "cmd=%s attempt=%s (remains PENDING)",
+            "cmd=%s attempt=%s; force-aborting attempt in DB",
             command_id,
             attempt_id,
         )
-        with db_module.transaction() as conn:
-            idempotency.record_dispatch_failure(
-                conn,
-                endpoint_semantic_scope="ATTEMPT_ABORT",
-                idempotency_key=effective_key,
-                command_id=command_id,
-                resource_id=attempt_id,
-            )
-        raise
+        return _force_abort_attempt(
+            db_module,
+            attempt_id=attempt_id,
+            command_id=command_id,
+            effective_key=effective_key,
+            cmd_row=cmd_row,
+            failure_code="OPERATOR_ABORTED_DISCONNECTED_RUNTIME",
+            failure_message="Runtime was unavailable; force-aborted by operator",
+        )
 
     cmd_state = cmd_result["state"]
+    res = cmd_result.get("result") or {}
+    res_code = res.get("result_code") or res.get("code")
+
+    if cmd_state == "REJECTED" and res_code == "ATTEMPT_NOT_ACTIVE":
+        logger.warning(
+            "Runtime rejected abort for attempt %s with ATTEMPT_NOT_ACTIVE; force-aborting in DB",
+            attempt_id,
+        )
+        return _force_abort_attempt(
+            db_module,
+            attempt_id=attempt_id,
+            command_id=command_id,
+            effective_key=effective_key,
+            cmd_row=cmd_row,
+            failure_code="OPERATOR_ABORTED_STALE_ATTEMPT",
+            failure_message="Attempt was not active on Runtime; force-aborted by operator",
+        )
+
     resp_payload = {
         "command_id": command_id,
         "command_type": "ABORT_ATTEMPT",
@@ -1551,6 +1597,91 @@ def execute_abort_attempt(
 
     if isinstance(cmd_row, dict):
         cmd_row = {**cmd_row, "command_state": cmd_state, "state": cmd_state}
+    return cmd_row
+
+
+def _force_abort_attempt(
+    db_module: Any,
+    *,
+    attempt_id: str,
+    command_id: str,
+    effective_key: str,
+    cmd_row: dict[str, Any],
+    failure_code: str,
+    failure_message: str,
+) -> dict[str, Any]:
+    from pbl4.management_backend.websocket import hub
+
+    now = datetime.now(UTC)
+    with db_module.transaction() as conn:
+        attempt_repository.update_attempt_state(
+            conn,
+            attempt_id,
+            new_state="ABORTED",
+            ended_at=now,
+            failure_code=failure_code,
+            failure_message=failure_message,
+        )
+        command_repository.update_command_state(
+            conn,
+            command_id=command_id,
+            new_state="SUCCEEDED",
+            result={
+                "result_code": "FORCE_ABORTED",
+                "message": failure_message,
+                "attempt_id": attempt_id,
+                "completed_at": now.isoformat(),
+            },
+        )
+        AllocationService.cleanup_allocations_for_attempt(
+            conn,
+            attempt_id,
+            now=now,
+            failure_code="ATTEMPT_ABORTED",
+            failure_message=failure_message,
+        )
+        resp_payload = {
+            "command_id": command_id,
+            "command_type": "ABORT_ATTEMPT",
+            "command_state": "SUCCEEDED",
+            "target_type": "ATTEMPT",
+            "target_id": attempt_id,
+            "attempt_id": attempt_id,
+        }
+        idempotency.complete_record(
+            conn,
+            endpoint_semantic_scope="ATTEMPT_ABORT",
+            idempotency_key=effective_key,
+            response_status_code=202,
+            response_body=resp_payload,
+            command_id=command_id,
+            resource_id=attempt_id,
+        )
+
+    try:
+        hub.broadcast_sync(
+            attempt_id,
+            {
+                "kind": "ATTEMPT_STATE_CHANGED",
+                "attempt_id": attempt_id,
+                "runtime_event_seq": None,
+                "occurred_at": now.isoformat(),
+                "payload": {
+                    "attempt_id": attempt_id,
+                    "state": "ABORTED",
+                    "failure_code": failure_code,
+                    "failure_message": failure_message,
+                },
+            },
+        )
+    except Exception as exc:
+        logger.debug("Failed to broadcast abort event for %s: %s", attempt_id, exc)
+
+    with db_module.transaction() as conn:
+        cmd_row = command_repository.get_command(conn, command_id) or cmd_row
+
+    if isinstance(cmd_row, dict):
+        cmd_row = {**cmd_row, "command_state": "SUCCEEDED", "state": "SUCCEEDED"}
     return cmd_row
 
 

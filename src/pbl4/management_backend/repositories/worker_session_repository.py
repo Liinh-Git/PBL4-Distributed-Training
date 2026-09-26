@@ -43,6 +43,11 @@ def upsert_session(
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (session_id) DO UPDATE SET
                 state = EXCLUDED.state,
+                node_label = CASE
+                    WHEN EXCLUDED.node_label IS NOT NULL AND EXCLUDED.node_label != 'node-unknown'
+                    THEN EXCLUDED.node_label
+                    ELSE worker_sessions.node_label
+                END,
                 last_heartbeat_at = COALESCE(
                     EXCLUDED.last_heartbeat_at, worker_sessions.last_heartbeat_at
                 ),

@@ -97,6 +97,18 @@ class DefaultModelMetadataProvider:
         env_hash = os.environ.get("CANONICAL_PARAMETER_MANIFEST_HASH") or os.environ.get(
             f"PARAMETER_MANIFEST_HASH_{model_id.upper()}"
         )
+        if not env_hash:
+            from pathlib import Path
+            import json
+            for p in (Path(".var/parameter-manifest.json"), Path("var/parameter-manifest.json")):
+                if p.is_file():
+                    try:
+                        data = json.loads(p.read_text(encoding="utf-8"))
+                        env_hash = data.get("parameter_manifest_hash")
+                        if env_hash:
+                            break
+                    except Exception:
+                        pass
         return {
             "model_id": spec["model_id"],
             "profile": spec["profile"],

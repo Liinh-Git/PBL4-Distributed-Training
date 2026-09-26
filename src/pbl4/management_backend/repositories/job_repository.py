@@ -55,7 +55,7 @@ def create_job(
                     state,
                     requested_contract,
                     created_at,
-                    cloned_from_job_id,
+                    cloned_from_job_id
                 )
             VALUES
                 (%s, %s, %s, 'DRAFT', %s, %s, %s)

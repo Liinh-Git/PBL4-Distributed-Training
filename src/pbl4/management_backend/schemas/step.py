@@ -30,14 +30,26 @@ class StepTiming(BaseModel):
     committed_at: datetime | None = None
 
 
+class StepMetrics(BaseModel):
+    loss: float | None = None
+    accuracy: float | None = None
+
+
 class WorkerStepItem(BaseModel):
     worker_id: int
     session_id: str
     shard_id: int
     batch_id: int
     sample_count: int
-    contribution_accepted: bool = False
-    parameter_applied: bool = False
+    contribution_accepted: bool = True
+    parameter_applied: bool = True
+    loss: float | None = None
+    accuracy: float | None = None
+    compute_ms: float | None = None
+    upload_ms: float | None = None
+    parameter_apply_ms: float | None = None
+    bytes_sent: int | None = None
+    bytes_received: int | None = None
 
 
 class StepDetail(BaseModel):
@@ -51,4 +63,5 @@ class StepDetail(BaseModel):
     batch_ordinal: int
     total_sample_count: int | None = None
     timing: StepTiming | None = None
+    metrics: StepMetrics | None = None
     worker_steps: list[WorkerStepItem] = []

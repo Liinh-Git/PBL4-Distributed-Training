@@ -407,3 +407,161 @@ def test_join_spec_falls_back_to_runtime_host_when_advertised_host_not_set():
         assert spec is not None
         assert spec["ps_host"] == "10.0.0.5"
         assert spec["ps_port"] == 9000
+
+
+def test_get_step_detail_matches_contract(client):
+    """Verify GET /api/v1/attempts/{attempt_id}/steps/{step_id} returns exact contract response."""
+    from datetime import datetime
+    from unittest.mock import patch
+
+    mock_attempt = {"attempt_id": "attempt_demo_001", "state": "RUNNING"}
+    mock_step = {
+        "attempt_id": "attempt_demo_001",
+        "training_strategy": "strict_bsp",
+        "step_id": 17,
+        "operation_id": 17,
+        "input_model_version": 41,
+        "output_model_version": 42,
+        "state": "COMMITTED",
+        "epoch": 2,
+        "batch_ordinal": 5,
+        "total_sample_count": 96,
+        "started_at": datetime.fromisoformat("2026-09-07T03:24:10.000+00:00"),
+        "update_completed_at": datetime.fromisoformat("2026-09-07T03:24:15.600+00:00"),
+        "synchronization_completed_at": datetime.fromisoformat("2026-09-07T03:24:16.700+00:00"),
+        "checkpoint_completed_at": datetime.fromisoformat("2026-09-07T03:24:17.800+00:00"),
+        "committed_at": datetime.fromisoformat("2026-09-07T03:24:18.000+00:00"),
+    }
+    mock_worker_steps = [
+        {
+            "worker_id": 0,
+            "session_id": 10000,
+            "shard_id": 0,
+            "batch_id": 105,
+            "sample_count": 32,
+            "contribution_accepted": True,
+            "parameter_applied": True,
+            "loss": 0.22,
+            "accuracy": 88.5,
+            "compute_ms": 65.4,
+            "upload_ms": 28.1,
+            "parameter_apply_ms": 12.0,
+            "bytes_sent": 18240000,
+            "bytes_received": 18240000,
+        },
+        {
+            "worker_id": 1,
+            "session_id": 10001,
+            "shard_id": 1,
+            "batch_id": 105,
+            "sample_count": 32,
+            "contribution_accepted": True,
+            "parameter_applied": True,
+            "loss": 0.22,
+            "accuracy": 88.5,
+            "compute_ms": 65.4,
+            "upload_ms": 28.1,
+            "parameter_apply_ms": 12.0,
+            "bytes_sent": 18240000,
+            "bytes_received": 18240000,
+        },
+        {
+            "worker_id": 2,
+            "session_id": 10002,
+            "shard_id": 2,
+            "batch_id": 105,
+            "sample_count": 32,
+            "contribution_accepted": True,
+            "parameter_applied": True,
+            "loss": 0.22,
+            "accuracy": 88.5,
+            "compute_ms": 65.4,
+            "upload_ms": 28.1,
+            "parameter_apply_ms": 12.0,
+            "bytes_sent": 18240000,
+            "bytes_received": 18240000,
+        },
+    ]
+
+    with (
+        patch("pbl4.management_backend.db.get_connection"),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.get_attempt",
+            return_value=mock_attempt,
+        ),
+        patch(
+            "pbl4.management_backend.repositories.step_repository.get_step",
+            return_value=mock_step,
+        ),
+        patch(
+            "pbl4.management_backend.repositories.step_repository.get_worker_steps",
+            return_value=mock_worker_steps,
+        ),
+    ):
+        r = client.get("/api/v1/attempts/attempt_demo_001/steps/17")
+        assert r.status_code == 200
+        res = r.json()
+        assert "data" in res and "meta" in res
+        data = res["data"]
+        assert data["training_strategy"] == "strict_bsp"
+        assert data["step_id"] == 17
+        assert data["operation_id"] == 17
+        assert data["input_model_version"] == 41
+        assert data["output_model_version"] == 42
+        assert data["state"] == "COMMITTED"
+        assert data["epoch"] == 2
+        assert data["batch_ordinal"] == 5
+        assert data["total_sample_count"] == 96
+        assert data["timing"]["started_at"] == "2026-09-07T03:24:10Z"
+        assert data["timing"]["update_completed_at"] == "2026-09-07T03:24:15.600000Z"
+        assert data["timing"]["synchronization_completed_at"] == "2026-09-07T03:24:16.700000Z"
+        assert data["timing"]["checkpoint_completed_at"] == "2026-09-07T03:24:17.800000Z"
+        assert data["timing"]["committed_at"] == "2026-09-07T03:24:18Z"
+        assert data["metrics"] == {"loss": 0.22, "accuracy": 88.5}
+        assert len(data["worker_steps"]) == 3
+        ws0 = data["worker_steps"][0]
+        assert ws0["worker_id"] == 0
+        assert ws0["session_id"] == "10000"
+        assert ws0["shard_id"] == 0
+        assert ws0["batch_id"] == 105
+        assert ws0["sample_count"] == 32
+        assert ws0["contribution_accepted"] is True
+        assert ws0["parameter_applied"] is True
+        assert ws0["loss"] == 0.22
+        assert ws0["accuracy"] == 88.5
+        assert ws0["compute_ms"] == 65.4
+        assert ws0["upload_ms"] == 28.1
+        assert ws0["parameter_apply_ms"] == 12.0
+        assert ws0["bytes_sent"] == 18240000
+        assert ws0["bytes_received"] == 18240000
+
+
+def test_get_system_capabilities_matches_contract(client):
+    from unittest.mock import MagicMock, patch
+
+    mock_gateway = MagicMock()
+    mock_gateway.connected = True
+    mock_gateway.runtime_instance_id = "runtime_machine_a_001"
+
+    with patch("pbl4.management_backend.api.system.get_gateway", return_value=mock_gateway):
+        r = client.get("/api/v1/system/capabilities")
+        assert r.status_code == 200
+        res = r.json()
+        assert "data" in res and "meta" in res
+        data = res["data"]
+        assert data["api_version"] == "v1"
+        assert data["dtp_versions"] == [1]
+        assert data["mcp_versions"] == [1]
+        assert data["runtime_connected"] is True
+        assert data["runtime_instance_id"] == "runtime_machine_a_001"
+        assert data["supported_training_strategies"] == ["strict_bsp"]
+        assert data["feature_flags"] == {
+            "attempt_websocket_stream": True,
+            "manual_checkpoint_request": True,
+        }
+        assert isinstance(data["supported_models"], list)
+        assert len(data["supported_models"]) >= 1
+        assert "model_id" in data["supported_models"][0]
+        assert "display_name" in data["supported_models"][0]
+        assert "task_type" in data["supported_models"][0]
+

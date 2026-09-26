@@ -149,10 +149,11 @@ export function computeStepMetrics(steps: TrainingStep[]) {
     const displayStep = `${idx + 1}`;
     const opNumber = `#${st.operationId}`;
 
-    // 2. Global Loss: Step 1 = 0.45, Step 2 = 0.21, followed by smooth convergence
+    // 2. Global Loss: Real metrics if present, otherwise smooth convergence fallback
     let loss: number;
-    if (st.loss !== undefined) {
-      loss = st.loss;
+    const candidateLoss = st.loss ?? st.metrics?.loss;
+    if (candidateLoss !== undefined && candidateLoss !== null) {
+      loss = candidateLoss;
     } else if (idx === 0) {
       loss = 0.45;
     } else if (idx === 1) {
@@ -164,10 +165,11 @@ export function computeStepMetrics(steps: TrainingStep[]) {
       );
     }
 
-    // 3. Accuracy: Step 1 = 72%, Step 2 = 89%, followed by gradual gain
+    // 3. Accuracy: Real metrics if present, otherwise gradual gain fallback
     let accuracy: number;
-    if (st.accuracy !== undefined) {
-      accuracy = st.accuracy;
+    const candidateAcc = st.accuracy ?? st.metrics?.accuracy;
+    if (candidateAcc !== undefined && candidateAcc !== null) {
+      accuracy = candidateAcc;
     } else if (idx === 0) {
       accuracy = 72.0;
     } else if (idx === 1) {
@@ -219,6 +221,48 @@ export function computeStepMetrics(steps: TrainingStep[]) {
 
 // Generate per-worker breakdown (Training Time vs Pushing Time) for a selected step
 export function computeWorkerBreakdown(step: TrainingStep | undefined, stepIndex: number = 1) {
+  const contributions = step?.workerContributions || [];
+  const hasRealWorkerTelemetry = contributions.some(
+    (c: any) =>
+      (c.computeMs !== undefined && c.computeMs !== null) ||
+      (c.compute_ms !== undefined && c.compute_ms !== null) ||
+      (c.uploadMs !== undefined && c.uploadMs !== null) ||
+      (c.upload_ms !== undefined && c.upload_ms !== null)
+  );
+
+  if (hasRealWorkerTelemetry) {
+    const rawWorkers = contributions.map((c: any, i: number) => {
+      const train = Number(c.computeMs ?? c.compute_ms ?? 0);
+      const push = Number(c.uploadMs ?? c.upload_ms ?? 0);
+      const total = Math.round((train + push) * 10) / 10;
+      const workerId = c.workerId ?? i;
+      return {
+        workerId,
+        workerName: `Worker ${workerId < 9 ? '0' : ''}${workerId + 1}`,
+        trainingTime: train,
+        pushingTime: push,
+        totalTime: total,
+        syncWait: 0,
+        loss: c.loss,
+        accuracy: c.accuracy,
+        parameterApplyMs: c.parameterApplyMs ?? c.parameter_apply_ms,
+        bytesSent: c.bytesSent ?? c.bytes_sent,
+        bytesReceived: c.bytesReceived ?? c.bytes_received,
+      };
+    });
+
+    const maxTotal = Math.max(...rawWorkers.map(w => w.totalTime), 1);
+    const workers = rawWorkers.map(w => ({
+      ...w,
+      syncWait: Math.max(0, Math.round((maxTotal - w.totalTime) * 10) / 10),
+    }));
+
+    return {
+      syncMaxTime: maxTotal,
+      workers,
+    };
+  }
+
   const totalMs = step?.timings?.totalDurationMs || 110;
 
   // Worker 01: Training ~58%, Pushing ~24%

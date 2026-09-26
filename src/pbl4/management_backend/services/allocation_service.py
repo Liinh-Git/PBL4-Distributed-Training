@@ -570,6 +570,63 @@ class AllocationService:
 
         return timed_out_ids
 
+    @staticmethod
+    def cleanup_allocations_for_attempt(
+        conn: psycopg.Connection,
+        attempt_id: str,
+        *,
+        now: datetime | None = None,
+        failure_code: str = "ATTEMPT_TERMINATED",
+        failure_message: str = "Attempt reached terminal state",
+    ) -> None:
+        """Ensure all active worker allocations for an attempt are stopped or marked terminal."""
+        from pbl4.management_backend.gateways.node_control_gateway import get_node_control_gateway
+
+        allocations = allocation_repository.list_for_attempt(conn, attempt_id, active_only=True)
+        if not allocations:
+            return
+
+        effective_now = now or datetime.now(UTC)
+        node_gw = None
+        try:
+            node_gw = get_node_control_gateway()
+        except Exception:
+            pass
+
+        for alloc in allocations:
+            alloc_id = str(alloc["allocation_id"])
+            actual = alloc.get("actual_state")
+            node_id = str(alloc.get("node_id"))
+            is_connected = node_gw is not None and node_gw.is_node_connected(node_id)
+            try:
+                if actual == allocation_repository.ACTUAL_STATE_REQUESTED:
+                    AllocationService.record_failed(
+                        conn,
+                        alloc_id,
+                        failure_code=failure_code,
+                        failure_message=failure_message,
+                    )
+                elif is_connected:
+                    AllocationService.stop_allocation(
+                        conn,
+                        alloc_id,
+                        gateway=node_gw,
+                        force=True,
+                        now=effective_now,
+                    )
+                else:
+                    allocation_repository.update_desired_state(
+                        conn, alloc_id, allocation_repository.DESIRED_STATE_STOPPED
+                    )
+                    AllocationService.record_failed(
+                        conn,
+                        alloc_id,
+                        failure_code=failure_code,
+                        failure_message=f"{failure_message} (node agent disconnected)",
+                    )
+            except Exception as exc:
+                logger.warning("Failed stopping allocation %s during cleanup: %s", alloc_id, exc)
+
 
 # Module-level convenience functions
 get_allocation = AllocationService.get_allocation
@@ -585,3 +642,4 @@ record_ended = AllocationService.record_ended
 record_failed = AllocationService.record_failed
 stop_allocation = AllocationService.stop_allocation
 fail_timed_out_dispatched_allocations = AllocationService.fail_timed_out_dispatched_allocations
+cleanup_allocations_for_attempt = AllocationService.cleanup_allocations_for_attempt

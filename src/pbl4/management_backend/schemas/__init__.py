@@ -55,7 +55,13 @@ from pbl4.management_backend.schemas.runtime import (
     RuntimeSnapshot,
     SupportedModel,
 )
-from pbl4.management_backend.schemas.step import StepDetail, StepListItem
+from pbl4.management_backend.schemas.step import (
+    StepDetail,
+    StepListItem,
+    StepMetrics,
+    StepTiming,
+    WorkerStepItem,
+)
 
 __all__ = [
     "AbortAttemptRequest",
@@ -104,7 +110,10 @@ __all__ = [
     "StartAttemptResponse",
     "StepDetail",
     "StepListItem",
+    "StepMetrics",
+    "StepTiming",
     "SupportedModel",
     "WorkerDetail",
     "WorkerSessionItem",
+    "WorkerStepItem",
 ]
