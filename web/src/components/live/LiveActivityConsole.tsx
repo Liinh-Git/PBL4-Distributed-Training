@@ -22,12 +22,14 @@ interface LiveActivityConsoleProps {
   events: DiagnosticEvent[];
   onSelectEvent: (event: DiagnosticEvent) => void;
   isLive?: boolean;
+  className?: string;
 }
 
 export const LiveActivityConsole: React.FC<LiveActivityConsoleProps> = ({
   events,
   onSelectEvent,
   isLive = true,
+  className,
 }) => {
   const [selectedCategory, setSelectedCategory] = useState<EventCategory>('all');
   const [autoFollow, setAutoFollow] = useState<boolean>(true);
@@ -141,9 +143,9 @@ export const LiveActivityConsole: React.FC<LiveActivityConsoleProps> = ({
   };
 
   return (
-    <div className="bg-[#121214] border border-white/[0.07] rounded flex flex-col overflow-hidden select-none font-sans">
+    <div className={`bg-[#121214] border border-white/[0.07] rounded flex flex-col h-full overflow-hidden select-none font-sans ${className || ''}`}>
       {/* Console Header */}
-      <div className="bg-[#121214] border-b border-white/[0.07] px-4 py-2.5 flex flex-wrap items-center justify-between gap-3">
+      <div className="shrink-0 bg-[#121214] border-b border-white/[0.07] px-4 py-2.5 flex flex-wrap items-center justify-between gap-3">
         {/* Left: Title & Live indicator & Filter chips */}
         <div className="flex items-center gap-3 flex-wrap">
           <div className="flex items-center gap-2">
@@ -239,14 +241,14 @@ export const LiveActivityConsole: React.FC<LiveActivityConsoleProps> = ({
       </div>
 
       {/* Main Console Output Area */}
-      <div className="relative flex-1 min-h-[480px] max-h-[600px] flex flex-col bg-[#0b0b0c]">
+      <div className="relative flex-1 min-h-0 flex flex-col bg-[#0b0b0c] overflow-hidden">
         <div
           ref={scrollContainerRef}
           onScroll={handleScroll}
-          className="flex-1 overflow-y-auto px-4 py-2 font-sans text-xs scroll-smooth divide-y divide-white/[0.03]"
+          className="h-full overflow-y-auto px-4 py-2 font-sans text-xs scroll-smooth divide-y divide-white/[0.03]"
         >
           {visibleEvents.length === 0 ? (
-            <div className="h-64 flex flex-col items-center justify-center text-center text-[#73737c] space-y-1">
+            <div className="h-40 flex flex-col items-center justify-center text-center text-[#73737c] space-y-1">
               <p className="text-xs text-[#a1a1a8]">No activity in this view</p>
               <p className="text-xs text-[#73737c]">
                 Waiting for incoming events or select another filter tab.
@@ -313,7 +315,7 @@ export const LiveActivityConsole: React.FC<LiveActivityConsoleProps> = ({
       </div>
 
       {/* Footer Info */}
-      <div className="bg-[#121214] border-t border-white/[0.07] px-4 py-1.5 flex items-center justify-between text-xs text-[#73737c]">
+      <div className="shrink-0 bg-[#121214] border-t border-white/[0.07] px-4 py-1.5 flex items-center justify-between text-xs text-[#73737c]">
         <span>WebSocket live event stream</span>
         <span>Click row to inspect payload</span>
       </div>

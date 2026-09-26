@@ -1,43 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { useLocation, Link } from 'react-router-dom';
-import { ChevronRight, RefreshCw } from 'lucide-react';
-import { useApp } from '../../context/AppContext';
-import { systemService } from '../../api';
-import { HealthData } from '../../types/api';
-import { deriveHealthState } from '../../utils/health';
+import { ChevronRight } from 'lucide-react';
 
 export const Topbar: React.FC = () => {
   const location = useLocation();
-  const { isRuntimeStale } = useApp();
-  const [health, setHealth] = useState<HealthData | null>(null);
-  const [healthLoading, setHealthLoading] = useState<boolean>(true);
-  const [healthError, setHealthError] = useState<boolean>(false);
-
-  const fetchHealth = async () => {
-    try {
-      setHealthLoading(true);
-      const res = await systemService.getHealth();
-      setHealth(res.data);
-      setHealthError(false);
-    } catch {
-      setHealthError(true);
-    } finally {
-      setHealthLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchHealth();
-    const timer = setInterval(fetchHealth, 30000);
-    return () => clearInterval(timer);
-  }, []);
-
-  const overallHealth = deriveHealthState(health, {
-    isRuntimeStale,
-    hasNetworkError: healthError,
-  });
-  const isHealthy = overallHealth === 'healthy';
-  const isDegraded = overallHealth === 'degraded';
 
   // Generate breadcrumb items
   const pathSegments = location.pathname.split('/').filter(Boolean);
@@ -53,7 +19,7 @@ export const Topbar: React.FC = () => {
   ];
 
   return (
-    <header className="h-12 bg-[#0b0b0c] border-b border-white/[0.07] px-6 flex items-center justify-between sticky top-0 z-30 select-none font-sans">
+    <header className="h-12 bg-[#0b0b0c] border-b border-white/[0.14] px-6 flex items-center justify-between sticky top-0 z-30 select-none font-sans">
       {/* Breadcrumb Navigation */}
       <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-xs">
         {breadcrumbs.map((crumb, idx) => {
@@ -75,46 +41,6 @@ export const Topbar: React.FC = () => {
           );
         })}
       </nav>
-
-      {/* Topbar Utility Actions & Indicators */}
-      <div className="flex items-center gap-3">
-        {/* System Health Status */}
-        <div className="flex items-center gap-1.5 text-xs text-[#a1a1a8]">
-          <span
-            className={`w-1.5 h-1.5 rounded-full ${
-              healthLoading && !health
-                ? 'bg-zinc-500 animate-pulse'
-                : isHealthy
-                ? 'bg-emerald-400'
-                : isDegraded
-                ? 'bg-amber-400'
-                : 'bg-rose-400'
-            }`}
-          />
-          <span className="text-xs">
-            {healthLoading && !health
-              ? 'Checking status...'
-              : isHealthy
-              ? 'System healthy'
-              : isDegraded
-              ? 'Degraded'
-              : 'Connection warning'}
-          </span>
-        </div>
-
-        {/* Refresh Button */}
-        <button
-          type="button"
-          onClick={() => {
-            fetchHealth();
-            window.location.reload();
-          }}
-          className="p-1 rounded text-[#73737c] hover:text-[#f3f3f4] hover:bg-white/[0.04] transition-colors"
-          title="Refresh console state"
-        >
-          <RefreshCw className="w-3.5 h-3.5" />
-        </button>
-      </div>
     </header>
   );
 };

@@ -91,7 +91,19 @@ export const DistributedTrainingFlowViz: React.FC<DistributedTrainingFlowVizProp
           <div className="w-56 shrink-0 space-y-2">
             <div className="text-xs text-[#73737c] mb-1.5 flex items-center justify-between">
               <span>Workers ({(workers || []).length})</span>
-              <span className="text-emerald-400 text-xs">All healthy</span>
+              <span className={
+                expectedWorkers > 0 && (workers || []).length < expectedWorkers
+                  ? 'text-amber-400 text-xs'
+                  : (workers || []).length > 0 && (workers || []).every(w => w.state === 'READY' || w.state === 'RUNNING')
+                  ? 'text-emerald-400 text-xs'
+                  : 'text-[#73737c] text-xs'
+              }>
+                {expectedWorkers > 0 && (workers || []).length < expectedWorkers
+                  ? `Partial (${(workers || []).length}/${expectedWorkers})`
+                  : (workers || []).length > 0 && (workers || []).every(w => w.state === 'READY' || w.state === 'RUNNING')
+                  ? 'All healthy'
+                  : 'Observing'}
+              </span>
             </div>
 
             {(workers || []).map(worker => {
@@ -158,7 +170,7 @@ export const DistributedTrainingFlowViz: React.FC<DistributedTrainingFlowVizProp
                   {/* Shard & samples info */}
                   <div className="flex items-center justify-between text-[11px] text-[#73737c] mt-1.5 pt-1.5 border-t border-white/[0.04]">
                     <span>Shard {worker.shardId || worker.workerId}</span>
-                    <span>64 samples</span>
+                    <span>{contrib?.sampleCount != null ? `${contrib.sampleCount} samples` : 'Pending'}</span>
                   </div>
                 </div>
               );
@@ -283,7 +295,7 @@ export const DistributedTrainingFlowViz: React.FC<DistributedTrainingFlowVizProp
               SGD Optimizer
             </div>
             <div className="mt-1.5 py-0.5 px-1.5 rounded text-xs font-mono font-medium text-blue-400 bg-white/[0.03]">
-              v{currentStep.outputModelVersion?.replace('v', '') || '3264'}
+              {currentStep.outputModelVersion ? `v${currentStep.outputModelVersion.replace('v', '')}` : 'Pending'}
             </div>
             <div className="text-[11px] text-[#73737c] mt-1">
               {isUpdating

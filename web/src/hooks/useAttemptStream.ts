@@ -107,9 +107,16 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
         if (snap.runtime_event_seq) {
           updateSeq(snap.runtime_event_seq);
         }
-        if (snap.state) {
-          setAttempt(prev => (prev ? { ...prev, state: snap.state } : prev));
-        }
+        setAttempt(prev => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            ...(snap.state ? { state: snap.state } : {}),
+            ...(snap.model_version !== null && snap.model_version !== undefined ? { model_version: snap.model_version } : {}),
+            ...(snap.epoch !== null && snap.epoch !== undefined ? { epoch: snap.epoch } : {}),
+            ...(snap.strategy_state ? { strategy_state: snap.strategy_state } : {}),
+          };
+        });
       }
 
       if (workersRes.status === 'fulfilled') {
@@ -124,6 +131,24 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
       setIsStale(true);
     }
   }, [attemptId]);
+
+  // Keep fresh ref to avoid stale closures in WebSocket event callbacks
+  const refreshSnapshotRef = useRef(refreshSnapshot);
+  useEffect(() => {
+    refreshSnapshotRef.current = refreshSnapshot;
+  }, [refreshSnapshot]);
+
+  // Bounded coalesced refresh to avoid request storms on rapid runtime event batches
+  const coalescedRefreshTimerRef = useRef<any>(null);
+  const triggerCoalescedRefresh = useCallback(() => {
+    if (coalescedRefreshTimerRef.current) return;
+    coalescedRefreshTimerRef.current = setTimeout(() => {
+      coalescedRefreshTimerRef.current = null;
+      if (isMountedRef.current) {
+        refreshSnapshotRef.current();
+      }
+    }, 250);
+  }, []);
 
   /**
    * Initialize REST baseline data on attempt mount
@@ -287,6 +312,20 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
                 );
               }
             }
+
+            // Coalesced reconciliation for worker, step, model, and checkpoint events
+            const eventType = (frame.payload.event_type || '').toLowerCase();
+            const isReconcileEvent =
+              eventType.startsWith('worker.') ||
+              eventType.includes('worker') ||
+              eventType.includes('session') ||
+              eventType.startsWith('step.') ||
+              eventType.startsWith('model.') ||
+              eventType.startsWith('checkpoint.');
+
+            if (isReconcileEvent) {
+              triggerCoalescedRefresh();
+            }
           } else if (frame.kind === 'SNAPSHOT') {
             const snapPayload = frame.payload;
             if (snapPayload.state) {
@@ -385,6 +424,10 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
       isMountedRef.current = false;
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
+      }
+      if (coalescedRefreshTimerRef.current) {
+        clearTimeout(coalescedRefreshTimerRef.current);
+        coalescedRefreshTimerRef.current = null;
       }
       if (wsRef.current) {
         wsRef.current.close();

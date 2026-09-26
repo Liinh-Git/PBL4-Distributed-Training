@@ -25,6 +25,7 @@ import { TrainingStep } from '../../types';
 
 export interface LiveTrainingChartsProps {
   steps: TrainingStep[];
+  expectedWorkers?: number;
   onViewAllMetrics?: () => void;
 }
 
@@ -72,6 +73,7 @@ export const ScrollableChartWrapper: React.FC<ScrollableChartWrapperProps> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const prevStepsCount = useRef<number>(totalSteps);
+  const isInitialMount = useRef<boolean>(true);
   const isScrollable = totalSteps > threshold;
   const contentWidth = useMemo(
     () => getChartContentWidth(totalSteps, threshold),
@@ -82,15 +84,34 @@ export const ScrollableChartWrapper: React.FC<ScrollableChartWrapperProps> = ({
     const el = containerRef.current;
     if (!el || !isScrollable || !autoScrollToEnd) return;
 
-    if (totalSteps > prevStepsCount.current) {
-      // When new steps arrive during live training, smoothly reveal latest steps
-      el.scrollTo({
-        left: el.scrollWidth - el.clientWidth,
-        behavior: 'smooth',
+    const scrollToLatest = (behavior: ScrollBehavior = 'auto') => {
+      if (!el) return;
+      const targetLeft = Math.max(0, el.scrollWidth - el.clientWidth);
+      if (targetLeft > 0) {
+        el.scrollTo({ left: targetLeft, behavior });
+      }
+    };
+
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      // Immediately jump to the latest steps on initial mount
+      scrollToLatest('auto');
+      const rId = requestAnimationFrame(() => {
+        scrollToLatest('auto');
       });
+      const tId = setTimeout(() => {
+        scrollToLatest('auto');
+      }, 60);
+      return () => {
+        cancelAnimationFrame(rId);
+        clearTimeout(tId);
+      };
+    } else if (totalSteps > prevStepsCount.current) {
+      // When new steps arrive during live training, smoothly reveal latest steps
+      scrollToLatest('smooth');
     }
     prevStepsCount.current = totalSteps;
-  }, [totalSteps, isScrollable, autoScrollToEnd]);
+  }, [totalSteps, isScrollable, autoScrollToEnd, contentWidth]);
 
   return (
     <div
@@ -307,15 +328,16 @@ const renderThroughputLabel = (props: any) => {
   );
 };
 
-// Helper for dynamic dot sizing on large step datasets
+// Helper for dynamic dot sizing on large step datasets - kept sleek and thin
 const getLineDot = (totalSteps: number, strokeColor: string, fillColor: string) => {
-  if (totalSteps <= 20) {
-    return { r: 4, fill: fillColor, stroke: strokeColor, strokeWidth: 1.5 };
-  }
-  if (totalSteps <= 100) {
+  if (totalSteps <= 12) {
     return { r: 2.5, fill: fillColor, stroke: strokeColor, strokeWidth: 1 };
   }
-  return { r: 2, fill: fillColor, stroke: strokeColor, strokeWidth: 0.75 };
+  if (totalSteps <= 24) {
+    return { r: 1.5, fill: fillColor, stroke: strokeColor, strokeWidth: 0.5 };
+  }
+  // For larger datasets (>24 steps), avoid thick beaded dots to keep the line light and modern; hover uses activeDot
+  return false;
 };
 
 /* =========================================================================
@@ -399,7 +421,7 @@ export const WorkerExecutionBreakdownChart: React.FC<WorkerBreakdownProps> = ({
               x={breakdown.syncMaxTime}
               stroke="#e2e8f0"
               strokeDasharray="4 4"
-              strokeWidth={1.75}
+              strokeWidth={0.75}
               label={{
                 value: 'Sync',
                 position: 'top',
@@ -503,12 +525,22 @@ export const WorkerExecutionBreakdownChart: React.FC<WorkerBreakdownProps> = ({
    ========================================================================= */
 export const LiveTrainingCharts: React.FC<LiveTrainingChartsProps> = ({
   steps,
+  expectedWorkers = 3,
   onViewAllMetrics,
 }) => {
   const chartData = useMemo(() => computeStepMetrics(steps), [steps]);
   const [selectedStepIdx, setSelectedStepIdx] = useState<number>(() => {
-    return chartData.length > 1 ? 1 : 0;
+    return chartData.length > 0 ? chartData.length - 1 : 0;
   });
+
+  const prevChartLen = useRef(chartData.length);
+  useEffect(() => {
+    // Follow latest step if previously viewing latest step
+    if (selectedStepIdx >= prevChartLen.current - 1 && chartData.length > prevChartLen.current) {
+      setSelectedStepIdx(chartData.length - 1);
+    }
+    prevChartLen.current = chartData.length;
+  }, [chartData.length, selectedStepIdx]);
 
   const activeStepItem = chartData[selectedStepIdx] || chartData[0];
   const latestItem = chartData[chartData.length - 1];
@@ -607,9 +639,9 @@ export const LiveTrainingCharts: React.FC<LiveTrainingChartsProps> = ({
                   dataKey="loss"
                   name="Global Loss"
                   stroke="#3b82f6"
-                  strokeWidth={2}
+                  strokeWidth={1.25}
                   dot={getLineDot(totalSteps, '#1d4ed8', '#3b82f6')}
-                  activeDot={{ r: 5 }}
+                  activeDot={{ r: 4, stroke: '#121214', strokeWidth: 1.5 }}
                   label={totalSteps <= 10 ? renderLossLabel : undefined}
                 />
               </LineChart>
@@ -648,16 +680,16 @@ export const LiveTrainingCharts: React.FC<LiveTrainingChartsProps> = ({
             </div>
             <div className="text-right shrink-0">
               <span className="text-xs font-mono font-semibold text-emerald-400">
-                Worker 02 (Straggler)
+                {activeStepItem?.stepLabel ?? `Step ${selectedStepIdx + 1}`}
               </span>
-              <div className="text-[10px] text-[#73737c]">Barrier Gating Node</div>
+              <div className="text-[10px] text-[#73737c]">Latency: {activeStepItem?.durationMs ?? 110}ms</div>
             </div>
           </div>
 
           <div className="pt-1 min-w-0">
             <WorkerExecutionBreakdownChart
               step={activeStepItem?.step}
-              stepNumberText={activeStepItem?.stepLabel ?? 'Step 2'}
+              stepNumberText={activeStepItem?.stepLabel ?? `Step ${selectedStepIdx + 1}`}
               stepIndex={selectedStepIdx}
               totalSteps={totalSteps}
               onPrevStep={() => setSelectedStepIdx(prev => Math.max(0, prev - 1))}
@@ -729,9 +761,9 @@ export const LiveTrainingCharts: React.FC<LiveTrainingChartsProps> = ({
                   dataKey="accuracy"
                   name="Accuracy"
                   stroke="#10b981"
-                  strokeWidth={2}
+                  strokeWidth={1.25}
                   dot={getLineDot(totalSteps, '#047857', '#10b981')}
-                  activeDot={{ r: 5 }}
+                  activeDot={{ r: 4, stroke: '#121214', strokeWidth: 1.5 }}
                   label={totalSteps <= 10 ? renderAccuracyLabel : undefined}
                 />
               </LineChart>
@@ -814,9 +846,9 @@ export const LiveTrainingCharts: React.FC<LiveTrainingChartsProps> = ({
                   dataKey="avgSamplesPerSec"
                   name="Avg Samples/sec"
                   stroke="#10b981"
-                  strokeWidth={2}
+                  strokeWidth={1.25}
                   dot={getLineDot(totalSteps, '#047857', '#10b981')}
-                  activeDot={{ r: 5 }}
+                  activeDot={{ r: 4, stroke: '#121214', strokeWidth: 1.5 }}
                   label={totalSteps <= 10 ? renderThroughputLabel : undefined}
                 />
               </LineChart>
@@ -843,12 +875,28 @@ export const LiveTrainingCharts: React.FC<LiveTrainingChartsProps> = ({
    DEDICATED FULL METRICS DASHBOARD
    (Used on the "Metrics" Tab in Live Training)
    ========================================================================= */
-export const FullMetricsDashboard: React.FC<{ steps: TrainingStep[] }> = ({ steps }) => {
+export interface FullMetricsDashboardProps {
+  steps: TrainingStep[];
+  expectedWorkers?: number;
+}
+
+export const FullMetricsDashboard: React.FC<FullMetricsDashboardProps> = ({
+  steps,
+  expectedWorkers = 3,
+}) => {
   const chartData = useMemo(() => computeStepMetrics(steps), [steps]);
   const [selectedStepIdx, setSelectedStepIdx] = useState<number>(() => {
-    return chartData.length > 1 ? 1 : 0;
+    return chartData.length > 0 ? chartData.length - 1 : 0;
   });
   const [xAxisMode, setXAxisMode] = useState<'normalized' | 'operation'>('normalized');
+
+  const prevChartLen = useRef(chartData.length);
+  useEffect(() => {
+    if (selectedStepIdx >= prevChartLen.current - 1 && chartData.length > prevChartLen.current) {
+      setSelectedStepIdx(chartData.length - 1);
+    }
+    prevChartLen.current = chartData.length;
+  }, [chartData.length, selectedStepIdx]);
 
   const activeStepItem = chartData[selectedStepIdx] || chartData[0];
   const latestItem = chartData[chartData.length - 1];
@@ -865,11 +913,6 @@ export const FullMetricsDashboard: React.FC<{ steps: TrainingStep[] }> = ({ step
             <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
               Live Real-time
             </span>
-            {isScrollable && (
-              <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20">
-                {totalSteps} steps (Horizontal Scroll Enabled)
-              </span>
-            )}
           </h3>
           <p className="text-xs text-[#73737c] mt-0.5">
             Arranged according to standard distributed training workflow: Primary Convergence &amp; Worker Breakdown first, followed by Deep BSP Diagnostics.
@@ -883,22 +926,20 @@ export const FullMetricsDashboard: React.FC<{ steps: TrainingStep[] }> = ({ step
             <button
               type="button"
               onClick={() => setXAxisMode('normalized')}
-              className={`px-2.5 py-1 rounded text-xs transition-colors ${
-                xAxisMode === 'normalized'
-                  ? 'bg-[#1e1e24] text-[#f3f3f4] font-medium'
-                  : 'text-[#73737c] hover:text-[#f3f3f4]'
-              }`}
+              className={`px-2.5 py-1 rounded text-xs transition-colors ${xAxisMode === 'normalized'
+                ? 'bg-[#1e1e24] text-[#f3f3f4] font-medium'
+                : 'text-[#73737c] hover:text-[#f3f3f4]'
+                }`}
             >
               Global Step (0, 1, 2...)
             </button>
             <button
               type="button"
               onClick={() => setXAxisMode('operation')}
-              className={`px-2.5 py-1 rounded text-xs transition-colors ${
-                xAxisMode === 'operation'
-                  ? 'bg-[#1e1e24] text-[#f3f3f4] font-medium'
-                  : 'text-[#73737c] hover:text-[#f3f3f4]'
-              }`}
+              className={`px-2.5 py-1 rounded text-xs transition-colors ${xAxisMode === 'operation'
+                ? 'bg-[#1e1e24] text-[#f3f3f4] font-medium'
+                : 'text-[#73737c] hover:text-[#f3f3f4]'
+                }`}
             >
               Op ID (#3260...)
             </button>
@@ -932,7 +973,7 @@ export const FullMetricsDashboard: React.FC<{ steps: TrainingStep[] }> = ({ step
             {activeStepItem?.durationMs ?? 110} ms
           </div>
           <div className="text-[10px] text-amber-400/90 font-medium truncate">
-            Gated by Worker 02 (+27ms push)
+            {activeStepItem ? `${activeStepItem.stepLabel} barrier latency` : 'Barrier cycle latency'}
           </div>
         </div>
 
@@ -945,7 +986,7 @@ export const FullMetricsDashboard: React.FC<{ steps: TrainingStep[] }> = ({ step
             {latestItem?.accuracy ?? 89.0}%
           </div>
           <div className="text-[10px] text-emerald-400/90 font-medium truncate">
-            Step 2: 89.0% (Valid baseline)
+            {totalSteps > 1 ? `Latest: ${latestItem?.accuracy}% (Step ${totalSteps})` : 'Baseline accuracy'}
           </div>
         </div>
 
@@ -958,7 +999,7 @@ export const FullMetricsDashboard: React.FC<{ steps: TrainingStep[] }> = ({ step
             {latestItem?.avgSamplesPerSec ?? 5000}
           </div>
           <div className="text-[10px] text-emerald-400/90 font-medium truncate">
-            Nominal throughput rate
+            {totalSteps > 0 ? `Step ${totalSteps} throughput` : 'Throughput rate'}
           </div>
         </div>
       </div>
@@ -1030,9 +1071,9 @@ export const FullMetricsDashboard: React.FC<{ steps: TrainingStep[] }> = ({ step
                     dataKey="loss"
                     name="Global Loss"
                     stroke="#3b82f6"
-                    strokeWidth={2}
+                    strokeWidth={1.25}
                     dot={getLineDot(totalSteps, '#1d4ed8', '#3b82f6')}
-                    activeDot={{ r: 5 }}
+                    activeDot={{ r: 4, stroke: '#121214', strokeWidth: 1.5 }}
                     label={totalSteps <= 10 ? renderLossLabel : undefined}
                   />
                 </LineChart>
@@ -1075,7 +1116,7 @@ export const FullMetricsDashboard: React.FC<{ steps: TrainingStep[] }> = ({ step
             <div className="pt-2 min-w-0">
               <WorkerExecutionBreakdownChart
                 step={activeStepItem?.step}
-                stepNumberText={activeStepItem?.stepLabel ?? 'Step 2'}
+                stepNumberText={activeStepItem?.stepLabel ?? `Step ${selectedStepIdx + 1}`}
                 stepIndex={selectedStepIdx}
                 totalSteps={totalSteps}
                 onPrevStep={() => setSelectedStepIdx(prev => Math.max(0, prev - 1))}
@@ -1143,9 +1184,9 @@ export const FullMetricsDashboard: React.FC<{ steps: TrainingStep[] }> = ({ step
                     dataKey="accuracy"
                     name="Accuracy"
                     stroke="#10b981"
-                    strokeWidth={2}
+                    strokeWidth={1.25}
                     dot={getLineDot(totalSteps, '#047857', '#10b981')}
-                    activeDot={{ r: 5 }}
+                    activeDot={{ r: 4, stroke: '#121214', strokeWidth: 1.5 }}
                     label={totalSteps <= 10 ? renderAccuracyLabel : undefined}
                   />
                 </LineChart>
@@ -1222,9 +1263,9 @@ export const FullMetricsDashboard: React.FC<{ steps: TrainingStep[] }> = ({ step
                     dataKey="avgSamplesPerSec"
                     name="Avg Samples/sec"
                     stroke="#10b981"
-                    strokeWidth={2}
+                    strokeWidth={1.25}
                     dot={getLineDot(totalSteps, '#047857', '#10b981')}
-                    activeDot={{ r: 5 }}
+                    activeDot={{ r: 4, stroke: '#121214', strokeWidth: 1.5 }}
                     label={totalSteps <= 10 ? renderThroughputLabel : undefined}
                   />
                 </LineChart>
@@ -1307,9 +1348,9 @@ export const FullMetricsDashboard: React.FC<{ steps: TrainingStep[] }> = ({ step
                     dataKey="durationMs"
                     name="Step Duration"
                     stroke="#3b82f6"
-                    strokeWidth={1.5}
+                    strokeWidth={1.25}
                     dot={getLineDot(totalSteps, '#1d4ed8', '#3b82f6')}
-                    activeDot={{ r: 5 }}
+                    activeDot={{ r: 4, stroke: '#121214', strokeWidth: 1.5 }}
                   />
                 </LineChart>
               </ScrollableChartWrapper>
@@ -1327,7 +1368,9 @@ export const FullMetricsDashboard: React.FC<{ steps: TrainingStep[] }> = ({ step
                   Count of valid gradient tensors collected before commit
                 </p>
               </div>
-              <span className="text-xs font-mono text-emerald-400 shrink-0">3/3 Required</span>
+              <span className="text-xs font-mono text-emerald-400 shrink-0">
+                {expectedWorkers}/{expectedWorkers} Required
+              </span>
             </div>
 
             <div className="w-full pt-1 min-w-0">
@@ -1351,7 +1394,7 @@ export const FullMetricsDashboard: React.FC<{ steps: TrainingStep[] }> = ({ step
                     tick={{ fill: '#73737c', fontSize: 10 }}
                     axisLine={{ stroke: '#27272a' }}
                     tickLine={false}
-                    domain={[0, 3]}
+                    domain={[0, expectedWorkers]}
                   />
                   <Tooltip
                     contentStyle={{
@@ -1361,7 +1404,7 @@ export const FullMetricsDashboard: React.FC<{ steps: TrainingStep[] }> = ({ step
                       fontSize: '11px',
                       color: '#f3f3f4',
                     }}
-                    formatter={(val: any) => [`${val}/3 workers`, 'Gradients Accepted']}
+                    formatter={(val: any) => [`${val}/${expectedWorkers} workers`, 'Gradients Accepted']}
                   />
                   <Bar
                     dataKey="acceptedWorkers"

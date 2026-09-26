@@ -139,11 +139,22 @@ class WorkerProcessSupervisor:
         self._load_records()
 
     def _save_records(self) -> None:
-        """Persist in-memory records to disk."""
+        """Persist in-memory records to disk with Windows file lock retry handling."""
         data = {alloc_id: r.to_dict() for alloc_id, r in self._records.items()}
         tmp_file = self._records_file.with_suffix(".tmp")
         tmp_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        tmp_file.replace(self._records_file)
+        for attempt in range(5):
+            try:
+                tmp_file.replace(self._records_file)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    logger.warning(
+                        "Permission denied replacing %s; skipping this write cycle",
+                        self._records_file,
+                    )
+                    return
+                time.sleep(0.05 * (attempt + 1))
 
     def _load_records(self) -> None:
         """Load records from disk if available."""
@@ -407,6 +418,7 @@ class WorkerProcessSupervisor:
         Any worker exiting outside the stop_worker flow is transitioned to FAILED.
         """
         with self._lock:
+            state_changed = False
             for allocation_id, record in list(self._records.items()):
                 if record.local_state == LOCAL_STATE_RUNNING:
                     proc = self._subprocesses.get(allocation_id)
@@ -421,6 +433,7 @@ class WorkerProcessSupervisor:
                             )
                             self._subprocesses.pop(allocation_id, None)
                             record.transition_to(LOCAL_STATE_FAILED, exit_code=ret)
+                            state_changed = True
                     elif record.pid is not None:
                         try:
                             p = psutil.Process(record.pid)
@@ -432,6 +445,7 @@ class WorkerProcessSupervisor:
                                     record.pid,
                                 )
                                 record.transition_to(LOCAL_STATE_FAILED, exit_code=None)
+                                state_changed = True
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
                             logger.warning(
                                 "Worker allocation %s (PID=%d) no longer exists. "
@@ -440,8 +454,10 @@ class WorkerProcessSupervisor:
                                 record.pid,
                             )
                             record.transition_to(LOCAL_STATE_FAILED, exit_code=None)
+                            state_changed = True
 
-            self._save_records()
+            if state_changed or not self._records_file.exists():
+                self._save_records()
             return list(self._records.values())
 
     def list_records(self) -> list[LocalAllocationRecord]:

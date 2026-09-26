@@ -49,13 +49,13 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
           <div>
             <div className="text-[#73737c]">Model Transition</div>
             <div className="text-blue-400 font-mono font-medium mt-1.5">
-              v{step.inputModelVersion} → v{step.outputModelVersion}
+              v{step.inputModelVersion} → {step.outputModelVersion != null ? `v${step.outputModelVersion}` : 'Pending'}
             </div>
           </div>
           <div>
             <div className="text-[#73737c]">Total Sample Count</div>
             <div className="text-[#f3f3f4] font-semibold mt-1.5">
-              {step.totalSampleCount.toLocaleString()}
+              {step.totalSampleCount != null ? step.totalSampleCount.toLocaleString() : '—'}
             </div>
           </div>
         </div>
@@ -124,7 +124,14 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/[0.04]">
-                {(step.workerContributions || []).map(w => (
+                {(step.workerContributions || []).length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="py-4 px-3 text-center text-[#73737c]">
+                      No individual worker contribution telemetry reported for this step.
+                    </td>
+                  </tr>
+                ) : (
+                  (step.workerContributions || []).map(w => (
                   <tr key={w.workerId} className="hover:bg-white/[0.02] transition-colors">
                     <td className="py-2.5 px-3 text-[#f3f3f4] font-semibold">
                       Worker {w.workerId}
@@ -171,7 +178,8 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
                       </span>
                     </td>
                   </tr>
-                ))}
+                ))
+              )}
               </tbody>
             </table>
           </div>

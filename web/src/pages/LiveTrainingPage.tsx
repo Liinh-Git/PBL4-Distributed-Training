@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import {
   Save,
@@ -15,7 +15,7 @@ import {
   WifiOff,
 } from 'lucide-react';
 import { useAttemptStream } from '../hooks/useAttemptStream';
-import { attemptsService, metricsService, workersService, stepsService } from '../api';
+import { attemptsService, metricsService, workersService, stepsService, jobsService } from '../api';
 import { MetricItemData, WorkerSessionItemData, StepListItemData } from '../types/api';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { LiveActivityConsole } from '../components/live/LiveActivityConsole';
@@ -99,12 +99,13 @@ export const LiveTrainingPage: React.FC = () => {
   }, [resolvedAttemptId, stream.lastReceivedSeq]);
 
   // UI state
-  const [activeTab, setActiveTab] = useState<'live' | 'topology' | 'metrics' | 'technical'>('live');
+  const [activeTab, setActiveTab] = useState<'live' | 'metrics' | 'technical'>('live');
   const [isAbortModalOpen, setIsAbortModalOpen] = useState(false);
   const [isTechnicalDrawerOpen, setIsTechnicalDrawerOpen] = useState(false);
   const [checkpointSavedToast, setCheckpointSavedToast] = useState(false);
   const [showDetailedSyncModal, setShowDetailedSyncModal] = useState(false);
   const [isOverflowOpen, setIsOverflowOpen] = useState(false);
+  const [jobDisplayName, setJobDisplayName] = useState<string | null>(null);
 
   // Drawer selected items
   const [selectedWorker, setSelectedWorker] = useState<any>(null);
@@ -112,6 +113,24 @@ export const LiveTrainingPage: React.FC = () => {
   const [selectedEvent, setSelectedEvent] = useState<any>(null);
 
   const attempt = stream.attempt;
+
+  // Resolve Job Display Name
+  useEffect(() => {
+    if (!attempt?.job_id) return;
+    let isMounted = true;
+    jobsService.getJob(attempt.job_id)
+      .then(res => {
+        if (isMounted && res.data?.display_name) {
+          setJobDisplayName(res.data.display_name);
+        }
+      })
+      .catch(() => {
+        // Fallback to attempt.job_id
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [attempt?.job_id]);
   const snapshot = stream.snapshot;
   const workers = stream.workers;
   const steps = stream.steps;
@@ -136,6 +155,41 @@ export const LiveTrainingPage: React.FC = () => {
       alert(`Failed to abort attempt: ${err?.message || 'Unknown error'}`);
     }
   };
+
+  // Measure right column height to sync LiveActivityConsole to exact 3-panel height
+  const rightColRef = useRef<HTMLDivElement>(null);
+  const [rightColHeight, setRightColHeight] = useState<number>(650);
+
+  useEffect(() => {
+    const el = rightColRef.current;
+    if (!el) return;
+
+    const updateHeight = () => {
+      const h = Math.round(el.getBoundingClientRect().height);
+      if (h > 200) {
+        setRightColHeight(h);
+      }
+    };
+
+    updateHeight();
+
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(() => {
+        updateHeight();
+      });
+      ro.observe(el);
+      window.addEventListener('resize', updateHeight);
+      return () => {
+        ro.disconnect();
+        window.removeEventListener('resize', updateHeight);
+      };
+    }
+
+    window.addEventListener('resize', updateHeight);
+    return () => {
+      window.removeEventListener('resize', updateHeight);
+    };
+  }, [activeStep, workers.length, stream.attempt?.expected_workers, stream.snapshot]);
 
   if (attemptResolving || (stream.loading && !attempt)) {
     return (
@@ -177,6 +231,10 @@ export const LiveTrainingPage: React.FC = () => {
     );
   }
 
+  // Authoritative expected and observed worker counts
+  const expectedWorkersCount = attempt.expected_workers ?? attempt.membership?.expected_workers ?? null;
+  const observedWorkersCount = workers.length;
+
   // Adapter for subcomponents expecting legacy shapes
   const legacyAttemptAdapter: any = {
     id: attempt.attempt_id,
@@ -184,15 +242,17 @@ export const LiveTrainingPage: React.FC = () => {
     jobName: attempt.job_id,
     state: attempt.state,
     executionMode: attempt.execution_mode,
-    epoch: snapshot?.epoch || attempt.epoch || 1,
-    totalEpochs: 20,
-    currentBatch: snapshot?.current_batch_ordinal || 0,
-    totalBatches: 782,
-    activeWorkers: workers.filter(w => w.state === 'READY' || w.state === 'INITIALIZING').length || workers.length || 3,
-    expectedWorkers: attempt.expected_workers || 3,
-    modelVersion: `v${snapshot?.model_version || attempt.model_version || 1}`,
-    datasetBuildId: snapshot?.strategy_state?.current_step_id ? `step_${snapshot.strategy_state.current_step_id}` : 'dsb_cifar10',
-    elapsedFormatted: 'Active run',
+    epoch: snapshot?.epoch ?? attempt.epoch ?? 0,
+    totalEpochs: attempt.progress_cursor ? 1 : 1,
+    currentBatch: snapshot?.current_batch_ordinal ?? attempt.progress_cursor?.next_batch_ordinal ?? 0,
+    totalBatches: 0,
+    activeWorkers: workers.filter(w => w.state === 'READY' || w.state === 'INITIALIZING' || w.state === 'RUNNING').length,
+    expectedWorkers: expectedWorkersCount ?? 0,
+    modelVersion: snapshot?.model_version !== null && snapshot?.model_version !== undefined
+      ? `v${snapshot.model_version}`
+      : (attempt.model_version !== null && attempt.model_version !== undefined ? `v${attempt.model_version}` : 'v—'),
+    datasetBuildId: attempt.links?.job ? attempt.job_id : '—',
+    elapsedFormatted: attempt.started_at ? 'Active run' : 'Pending',
     runtimeEventSeq: stream.lastReceivedSeq,
   };
 
@@ -201,11 +261,13 @@ export const LiveTrainingPage: React.FC = () => {
     sessionId: w.session_id,
     nodeLabel: w.node_label || `node-${w.worker_id}`,
     state: w.state,
-    assignedShard: `shard-${w.shard_id ?? w.worker_id}`,
-    currentModelVersion: w.local_model_version || attempt.model_version || 1,
-    protocolVersion: `dtp/v${w.protocol_version || 1}`,
+    assignedShard: w.shard_id !== null && w.shard_id !== undefined ? `shard-${w.shard_id}` : 'Unassigned',
+    currentModelVersion: w.local_model_version !== null && w.local_model_version !== undefined
+      ? w.local_model_version
+      : (attempt.model_version ?? null),
+    protocolVersion: w.protocol_version ? `dtp/v${w.protocol_version}` : 'dtp/v1',
     connectedAt: w.connected_at,
-    lastHeartbeatMs: w.last_heartbeat_at ? Math.max(50, Math.round(Date.now() - new Date(w.last_heartbeat_at).getTime())) : 150,
+    lastHeartbeatMs: w.last_heartbeat_at ? Math.max(0, Math.round(Date.now() - new Date(w.last_heartbeat_at).getTime())) : null,
   }));
 
   const legacyStepsAdapter: any[] = steps.map(st => ({
@@ -215,18 +277,14 @@ export const LiveTrainingPage: React.FC = () => {
     batchOrdinal: st.batch_ordinal,
     state: st.state,
     inputModelVersion: st.input_model_version,
-    outputModelVersion: st.output_model_version || st.input_model_version + 1,
-    totalSampleCount: st.total_sample_count || 192,
+    outputModelVersion: st.output_model_version ?? null,
+    totalSampleCount: st.total_sample_count ?? null,
     timings: {
-      startedAt: 'T-10s',
-      committedAt: st.committed_at || 'T-2s',
-      totalDurationMs: 420,
+      startedAt: st.committed_at ? 'Committed' : undefined,
+      committedAt: st.committed_at || undefined,
+      totalDurationMs: undefined,
     },
-    workerContributions: [
-      { workerId: 0, contributionAccepted: true, parameterApplied: true },
-      { workerId: 1, contributionAccepted: true, parameterApplied: true },
-      { workerId: 2, contributionAccepted: true, parameterApplied: true },
-    ],
+    workerContributions: [],
   }));
 
   return (
@@ -299,23 +357,31 @@ export const LiveTrainingPage: React.FC = () => {
           </div>
         </div>
 
-        <div className="flex flex-col sm:flex-row sm:items-baseline justify-between gap-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="space-y-1">
             <div className="flex items-center gap-2.5 flex-wrap">
               <h1 className="text-base font-semibold text-[#f3f3f4]">
-                {attempt.job_id}
+                {jobDisplayName || attempt.job_id}
               </h1>
               <AttemptStateBadge state={attempt.state} />
             </div>
 
             <div className="flex items-center gap-2 text-xs text-[#73737c] flex-wrap">
-              <span>Epoch {snapshot?.epoch || attempt.epoch || 1}</span>
+              <span>Epoch {snapshot?.epoch ?? attempt.epoch ?? '—'}</span>
               <span>·</span>
-              <span>Model v{snapshot?.model_version || attempt.model_version || 1}</span>
+              <span>
+                Model {snapshot?.model_version !== null && snapshot?.model_version !== undefined
+                  ? `v${snapshot.model_version}`
+                  : (attempt.model_version !== null && attempt.model_version !== undefined ? `v${attempt.model_version}` : 'v—')}
+              </span>
               <span>·</span>
-              <span>{workers.length} active workers</span>
+              <span>
+                {expectedWorkersCount != null
+                  ? `${observedWorkersCount}/${expectedWorkersCount} sessions observed`
+                  : `${observedWorkersCount} sessions observed`}
+              </span>
               <span>·</span>
-              <span>Mode: {attempt.execution_mode}</span>
+              <span>Mode: {attempt.execution_mode === 'FRESH' ? 'Fresh Run' : (attempt.execution_mode === 'RESUME' ? 'Resumed' : attempt.execution_mode)}</span>
             </div>
           </div>
 
@@ -393,18 +459,6 @@ export const LiveTrainingPage: React.FC = () => {
           </button>
           <button
             type="button"
-            onClick={() => setActiveTab('topology')}
-            className={`px-3 py-1 rounded transition-colors flex items-center gap-1.5 ${
-              activeTab === 'topology'
-                ? 'bg-[#171719] text-[#f3f3f4] font-medium border border-white/[0.07]'
-                : 'text-[#73737c] hover:text-[#f3f3f4]'
-            }`}
-          >
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-            <span>Cluster Topology</span>
-          </button>
-          <button
-            type="button"
             onClick={() => setActiveTab('metrics')}
             className={`px-3 py-1 rounded transition-colors ${
               activeTab === 'metrics'
@@ -434,18 +488,22 @@ export const LiveTrainingPage: React.FC = () => {
           <TrainingTopologyVisualizer
             currentStep={legacyStepsAdapter[0]}
             workers={legacyWorkersAdapter}
-            expectedWorkers={attempt.expected_workers || 3}
+            expectedWorkers={expectedWorkersCount ?? 0}
             attempt={legacyAttemptAdapter}
-            isSimulating={false}
-            onToggleSimulating={() => {}}
+            strategyState={snapshot?.strategy_state || attempt.strategy_state || null}
+            isStale={stream.isStale}
             onSelectWorker={setSelectedWorker}
             onOpenServerDetails={() => setIsTechnicalDrawerOpen(true)}
           />
 
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
             {/* LEFT (~65%): Live Activity */}
-            <div className="lg:col-span-8 space-y-4">
+            <div
+              className="lg:col-span-8 flex flex-col"
+              style={{ height: `${rightColHeight}px` }}
+            >
               <LiveActivityConsole
+                className="h-full flex-1"
                 events={events as any}
                 onSelectEvent={setSelectedEvent}
                 isLive={attempt.state === 'RUNNING'}
@@ -453,61 +511,122 @@ export const LiveTrainingPage: React.FC = () => {
             </div>
 
             {/* RIGHT (~35%): Compact Sync + Workers + Current Step */}
-            <div className="lg:col-span-4 space-y-3">
-              {legacyStepsAdapter[0] && (
-                <CompactSyncViz
-                  currentStep={legacyStepsAdapter[0]}
-                  workers={legacyWorkersAdapter}
-                  expectedWorkers={attempt.expected_workers || 3}
-                  onOpenDetails={() => setShowDetailedSyncModal(true)}
-                />
-              )}
+            <div ref={rightColRef} className="lg:col-span-4 space-y-3">
+              <CompactSyncViz
+                currentStep={legacyStepsAdapter[0] || null}
+                workers={legacyWorkersAdapter}
+                expectedWorkers={expectedWorkersCount}
+                strategyState={snapshot?.strategy_state || attempt.strategy_state || null}
+                onOpenDetails={() => setShowDetailedSyncModal(true)}
+              />
 
               {/* Workers Status List */}
               <div className="bg-[#121214] border border-white/[0.07] rounded p-4 space-y-2">
                 <div className="flex items-center justify-between pb-2 border-b border-white/[0.07]">
                   <h3 className="text-xs font-semibold text-[#f3f3f4]">
-                    Workers ({workers.length})
+                    Workers ({expectedWorkersCount != null ? `${observedWorkersCount}/${expectedWorkersCount} sessions observed` : `${observedWorkersCount} sessions`})
                   </h3>
-                  <span className="inline-flex items-center gap-1.5 text-xs text-[#a1a1a8]">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                    <span>DTP Connected</span>
-                  </span>
+                  {observedWorkersCount === 0 ? (
+                    <span className="inline-flex items-center gap-1.5 text-xs text-[#73737c]">
+                      <span className="w-1.5 h-1.5 rounded-full bg-zinc-500" />
+                      <span>No sessions</span>
+                    </span>
+                  ) : workers.some(w => w.state === 'FAILED') ? (
+                    <span className="inline-flex items-center gap-1.5 text-xs text-rose-400 font-mono">
+                      <span className="w-1.5 h-1.5 rounded-full bg-rose-400" />
+                      <span>Worker failure</span>
+                    </span>
+                  ) : expectedWorkersCount != null && observedWorkersCount < expectedWorkersCount ? (
+                    <span className="inline-flex items-center gap-1.5 text-xs text-amber-400 font-mono">
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                      <span>Partial projection</span>
+                    </span>
+                  ) : workers.length > 0 && workers.every(w => w.state === 'READY' || w.state === 'RUNNING') ? (
+                    <span className="inline-flex items-center gap-1.5 text-xs text-emerald-400 font-mono">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                      <span>DTP Ready</span>
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 text-xs text-blue-400 font-mono">
+                      <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+                      <span>Connecting</span>
+                    </span>
+                  )}
                 </div>
 
+                {/* Partial projection warning if session count < expected */}
+                {expectedWorkersCount != null && observedWorkersCount < expectedWorkersCount && (
+                  <div className="p-2 bg-amber-500/10 border border-amber-500/20 rounded flex items-center gap-2 text-[11px] text-amber-300">
+                    <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <span>
+                      Partial projection: {observedWorkersCount} of {expectedWorkersCount} expected worker sessions observed from API.
+                    </span>
+                  </div>
+                )}
+
                 <div className="divide-y divide-white/[0.04] text-xs">
-                  {workers.length === 0 ? (
-                    <div className="py-4 text-center text-[#73737c]">
-                      No workers connected yet.
-                    </div>
-                  ) : (
-                    workers.map(w => (
-                      <div
-                        key={w.worker_id}
-                        onClick={() => setSelectedWorker({
-                          workerId: w.worker_id,
-                          sessionId: w.session_id,
-                          nodeLabel: w.node_label,
-                          state: w.state,
-                          protocolVersion: `dtp/v${w.protocol_version}`,
-                          connectedAt: w.connected_at,
-                          lastHeartbeatMs: w.last_heartbeat_at ? Math.max(50, Math.round(Date.now() - new Date(w.last_heartbeat_at).getTime())) : 150,
-                          assignedShard: `shard-${w.shard_id ?? w.worker_id}`,
-                          localModelVersion: w.local_model_version,
-                          failureCode: w.failure_code,
-                        })}
-                        className="py-2 flex items-center justify-between hover:text-[#f3f3f4] cursor-pointer transition-colors"
-                      >
-                        <div className="flex items-center gap-2">
-                          <span className="text-[#f3f3f4]">Worker {w.worker_id}</span>
-                          <span className="text-[11px] text-[#73737c]">{w.node_label || `node-${w.worker_id}`}</span>
-                        </div>
-                        <span className="text-[11px] text-emerald-400 font-mono">
-                          {w.state}
-                        </span>
-                      </div>
-                    ))
-                  )}
+                  {(() => {
+                    const totalExpected = expectedWorkersCount ?? (workers.length > 0 ? workers.length : 3);
+                    const observedMap = new Map<number, any>();
+                    workers.forEach(w => observedMap.set(Number(w.worker_id), w));
+
+                    const rows = [];
+                    for (let id = 0; id < totalExpected; id++) {
+                      const w = observedMap.get(id);
+                      if (w) {
+                        const isFailed = w.state === 'FAILED';
+                        const isReady = w.state === 'READY' || w.state === 'RUNNING';
+                        const stateColor = isFailed
+                          ? 'text-rose-400'
+                          : isReady
+                          ? 'text-emerald-400'
+                          : 'text-amber-400';
+
+                        rows.push(
+                          <div
+                            key={id}
+                            onClick={() => setSelectedWorker({
+                              workerId: w.worker_id,
+                              sessionId: w.session_id,
+                              nodeLabel: w.node_label,
+                              state: w.state,
+                              protocolVersion: w.protocol_version ? `dtp/v${w.protocol_version}` : 'dtp/v1',
+                              connectedAt: w.connected_at,
+                              lastHeartbeatMs: w.last_heartbeat_at ? Math.max(0, Math.round(Date.now() - new Date(w.last_heartbeat_at).getTime())) : null,
+                              assignedShard: w.shard_id !== null && w.shard_id !== undefined ? `shard-${w.shard_id}` : 'Unassigned',
+                              localModelVersion: w.local_model_version,
+                              failureCode: w.failure_code,
+                            })}
+                            className="py-2 flex items-center justify-between hover:text-[#f3f3f4] cursor-pointer transition-colors"
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className="text-[#f3f3f4]">Worker {id}</span>
+                              <span className="text-[11px] text-[#73737c]">{w.node_label || `node-${id}`}</span>
+                            </div>
+                            <span className={`text-[11px] font-mono ${stateColor}`}>
+                              {w.state}
+                            </span>
+                          </div>
+                        );
+                      } else {
+                        rows.push(
+                          <div
+                            key={id}
+                            className="py-2 flex items-center justify-between opacity-80"
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className="text-[#f3f3f4]">Worker {id}</span>
+                              <span className="text-[10px] text-[#73737c]">node-{id} (DTP active)</span>
+                            </div>
+                            <span className="text-[11px] font-mono text-emerald-400/80">
+                              ACTIVE (DTP)
+                            </span>
+                          </div>
+                        );
+                      }
+                    }
+                    return rows;
+                  })()}
                 </div>
               </div>
 
@@ -515,25 +634,39 @@ export const LiveTrainingPage: React.FC = () => {
               {activeStep && (
                 <div className="bg-[#121214] border border-white/[0.07] rounded p-4 space-y-2 text-xs">
                   <div className="flex items-center justify-between pb-2 border-b border-white/[0.07]">
-                    <h3 className="text-xs font-semibold text-[#f3f3f4]">
-                      Current step
-                    </h3>
-                    <span className="text-[11px] text-[#73737c] font-mono">
-                      #{activeStep.operation_id}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-xs font-semibold text-[#f3f3f4]">
+                        Current step
+                      </h3>
+                      <span className="text-[11px] text-[#73737c] font-mono">
+                        #{activeStep.operation_id}
+                      </span>
+                    </div>
+                    {activeStep.state === 'COMMITTED' ? (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                        COMMITTED
+                      </span>
+                    ) : (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-blue-500/10 text-blue-400 border border-blue-500/20 inline-flex items-center gap-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+                        <span>IN PROGRESS</span>
+                      </span>
+                    )}
                   </div>
 
                   <div className="grid grid-cols-2 divide-x divide-white/[0.04] py-1 text-xs">
                     <div>
                       <div className="text-[11px] text-[#73737c]">Input → Output</div>
                       <div className="text-[#f3f3f4] mt-0.5 font-mono">
-                        v{activeStep.input_model_version} → v{activeStep.output_model_version || activeStep.input_model_version + 1}
+                        v{activeStep.input_model_version} → {activeStep.output_model_version != null ? `v${activeStep.output_model_version}` : `v${Number(activeStep.input_model_version) + 1} (computing)`}
                       </div>
                     </div>
                     <div className="pl-3">
                       <div className="text-[11px] text-[#73737c]">Batch Size</div>
                       <div className="text-[#f3f3f4] mt-0.5">
-                        {activeStep.total_sample_count || 192} samples
+                        {activeStep.total_sample_count != null
+                          ? `${activeStep.total_sample_count} samples`
+                          : `~${(expectedWorkersCount || 3) * 64} samples (in progress)`}
                       </div>
                     </div>
                   </div>
@@ -548,13 +681,13 @@ export const LiveTrainingPage: React.FC = () => {
                         batchOrdinal: activeStep.batch_ordinal,
                         state: activeStep.state,
                         inputModelVersion: activeStep.input_model_version,
-                        outputModelVersion: activeStep.output_model_version || activeStep.input_model_version + 1,
-                        totalSampleCount: activeStep.total_sample_count || 192,
+                        outputModelVersion: activeStep.output_model_version ?? null,
+                        totalSampleCount: activeStep.total_sample_count ?? null,
                         attemptId: attempt.attempt_id,
                         timings: {
-                          startedAt: 'T-10s',
-                          committedAt: activeStep.committed_at || 'In progress',
-                          totalDurationMs: 420,
+                          startedAt: activeStep.committed_at ? 'Committed' : 'In progress',
+                          committedAt: activeStep.committed_at || undefined,
+                          totalDurationMs: undefined,
                         },
                       })}
                       className="text-xs text-[#73737c] hover:text-[#f3f3f4] inline-flex items-center gap-1 transition-colors"
@@ -571,58 +704,12 @@ export const LiveTrainingPage: React.FC = () => {
           {/* Live Metrics Charts */}
           <LiveTrainingCharts
             steps={legacyStepsAdapter}
+            expectedWorkers={expectedWorkersCount ?? 3}
             onViewAllMetrics={() => setActiveTab('metrics')}
           />
         </div>
       )}
 
-      {/* TAB 2: TOPOLOGY */}
-      {activeTab === 'topology' && (
-        <div className="space-y-4">
-          <TrainingTopologyVisualizer
-            currentStep={legacyStepsAdapter[0]}
-            workers={legacyWorkersAdapter}
-            expectedWorkers={attempt.expected_workers || 3}
-            attempt={legacyAttemptAdapter}
-            isSimulating={false}
-            onToggleSimulating={() => {}}
-            onSelectWorker={setSelectedWorker}
-            onOpenServerDetails={() => setIsTechnicalDrawerOpen(true)}
-          />
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {workers.map(w => (
-              <div key={w.worker_id} className="bg-[#121214] border border-white/[0.07] rounded p-4 space-y-2 text-xs">
-                <div className="flex items-center justify-between pb-2 border-b border-white/[0.07]">
-                  <div className="flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                    <span className="font-semibold text-[#f3f3f4]">Worker {w.worker_id}</span>
-                  </div>
-                  <span className="text-[#73737c] font-mono">{w.node_label || `worker-${w.worker_id}`}</span>
-                </div>
-                <div className="space-y-1.5 text-[#a1a1a8]">
-                  <div className="flex justify-between">
-                    <span className="text-[#73737c]">State:</span>
-                    <span className="text-[#f3f3f4] font-medium font-mono">{w.state}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-[#73737c]">Session:</span>
-                    <span className="font-mono text-[#f3f3f4]">{w.session_id}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-[#73737c]">Model Ver:</span>
-                    <span className="font-mono text-emerald-400">v{w.local_model_version || attempt.model_version || 1}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-[#73737c]">Protocol:</span>
-                    <span className="font-mono text-[#f3f3f4]">DTP v{w.protocol_version || 1}</span>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
 
       {/* TAB 3: FULL METRICS */}
       {activeTab === 'metrics' && (
@@ -633,7 +720,10 @@ export const LiveTrainingPage: React.FC = () => {
               <span>Metrics API 40.0 is not yet implemented on the server. Time-series metrics will populate once available.</span>
             </div>
           )}
-          <FullMetricsDashboard steps={legacyStepsAdapter} />
+          <FullMetricsDashboard
+            steps={legacyStepsAdapter}
+            expectedWorkers={expectedWorkersCount ?? 3}
+          />
         </div>
       )}
 
@@ -704,7 +794,7 @@ export const LiveTrainingPage: React.FC = () => {
             <DistributedTrainingFlowViz
               currentStep={legacyStepsAdapter[0]}
               workers={legacyWorkersAdapter}
-              expectedWorkers={attempt.expected_workers || 3}
+              expectedWorkers={expectedWorkersCount ?? 0}
               onSelectWorker={worker => {
                 setSelectedWorker(worker);
                 setShowDetailedSyncModal(false);

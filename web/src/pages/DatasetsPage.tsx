@@ -53,9 +53,8 @@ export const DatasetsPage: React.FC = () => {
   return (
     <div className="space-y-4 w-full pb-10 font-sans select-none">
       {/* Page Header */}
-      <div className="flex flex-col sm:flex-row sm:items-baseline justify-between gap-3 pb-3 border-b border-white/[0.07]">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-white/[0.07]">
         <div>
-          <div className="text-[11px] text-[#73737c]">Datasets</div>
           <div className="flex items-center gap-2">
             <h1 className="text-base font-semibold text-[#f3f3f4]">
               Datasets

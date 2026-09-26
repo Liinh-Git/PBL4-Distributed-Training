@@ -11,11 +11,23 @@ import {
   RefreshCw,
   AlertCircle,
   ChevronLeft,
+  Square,
 } from 'lucide-react';
 import { JobStateBadge, AttemptStateBadge } from '../components/common/Badge';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
-import { jobsService } from '../api';
+import { EditJobModal } from '../components/common/EditJobModal';
+import { jobsService, attemptsService, datasetsService, datasetBuildsService } from '../api';
 import { JobListItemData, JobState } from '../types/api';
+
+const formatModelName = (modelId?: string | null): string => {
+  if (!modelId) return 'ResNet-18';
+  if (modelId === 'resnet18_groupnorm') return 'ResNet-18 (GroupNorm)';
+  if (modelId === 'resnet18_standard') return 'ResNet-18 (Standard)';
+  return modelId
+    .replace(/^model_/, '')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, c => c.toUpperCase());
+};
 
 export const JobsPage: React.FC = () => {
   const navigate = useNavigate();
@@ -32,9 +44,72 @@ export const JobsPage: React.FC = () => {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [cursorHistory, setCursorHistory] = useState<(string | null)[]>([]);
 
-  // Confirmation Modals
+  // Modals
+  const [jobToEdit, setJobToEdit] = useState<JobListItemData | null>(null);
   const [jobToArchive, setJobToArchive] = useState<JobListItemData | null>(null);
   const [jobToStart, setJobToStart] = useState<JobListItemData | null>(null);
+  const [attemptToAbort, setAttemptToAbort] = useState<{
+    jobId: string;
+    attemptId: string;
+    displayName: string;
+  } | null>(null);
+
+  // Datasets and Builds Mapping for Display
+  const [datasetsMap, setDatasetsMap] = useState<Map<string, string>>(new Map());
+  const [buildsMap, setBuildsMap] = useState<Map<string, string>>(new Map());
+  const [defaultDatasetId, setDefaultDatasetId] = useState<string>('cifar10');
+
+  useEffect(() => {
+    const loadDatasetsAndBuilds = async () => {
+      try {
+        const [dsRes, buildsRes] = await Promise.allSettled([
+          datasetsService.listDatasets({ limit: 100 }),
+          datasetBuildsService.listBuilds({ limit: 100 }),
+        ]);
+
+        const dsMap = new Map<string, string>();
+        if (dsRes.status === 'fulfilled' && dsRes.value.data) {
+          for (const ds of dsRes.value.data) {
+            dsMap.set(ds.dataset_id, ds.name);
+          }
+          if (dsRes.value.data.length > 0) {
+            setDefaultDatasetId(dsRes.value.data[0].dataset_id);
+          }
+        }
+
+        const bMap = new Map<string, string>();
+        if (buildsRes.status === 'fulfilled' && buildsRes.value.data) {
+          for (const b of buildsRes.value.data) {
+            bMap.set(b.dataset_build_id, b.dataset_id);
+          }
+        }
+
+        setDatasetsMap(dsMap);
+        setBuildsMap(bMap);
+      } catch {
+        // Fallback gracefully
+      }
+    };
+
+    loadDatasetsAndBuilds();
+  }, []);
+
+  const resolveDataset = (buildId?: string | null) => {
+    if (!buildId) return null;
+    let datasetId = buildsMap.get(buildId) || (datasetsMap.has(buildId) ? buildId : null);
+    if (!datasetId) {
+      datasetId = defaultDatasetId;
+    }
+    const rawName = datasetsMap.get(datasetId) || (datasetId.toLowerCase().includes('cifar') ? 'CIFAR-10' : datasetId);
+    return {
+      datasetId,
+      name: rawName,
+    };
+  };
+
+  const isAttemptAbortable = (state?: string | null) => {
+    return state === 'RUNNING' || state === 'CREATED' || state === 'INITIALIZING' || state === 'RESUMING';
+  };
 
   const fetchJobs = useCallback(async (cursor?: string | null) => {
     try {
@@ -119,12 +194,27 @@ export const JobsPage: React.FC = () => {
     }
   };
 
+  const handleAbortConfirm = async () => {
+    if (!attemptToAbort) return;
+    try {
+      setActionLoading(`abort_${attemptToAbort.attemptId}`);
+      await attemptsService.abortAttempt(attemptToAbort.attemptId, {
+        reason: 'Operator aborted attempt from jobs dashboard',
+      });
+      setAttemptToAbort(null);
+      await fetchJobs();
+    } catch (err: any) {
+      alert(`Failed to abort attempt: ${err?.message || 'Unknown error'}`);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   return (
     <div className="space-y-4 w-full pb-10 font-sans select-none">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-baseline justify-between gap-3 pb-3 border-b border-white/[0.07]">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-white/[0.07]">
         <div>
-          <div className="text-[11px] text-[#73737c]">Jobs</div>
           <div className="flex items-center gap-2">
             <h1 className="text-base font-semibold text-[#f3f3f4]">
               Training Jobs
@@ -140,7 +230,7 @@ export const JobsPage: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 self-start sm:self-auto">
           <button
             type="button"
             onClick={() => fetchJobs()}
@@ -196,11 +286,10 @@ export const JobsPage: React.FC = () => {
               key={st}
               type="button"
               onClick={() => setStateFilter(st)}
-              className={`px-2.5 py-1 rounded text-xs transition-colors ${
-                stateFilter === st
+              className={`px-2.5 py-1 rounded text-xs transition-colors ${stateFilter === st
                   ? 'bg-white/[0.08] text-[#f3f3f4] font-medium'
                   : 'text-[#73737c] hover:text-[#a1a1a8]'
-              }`}
+                }`}
             >
               {st}
             </button>
@@ -211,18 +300,18 @@ export const JobsPage: React.FC = () => {
       {/* Jobs Directory Table */}
       <div className="bg-[#121214] border border-white/[0.07] rounded overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
+          <table className="w-full text-left text-xs table-auto">
             <thead>
               <tr className="border-b border-white/[0.07] text-[#73737c] bg-[#121214] text-[11px]">
-                <th className="py-2.5 px-3.5 font-medium">Job Name</th>
-                <th className="py-2.5 px-3 font-medium">State</th>
-                <th className="py-2.5 px-3 font-medium">Dataset Build</th>
-                <th className="py-2.5 px-3 font-medium">Model</th>
-                <th className="py-2.5 px-3 font-medium">Strategy</th>
-                <th className="py-2.5 px-3 font-medium text-center">Attempts</th>
-                <th className="py-2.5 px-3 font-medium">Latest Run</th>
-                <th className="py-2.5 px-3 font-medium">Created</th>
-                <th className="py-2.5 px-3.5 font-medium text-right">Actions</th>
+                <th className="py-2.5 px-3.5 font-medium w-[24%] min-w-[160px]">Job Name</th>
+                <th className="py-2.5 px-3 font-medium w-[9%] min-w-[80px]">State</th>
+                <th className="py-2.5 px-3 font-medium w-[18%] min-w-[150px]">Dataset</th>
+                <th className="py-2.5 px-3 font-medium w-[13%] min-w-[110px]">Model</th>
+                <th className="py-2.5 px-3 font-medium w-[11%] min-w-[100px]">Strategy</th>
+                <th className="py-2.5 px-3 font-medium text-center w-[7%] min-w-[70px]">Attempts</th>
+                <th className="py-2.5 px-3 font-medium w-[10%] min-w-[90px]">Latest Run</th>
+                <th className="py-2.5 px-3 font-medium w-[8%] min-w-[85px]">Created</th>
+                <th className="py-2.5 px-3.5 font-medium text-left w-[190px] min-w-[190px] shrink-0">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-white/[0.04]">
@@ -261,12 +350,27 @@ export const JobsPage: React.FC = () => {
                       <JobStateBadge state={job.state} />
                     </td>
 
-                    <td className="py-2.5 px-3 text-[#a1a1a8] font-mono text-[11px]">
-                      {job.dataset_build_id || '—'}
+                    <td className="py-2.5 px-3">
+                      {(() => {
+                        const ds = resolveDataset(job.dataset_build_id);
+                        if (ds) {
+                          return (
+                            <Link
+                              to={`/datasets/${encodeURIComponent(ds.datasetId)}`}
+                              className="font-medium text-[#f3f3f4] hover:text-blue-400 transition-colors inline-flex items-center gap-1 group/ds"
+                              title={`View Dataset: ${ds.name}`}
+                            >
+                              <span>{ds.name}</span>
+                              <ChevronRight className="w-3 h-3 text-[#73737c] opacity-0 group-hover/ds:opacity-100 transition-opacity" />
+                            </Link>
+                          );
+                        }
+                        return <span className="text-[#73737c]">—</span>;
+                      })()}
                     </td>
 
                     <td className="py-2.5 px-3 text-[#a1a1a8]">
-                      {(job.model_id || 'ResNet-18').replace('model_', '').replace('_standard', '').replace('_', ' ')}
+                      {formatModelName(job.model_id)}
                     </td>
 
                     <td className="py-2.5 px-3 text-[#73737c]">
@@ -279,7 +383,13 @@ export const JobsPage: React.FC = () => {
 
                     <td className="py-2.5 px-3">
                       {job.latest_attempt ? (
-                        <AttemptStateBadge state={job.latest_attempt.state} />
+                        <Link
+                          to={`/live?attempt_id=${job.latest_attempt.attempt_id}`}
+                          title="Inspect live training attempt"
+                          className="hover:opacity-85 transition-opacity inline-flex items-center"
+                        >
+                          <AttemptStateBadge state={job.latest_attempt.state} />
+                        </Link>
                       ) : (
                         <span className="text-[#73737c]">None</span>
                       )}
@@ -289,9 +399,25 @@ export const JobsPage: React.FC = () => {
                       {job.created_at ? job.created_at.slice(0, 10) : '—'}
                     </td>
 
-                    <td className="py-2.5 px-3.5 text-right">
-                      <div className="flex items-center justify-end gap-1">
-                        {(job.state === 'READY' || job.state === 'DRAFT') && (
+                    <td className="py-2.5 px-3.5 text-left w-[190px] min-w-[190px] shrink-0">
+                      <div className="flex items-center justify-start gap-1.5">
+                        {/* Slot 1: Run or Abort */}
+                        {isAttemptAbortable(job.latest_attempt?.state) ? (
+                          <button
+                            type="button"
+                            disabled={actionLoading === `abort_${job.latest_attempt!.attempt_id}`}
+                            onClick={() => setAttemptToAbort({
+                              jobId: job.job_id,
+                              attemptId: job.latest_attempt!.attempt_id,
+                              displayName: job.display_name,
+                            })}
+                            className="inline-flex items-center justify-center gap-1 w-16 py-1 text-xs rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 transition-colors shrink-0"
+                            title="Abort running attempt"
+                          >
+                            <Square className="w-3 h-3 fill-rose-400 text-rose-400" />
+                            <span>{actionLoading === `abort_${job.latest_attempt!.attempt_id}` ? '...' : 'Abort'}</span>
+                          </button>
+                        ) : job.state === 'READY' || job.state === 'DRAFT' ? (
                           <button
                             type="button"
                             disabled={actionLoading === `launch_${job.job_id}`}
@@ -302,44 +428,72 @@ export const JobsPage: React.FC = () => {
                                 handleLaunch(job.job_id);
                               }
                             }}
-                            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded bg-[#171719] hover:bg-[#202024] text-[#f3f3f4] border border-white/[0.07] transition-colors disabled:opacity-50"
+                            className="inline-flex items-center justify-center gap-1 w-16 py-1 text-xs rounded bg-[#171719] hover:bg-[#202024] text-[#f3f3f4] border border-white/[0.07] transition-colors disabled:opacity-50 shrink-0"
                             title={job.state === 'DRAFT' ? "Start Training (freeze draft to READY)" : "Launch Training Run"}
                           >
                             <Play className="w-3 h-3 text-[#73737c]" />
-                            <span>{actionLoading === `launch_${job.job_id}` ? 'Starting...' : 'Run'}</span>
+                            <span>{actionLoading === `launch_${job.job_id}` ? '...' : 'Run'}</span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled
+                            className="inline-flex items-center justify-center gap-1 w-16 py-1 text-xs rounded bg-[#171719]/40 text-[#73737c]/30 border border-white/[0.03] cursor-not-allowed shrink-0"
+                            title="Archived jobs cannot be run"
+                          >
+                            <Play className="w-3 h-3 opacity-30" />
+                            <span>Run</span>
                           </button>
                         )}
 
-                        {job.state === 'DRAFT' && (
-                          <Link
-                            to={`/jobs/${job.job_id}/edit`}
-                            className="p-1 rounded text-[#73737c] hover:text-[#f3f3f4] hover:bg-white/[0.05] transition-colors inline-flex items-center justify-center"
-                            title="Edit Draft Job"
+                        {/* Slot 2: Edit */}
+                        {job.state === 'DRAFT' || job.state === 'READY' ? (
+                          <button
+                            type="button"
+                            onClick={() => setJobToEdit(job)}
+                            className="w-7 h-7 rounded text-[#73737c] hover:text-[#f3f3f4] hover:bg-white/[0.05] transition-colors inline-flex items-center justify-center shrink-0 cursor-pointer"
+                            title={job.state === 'DRAFT' ? "Edit Draft Job" : "Edit Job"}
                           >
                             <Pencil className="w-3.5 h-3.5" />
-                          </Link>
+                          </button>
+                        ) : (
+                          <span
+                            className="w-7 h-7 rounded text-[#73737c]/20 inline-flex items-center justify-center cursor-not-allowed shrink-0"
+                            title="Archived jobs cannot be edited"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </span>
                         )}
 
+                        {/* Slot 3: Clone */}
                         <button
                           type="button"
                           disabled={actionLoading === `clone_${job.job_id}`}
                           onClick={() => handleClone(job.job_id)}
-                          className="p-1 rounded text-[#73737c] hover:text-[#f3f3f4] hover:bg-white/[0.05] transition-colors disabled:opacity-50"
+                          className="w-7 h-7 rounded text-[#73737c] hover:text-[#f3f3f4] hover:bg-white/[0.05] transition-colors disabled:opacity-50 inline-flex items-center justify-center shrink-0"
                           title="Clone Job Specification"
                         >
                           <Copy className="w-3.5 h-3.5" />
                         </button>
 
-                        {job.state !== 'ARCHIVED' && (
+                        {/* Slot 4: Archive */}
+                        {job.state !== 'ARCHIVED' ? (
                           <button
                             type="button"
                             disabled={actionLoading === `archive_${job.job_id}`}
                             onClick={() => setJobToArchive(job)}
-                            className="p-1 rounded text-[#73737c] hover:text-rose-400 hover:bg-white/[0.05] transition-colors disabled:opacity-50"
+                            className="w-7 h-7 rounded text-[#73737c] hover:text-rose-400 hover:bg-white/[0.05] transition-colors disabled:opacity-50 inline-flex items-center justify-center shrink-0"
                             title="Archive Job"
                           >
                             <Archive className="w-3.5 h-3.5" />
                           </button>
+                        ) : (
+                          <span
+                            className="w-7 h-7 rounded text-[#73737c]/20 inline-flex items-center justify-center cursor-not-allowed shrink-0"
+                            title="Job is already archived"
+                          >
+                            <Archive className="w-3.5 h-3.5" />
+                          </span>
                         )}
                       </div>
                     </td>
@@ -416,6 +570,37 @@ export const JobsPage: React.FC = () => {
             </p>
           </div>
         }
+      />
+
+      {/* Abort Attempt Confirmation Modal */}
+      <ConfirmationModal
+        isOpen={!!attemptToAbort}
+        onClose={() => setAttemptToAbort(null)}
+        onConfirm={handleAbortConfirm}
+        title="Abort Training Attempt"
+        confirmLabel="Abort Attempt"
+        isDestructive={true}
+        message={
+          <div className="space-y-2 text-xs text-[#a1a1a8]">
+            <p>
+              Are you sure you want to abort the active training attempt for job <strong className="text-[#f3f3f4]">{attemptToAbort?.displayName}</strong>?
+            </p>
+            <p>
+              All active worker tasks will be stopped immediately and the attempt will transition to <span className="text-rose-400 font-mono">ABORTED</span>.
+            </p>
+          </div>
+        }
+      />
+
+      {/* Edit Job Modal */}
+      <EditJobModal
+        job={jobToEdit}
+        isOpen={!!jobToEdit}
+        onClose={() => setJobToEdit(null)}
+        onSuccess={() => {
+          setJobToEdit(null);
+          fetchJobs(cursorHistory.length > 0 ? cursorHistory[cursorHistory.length - 1] : undefined);
+        }}
       />
     </div>
   );

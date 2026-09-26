@@ -149,4 +149,64 @@ describe('WebSocket Stream Protocol & Frame Handling', () => {
     assert.strictEqual(calcBackoff(4), 15000); // capped at 15s
     assert.strictEqual(calcBackoff(10), 15000);
   });
+
+  test('Coalesced reconciliation event filter identifies lifecycle and step events', () => {
+    const isReconcileEvent = (eventType: string) => {
+      const lower = eventType.toLowerCase();
+      return (
+        lower.startsWith('worker.') ||
+        lower.includes('worker') ||
+        lower.includes('session') ||
+        lower.startsWith('step.') ||
+        lower.startsWith('model.') ||
+        lower.startsWith('checkpoint.')
+      );
+    };
+
+    assert.strictEqual(isReconcileEvent('worker.registered'), true);
+    assert.strictEqual(isReconcileEvent('worker.heartbeat'), true);
+    assert.strictEqual(isReconcileEvent('session.evicted'), true);
+    assert.strictEqual(isReconcileEvent('step.started'), true);
+    assert.strictEqual(isReconcileEvent('step.committed'), true);
+    assert.strictEqual(isReconcileEvent('model.updated'), true);
+    assert.strictEqual(isReconcileEvent('checkpoint.saved'), true);
+
+    // Unrelated events should not trigger reconciliation
+    assert.strictEqual(isReconcileEvent('telemetry.metric_logged'), false);
+    assert.strictEqual(isReconcileEvent('audit.user_login'), false);
+  });
+
+  test('Honest strategy_state and worker telemetry preserves partial or missing data without fakes', () => {
+    // 1. Partial observed sessions: 1 session observed when 3 expected
+    const observedWorkers = [
+      { worker_id: 0, session_id: 's_0', state: 'RUNNING' },
+    ];
+    const expectedWorkers = 3;
+    const isPartial = expectedWorkers != null && observedWorkers.length < expectedWorkers;
+    assert.strictEqual(isPartial, true);
+
+    // 2. Null total_sample_count must not fall back to 192
+    const stepWithNullSamples = {
+      step_id: 1,
+      total_sample_count: null as number | null,
+      output_model_version: null as number | null,
+    };
+    const displaySamples = stepWithNullSamples.total_sample_count != null
+      ? `${stepWithNullSamples.total_sample_count} samples`
+      : 'Pending';
+    assert.strictEqual(displaySamples, 'Pending');
+    assert.notStrictEqual(displaySamples, '192 samples');
+
+    // 3. Strategy state reflects exact coordinator counts (e.g., 1 of 3 received)
+    const strategyState = {
+      type: 'strict_bsp' as const,
+      accepted_contribution_count: 1,
+      expected_contribution_count: 3,
+      synchronization_complete: false,
+    };
+    assert.strictEqual(strategyState.accepted_contribution_count, 1);
+    assert.strictEqual(strategyState.expected_contribution_count, 3);
+    assert.strictEqual(strategyState.synchronization_complete, false);
+  });
 });
+

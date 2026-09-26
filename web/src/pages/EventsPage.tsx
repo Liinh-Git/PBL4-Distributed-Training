@@ -179,9 +179,8 @@ export const EventsPage: React.FC = () => {
   return (
     <div className="space-y-4 w-full pb-10 font-sans select-none">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-baseline justify-between gap-3 pb-3 border-b border-white/[0.07]">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-white/[0.07]">
         <div>
-          <div className="text-[11px] text-[#73737c]">Diagnostics</div>
           <div className="flex items-center gap-2">
             <h1 className="text-base font-semibold text-[#f3f3f4]">
               Events
@@ -197,7 +196,7 @@ export const EventsPage: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 self-start sm:self-auto">
           <div className="text-xs text-[#73737c]">
             {events.length} total events
           </div>

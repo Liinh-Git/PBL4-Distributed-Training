@@ -1,35 +1,161 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import {
-  Activity,
-  Play,
-  Pause,
-  RotateCw,
-  Zap,
-  Wifi,
-  ChevronRight,
-  Info,
   Server as ServerIcon,
-  Cloud as CloudIcon,
-  ArrowRight,
   ShieldCheck,
   CheckCircle2,
-  Clock,
   HardDrive,
-  Cpu,
+  Activity,
+  Radio,
+  Wifi,
 } from 'lucide-react';
 import { TrainingStep, WorkerSession, Attempt } from '../../types';
+import { StrategyStateStrictBSPData } from '../../types/api';
 
-export type TopologyPhaseId = 'phase-1' | 'phase-2' | 'phase-3' | 'phase-4';
-
-interface TrainingTopologyVisualizerProps {
-  currentStep?: TrainingStep;
+export interface TrainingTopologyVisualizerProps {
+  currentStep?: TrainingStep | null;
   workers: WorkerSession[];
   expectedWorkers: number;
-  attempt?: Attempt;
+  attempt?: Attempt | null;
+  strategyState?: StrategyStateStrictBSPData | null;
+  isStale?: boolean;
   isSimulating?: boolean;
   onToggleSimulating?: () => void;
   onSelectWorker?: (worker: WorkerSession) => void;
   onOpenServerDetails?: () => void;
+}
+
+interface NodeCoord {
+  x: number;
+  y: number;
+  cardWidth: number;
+  cardHeight: number;
+}
+
+interface TopologyLayout {
+  serverCoord: { x: number; y: number; width: number; height: number };
+  workerCoords: NodeCoord[];
+}
+
+/**
+ * Dynamically computes balanced 2D coordinates for Parameter Server and N Workers.
+ * Ensures zero vertical or horizontal collisions on 1000 x 580 canvas.
+ */
+function getTopologyLayout(count: number): TopologyLayout {
+  const serverWidth = 240;
+  const serverHeight = 145;
+  const monitorWidth = 220;
+  const monitorHeight = 135;
+
+  if (count <= 0) {
+    return {
+      serverCoord: { x: 500, y: 280, width: serverWidth, height: serverHeight },
+      workerCoords: [],
+    };
+  }
+
+  if (count === 1) {
+    // 1 Worker: Beautiful horizontal pipeline (Worker on left, Parameter Server on right)
+    // Completely eliminates vertical stacking collision!
+    return {
+      serverCoord: { x: 670, y: 280, width: serverWidth, height: serverHeight },
+      workerCoords: [
+        { x: 260, y: 280, cardWidth: monitorWidth, cardHeight: monitorHeight },
+      ],
+    };
+  }
+
+  if (count === 2) {
+    // 2 Workers: Symmetric horizontal pipeline (Worker 0 on Left, Server in Center, Worker 1 on Right)
+    return {
+      serverCoord: { x: 500, y: 280, width: serverWidth, height: serverHeight },
+      workerCoords: [
+        { x: 190, y: 280, cardWidth: monitorWidth, cardHeight: monitorHeight },
+        { x: 810, y: 280, cardWidth: monitorWidth, cardHeight: monitorHeight },
+      ],
+    };
+  }
+
+  if (count === 3) {
+    // 3 Workers: Balanced triangular topology
+    // W0: Top-Left (200, 130)
+    // W1: Top-Right (800, 130)
+    // Server: Center (500, 275)
+    // W2: Bottom-Center (500, 480) -> Gap of 70px from server bottom (347px) to W2 top (412px)!
+    return {
+      serverCoord: { x: 500, y: 275, width: serverWidth, height: serverHeight },
+      workerCoords: [
+        { x: 200, y: 130, cardWidth: monitorWidth, cardHeight: monitorHeight },
+        { x: 800, y: 130, cardWidth: monitorWidth, cardHeight: monitorHeight },
+        { x: 500, y: 480, cardWidth: monitorWidth, cardHeight: monitorHeight },
+      ],
+    };
+  }
+
+  if (count === 4) {
+    // 4 Workers: 4 corners around central server
+    return {
+      serverCoord: { x: 500, y: 280, width: serverWidth, height: serverHeight },
+      workerCoords: [
+        { x: 200, y: 130, cardWidth: 200, cardHeight: 125 },
+        { x: 800, y: 130, cardWidth: 200, cardHeight: 125 },
+        { x: 200, y: 440, cardWidth: 200, cardHeight: 125 },
+        { x: 800, y: 440, cardWidth: 200, cardHeight: 125 },
+      ],
+    };
+  }
+
+  // N >= 5: Adaptive radial distribution around central server
+  const rx = 350;
+  const ry = 190;
+  const cardW = count <= 6 ? 180 : 150;
+  const cardH = count <= 6 ? 115 : 100;
+
+  const coords: NodeCoord[] = [];
+  for (let i = 0; i < count; i++) {
+    const angle = -Math.PI / 2 + (2 * Math.PI * i) / count;
+    coords.push({
+      x: Math.round(500 + rx * Math.cos(angle)),
+      y: Math.round(280 + ry * Math.sin(angle)),
+      cardWidth: cardW,
+      cardHeight: cardH,
+    });
+  }
+
+  return {
+    serverCoord: { x: 500, y: 280, width: serverWidth, height: serverHeight },
+    workerCoords: coords,
+  };
+}
+
+/**
+ * Computes visible link endpoints (x1, y1) and (x2, y2) between outer edges
+ * of worker monitor and server rack chassis.
+ */
+function computeLinkEndpoints(
+  wx: number,
+  wy: number,
+  wWidth: number,
+  wHeight: number,
+  sx: number,
+  sy: number,
+  sWidth: number,
+  sHeight: number
+) {
+  const dx = sx - wx;
+  const dy = sy - wy;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  if (dist === 0) return { x1: wx, y1: wy, x2: sx, y2: sy };
+
+  // Offset cleanly past the boundaries
+  const wRadius = Math.min(wWidth, wHeight) / 2 + 4;
+  const sRadius = Math.min(sWidth, sHeight) / 2 + 6;
+
+  const x1 = Math.round(wx + (dx / dist) * wRadius);
+  const y1 = Math.round(wy + (dy / dist) * wRadius);
+  const x2 = Math.round(sx - (dx / dist) * sRadius);
+  const y2 = Math.round(sy - (dy / dist) * sRadius);
+
+  return { x1, y1, x2, y2 };
 }
 
 export const TrainingTopologyVisualizer: React.FC<TrainingTopologyVisualizerProps> = ({
@@ -37,554 +163,234 @@ export const TrainingTopologyVisualizer: React.FC<TrainingTopologyVisualizerProp
   workers,
   expectedWorkers,
   attempt,
-  isSimulating,
-  onToggleSimulating,
+  strategyState,
+  isStale = false,
   onSelectWorker,
   onOpenServerDetails,
 }) => {
-  // Manual override or follow live training
-  const [isLiveAutoMode, setIsLiveAutoMode] = useState<boolean>(true);
-  const [selectedPhase, setSelectedPhase] = useState<TopologyPhaseId>('phase-2');
-  const [showMetricsOverlay, setShowMetricsOverlay] = useState<boolean>(true);
-  const [selectedNodeId, setSelectedNodeId] = useState<'cloud' | 'ps' | 'w1' | 'w2' | 'w3' | null>(null);
+  const [showMetricsHud, setShowMetricsHud] = useState<boolean>(true);
 
-  // Dynamic live phase calculation based on active training step state
-  const livePhase: TopologyPhaseId = useMemo(() => {
-    if (!currentStep) return 'phase-2';
-
-    // If step just created or initial epoch/batch 1 with fresh state
-    if (currentStep.state === 'CREATED' || currentStep.state === 'DISPATCHED') {
-      return 'phase-1';
-    }
-    // If waiting or collecting gradients
-    if (currentStep.state === 'COLLECTING_GRADIENTS') {
-      const contributions = currentStep.workerContributions || [];
-      const acceptedCount = contributions.filter(c => c.contributionAccepted).length;
-      if (acceptedCount >= expectedWorkers) {
-        return 'phase-3'; // all arrived, ready to barrier sync
-      }
-      return 'phase-2'; // pushing in progress
-    }
-    // If aggregating or updating global weights
-    if (currentStep.state === 'AGGREGATING' || currentStep.state === 'UPDATING') {
-      return 'phase-3';
-    }
-    // If broadcasting or waiting for workers to apply new parameters
-    if (
-      currentStep.state === 'BROADCASTING' ||
-      currentStep.state === 'WAITING_PARAMETER_APPLIED' ||
-      currentStep.state === 'COMMITTED'
-    ) {
-      return 'phase-4';
-    }
-
-    return 'phase-2';
-  }, [currentStep, expectedWorkers]);
-
-  // Active phase being displayed
-  const currentPhase = isLiveAutoMode ? livePhase : selectedPhase;
-
-  // Real-time animation counter for oscillating transfer progress & speed simulation
-  const [tick, setTick] = useState(0);
+  // Accessibility: detect prefers-reduced-motion
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
   useEffect(() => {
-    const timer = setInterval(() => {
-      setTick(t => (t + 1) % 100);
-    }, 400);
-    return () => clearInterval(timer);
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    setPrefersReducedMotion(mediaQuery.matches);
+    const handler = (e: MediaQueryListEvent) => setPrefersReducedMotion(e.matches);
+    mediaQuery.addEventListener('change', handler);
+    return () => mediaQuery.removeEventListener('change', handler);
   }, []);
 
-  // Compute worker dynamic attributes based on current phase
-  const worker1Data = useMemo(() => {
-    switch (currentPhase) {
-      case 'phase-1': // Image 1: Worker 01 Download OK
-        return {
-          title: 'Worker 01',
-          status: 'Download OK',
-          subtext: 'Dataset shard 00 ready',
-          stateType: 'ok' as const,
-          speed: '',
-          progress: 100,
-          latency: '1.2ms',
-          bandwidth: '10 Gbps',
-          packetType: 'CIFAR-10 Shard (175 MB)',
-          flowDirection: 'from-center' as const,
-          linkActive: true,
-        };
-      case 'phase-2': // Image 2: Worker 01 Pushing (69%), 5MB/s
-        const p2Pct = 65 + (tick % 7);
-        return {
-          title: 'Worker 01',
-          status: `Pushing (${p2Pct}%)`,
-          subtext: 'Uploading gradient tensors',
-          stateType: 'active' as const,
-          speed: '5MB/s',
-          progress: p2Pct,
-          latency: '4.2ms',
-          bandwidth: '5.0 MB/s',
-          packetType: 'FP32 Gradients (18.2 MB)',
-          flowDirection: 'to-center' as const,
-          linkActive: true,
-        };
-      case 'phase-3': // Image 3: Worker 01 Push OK
-        return {
-          title: 'Worker 01',
-          status: 'Push OK',
-          subtext: 'Gradients delivered to barrier',
-          stateType: 'ok' as const,
-          speed: '',
-          progress: 100,
-          latency: '1.1ms',
-          bandwidth: '10 Gbps',
-          packetType: 'ACK Verified (0 pkt loss)',
-          flowDirection: 'to-center' as const,
-          linkActive: true,
-        };
-      case 'phase-4': // Image 4: Worker 01 Pulling new Parameter (69%), 3MB/s
-        const p4Pct = 68 + (tick % 5);
-        return {
-          title: 'Worker 01',
-          status: `Pulling new Parameter (${p4Pct}%)`,
-          subtext: 'Downloading updated weights',
-          stateType: 'active' as const,
-          speed: '3MB/s',
-          progress: p4Pct,
-          latency: '3.8ms',
-          bandwidth: '3.0 MB/s',
-          packetType: 'Model Weights v3264 (44.8 MB)',
-          flowDirection: 'from-center' as const,
-          linkActive: true,
-        };
-    }
-  }, [currentPhase, tick]);
+  const observedWorkersCount = workers.length;
+  const isPartialProjection = expectedWorkers > 0 && observedWorkersCount < expectedWorkers;
 
-  const worker2Data = useMemo(() => {
-    switch (currentPhase) {
-      case 'phase-1': // Image 1: Worker 02 Downloading (69%), 2MB/s
-        const p1Pct = 68 + (tick % 4);
-        return {
-          title: 'Worker 02',
-          status: `Downloading (${p1Pct}%)`,
-          subtext: 'Streaming data partition 01',
-          stateType: 'active' as const,
-          speed: '2MB/s',
-          progress: p1Pct,
-          latency: '2.1ms',
-          bandwidth: '2.0 MB/s',
-          packetType: 'CIFAR-10 Shard (120/175 MB)',
-          flowDirection: 'from-center' as const,
-          linkActive: true,
-        };
-      case 'phase-2': // Image 2: Worker 02 Training (80%)
-        const p2Pct = 78 + (tick % 6);
-        return {
-          title: 'Worker 02',
-          status: `Training (${p2Pct}%)`,
-          subtext: 'Backward pass backprop in progress',
-          stateType: 'active' as const,
-          speed: '',
-          progress: p2Pct,
-          latency: '0.8ms',
-          bandwidth: 'Standby link',
-          packetType: 'Batch 3264 Tensor forward/back',
-          flowDirection: 'to-center' as const,
-          linkActive: true,
-        };
-      case 'phase-3': // Image 3: Worker 02 Push OK
-        return {
-          title: 'Worker 02',
-          status: 'Push OK',
-          subtext: 'Gradients delivered to barrier',
-          stateType: 'ok' as const,
-          speed: '',
-          progress: 100,
-          latency: '1.3ms',
-          bandwidth: '10 Gbps',
-          packetType: 'ACK Verified (0 pkt loss)',
-          flowDirection: 'to-center' as const,
-          linkActive: true,
-        };
-      case 'phase-4': // Image 4: Worker 02 Pull new Parameter OK
-        return {
-          title: 'Worker 02',
-          status: 'Pull new Parameter OK',
-          subtext: 'Weights synchronized',
-          stateType: 'ok' as const,
-          speed: '',
-          progress: 100,
-          latency: '1.2ms',
-          bandwidth: '10 Gbps',
-          packetType: 'Model v3264 active in VRAM',
-          flowDirection: 'from-center' as const,
-          linkActive: true,
-        };
-    }
-  }, [currentPhase, tick]);
+  // Real step state derived strictly from currentStep
+  const stepState = currentStep?.state;
+  const isCollecting = stepState === 'COLLECTING_GRADIENTS';
+  const isUpdating = stepState === 'AGGREGATING' || stepState === 'UPDATING';
+  const isBroadcasting = stepState === 'BROADCASTING' || stepState === 'WAITING_PARAMETER_APPLIED';
+  const isCommitted = stepState === 'COMMITTED';
 
-  const worker3Data = useMemo(() => {
-    switch (currentPhase) {
-      case 'phase-1': // Image 1: Worker 03 Verifying Data...
-        return {
-          title: 'Worker 03',
-          status: 'Verifying Data...',
-          subtext: 'Validating SHA-256 shard checksum',
-          stateType: 'active' as const,
-          speed: '',
-          progress: 94,
-          latency: '1.5ms',
-          bandwidth: 'Local NVMe',
-          packetType: 'Checksum integrity matching',
-          flowDirection: 'from-center' as const,
-          linkActive: true,
-        };
-      case 'phase-2': // Image 2: Worker 03 Push OK
-        return {
-          title: 'Worker 03',
-          status: 'Push OK',
-          subtext: 'First to reach barrier gate',
-          stateType: 'ok' as const,
-          speed: '',
-          progress: 100,
-          latency: '0.9ms',
-          bandwidth: '10 Gbps',
-          packetType: 'FP32 Gradients buffered',
-          flowDirection: 'to-center' as const,
-          linkActive: true,
-        };
-      case 'phase-3': // Image 3: Worker 03 Push OK
-        return {
-          title: 'Worker 03',
-          status: 'Push OK',
-          subtext: 'Gradients delivered to barrier',
-          stateType: 'ok' as const,
-          speed: '',
-          progress: 100,
-          latency: '0.9ms',
-          bandwidth: '10 Gbps',
-          packetType: 'ACK Verified (0 pkt loss)',
-          flowDirection: 'to-center' as const,
-          linkActive: true,
-        };
-      case 'phase-4': // Image 4: Worker 03 Pull new Parameter OK
-        return {
-          title: 'Worker 03',
-          status: 'Pull new Parameter OK',
-          subtext: 'Weights synchronized',
-          stateType: 'ok' as const,
-          speed: '',
-          progress: 100,
-          latency: '1.0ms',
-          bandwidth: '10 Gbps',
-          packetType: 'Model v3264 active in VRAM',
-          flowDirection: 'from-center' as const,
-          linkActive: true,
-        };
-    }
-  }, [currentPhase, tick]);
+  // Authoritative barrier sync counts from strategy_state or currentStep
+  const contributions = currentStep?.workerContributions || [];
+  const acceptedCount = strategyState?.accepted_contribution_count ?? (
+    contributions.length > 0
+      ? contributions.filter(c => c.contributionAccepted).length
+      : null
+  );
+  const expectedCount = strategyState?.expected_contribution_count ?? (
+    expectedWorkers > 0 ? expectedWorkers : null
+  );
+  const isSyncComplete = strategyState?.synchronization_complete ?? (isCommitted);
 
-  // Center Server Data
-  const centerServerData = useMemo(() => {
-    if (currentPhase === 'phase-1') {
-      return {
-        isCloud: true,
-        name: 'Cloud Server',
-        status: 'Distributing Shards',
-        substatus: 'Active Egress: 4.8 MB/s',
-        stateType: 'cloud' as const,
-        borderClass: 'border-sky-500/50 shadow-sky-500/10',
-        textColor: 'text-sky-300',
-        badgeColor: 'bg-sky-500/10 text-sky-400 border-sky-500/20',
-        details: 'Dataset repository distributing preprocessed CIFAR-10 shards to cluster workers',
-      };
-    }
-
-    if (currentPhase === 'phase-2') {
-      return {
-        isCloud: false,
-        name: 'Parameter Server',
-        status: 'Syncing: 1/3 Workers',
-        substatus: 'Wait: 8ms',
-        stateType: 'ok' as const,
-        borderClass: 'border-emerald-500 shadow-emerald-500/10',
-        textColor: 'text-emerald-400',
-        badgeColor: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
-        details: 'Strict BSP barrier gate: 1 of 3 gradient sets arrived; holding until all workers report',
-      };
-    }
-
-    if (currentPhase === 'phase-3') {
-      return {
-        isCloud: false,
-        name: 'Parameter Server',
-        status: 'Syncing...',
-        substatus: 'Aggregating All-Reduce',
-        stateType: 'active' as const,
-        borderClass: 'border-amber-400 shadow-amber-400/10',
-        textColor: 'text-amber-400',
-        badgeColor: 'bg-amber-400/10 text-amber-400 border-amber-400/20',
-        details: 'All 3 worker contributions locked in barrier. Calculating SGD momentum update',
-      };
-    }
-
-    // Phase 4
-    return {
-      isCloud: false,
-      name: 'Parameter Server',
-      status: 'Sync OK',
-      substatus: 'Broadcasting v3264',
-      stateType: 'ok' as const,
-      borderClass: 'border-emerald-500 shadow-emerald-500/10',
-      textColor: 'text-emerald-400',
-      badgeColor: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
-      details: 'Global parameter tensors updated and acknowledged. Distributing weights to workers',
-    };
-  }, [currentPhase]);
-
-  // Phase explanations for title bar
-  const phaseMetadata = {
-    'phase-1': {
-      number: '1',
-      title: 'Dataset Shard Ingestion & Cloud Server Distribution',
-      subtitle: 'Workers download dataset partitions from Cloud Server with checksum verification (Image 1)',
-    },
-    'phase-2': {
-      number: '2',
-      title: 'Forward/Backward Execution & Gradient Push',
-      subtitle: 'Workers compute gradients and push tensors to Parameter Server; PS waits for 3/3 barrier (Image 2)',
-    },
-    'phase-3': {
-      number: '3',
-      title: 'Strict BSP Barrier Gate & Gradient Aggregation',
-      subtitle: 'All workers pushed OK; Parameter Server aggregates tensors & executes optimizer update (Image 3)',
-    },
-    'phase-4': {
-      number: '4',
-      title: 'Parameter Broadcast & Worker Pull',
-      subtitle: 'Parameter Server sync OK; Workers pull the updated model parameters for the next batch (Image 4)',
-    },
-  };
+  // Compute non-overlapping layout
+  const { serverCoord, workerCoords } = useMemo(
+    () => getTopologyLayout(observedWorkersCount),
+    [observedWorkersCount]
+  );
 
   return (
     <div className="bg-[#121214] border border-white/[0.07] rounded p-4 space-y-3 font-sans select-none relative overflow-hidden">
-      {/* Topology Header */}
+      {/* Header with Title and Status Badges */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-white/[0.07]">
         <div className="space-y-0.5">
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+          <div className="flex items-center gap-2 flex-wrap">
+            <span
+              className={`w-2 h-2 rounded-full ${
+                isStale
+                  ? 'bg-amber-400'
+                  : attempt?.state === 'RUNNING' || isCommitted
+                  ? 'bg-emerald-400 animate-pulse'
+                  : 'bg-blue-400'
+              }`}
+              aria-hidden="true"
+            />
             <h2 className="text-xs font-semibold text-[#f3f3f4] uppercase tracking-wider">
               Cluster Training Topology
             </h2>
-            <span className="text-[11px] text-[#73737c]">·</span>
+            <span className="text-[11px] text-[#73737c]" aria-hidden="true">·</span>
             <span className="text-xs text-[#a1a1a8]">
-              {centerServerData.name} & Worker Transmission Pipeline
+              Parameter Server & Worker Cluster (DTP/1)
             </span>
           </div>
           <p className="text-xs text-[#73737c]">
-            {phaseMetadata[currentPhase].subtitle}
+            {isStale
+              ? 'Telemetry snapshot is stale. Coordinator state may not reflect live workers.'
+              : isCollecting
+              ? `Step #${currentStep?.operationId} · Workers computing backward pass & streaming gradients to Parameter Server.`
+              : isUpdating
+              ? `Step #${currentStep?.operationId} · Strict BSP barrier gate locked · Computing all-reduce gradient aggregation.`
+              : isBroadcasting
+              ? `Step #${currentStep?.operationId} · Broadcasting updated canonical model parameters to cluster workers.`
+              : isCommitted
+              ? `Step #${currentStep?.operationId} · Step barrier committed · All gradients applied · Awaiting next batch.`
+              : 'Workers compute gradients and exchange tensors with Parameter Server via DTP/1 persistent TCP.'}
           </p>
         </div>
 
-        {/* Phase selector & Mode Switch */}
-        <div className="flex items-center gap-1.5 flex-wrap self-start sm:self-auto text-xs">
-          {/* Live Auto Toggle */}
-          <button
-            type="button"
-            onClick={() => setIsLiveAutoMode(prev => !prev)}
-            className={`px-2.5 py-1 rounded transition-colors flex items-center gap-1.5 ${
-              isLiveAutoMode
-                ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
-                : 'bg-[#171719] text-[#73737c] hover:text-[#f3f3f4] border border-white/[0.07]'
-            }`}
-            title="Automatically switch topology stages as the live training advances"
-          >
-            <Zap className={`w-3 h-3 ${isLiveAutoMode ? 'text-emerald-400' : 'text-[#73737c]'}`} />
-            <span>{isLiveAutoMode ? 'Auto Live Synced' : 'Manual Stage'}</span>
-          </button>
+        {/* Live Controls: HUD toggle & Realtime Exchange Indicator */}
+        <div className="flex items-center gap-2 flex-wrap self-start sm:self-auto text-xs">
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#171719] border border-white/[0.07] text-[#a1a1a8]">
+            <Radio className="w-3 h-3 text-emerald-400" aria-hidden="true" />
+            <span>Auto Live Synced</span>
+          </div>
 
-          {/* Toggle Metrics Overlay */}
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#171719] border border-white/[0.07] text-xs">
+            <span
+              className={`w-2 h-2 rounded-full ${
+                isBroadcasting
+                  ? 'bg-emerald-400 animate-pulse'
+                  : isUpdating
+                  ? 'bg-amber-400 animate-pulse'
+                  : isCollecting || attempt?.state === 'RUNNING'
+                  ? 'bg-amber-400 animate-pulse'
+                  : 'bg-zinc-500'
+              }`}
+              aria-hidden="true"
+            />
+            <span className="text-[#f3f3f4] font-medium">
+              {isBroadcasting
+                ? 'Phát tán trọng số (PS ➔ Worker)'
+                : isUpdating
+                ? 'Đồng bộ Barrier (All-Reduce)'
+                : isCollecting || attempt?.state === 'RUNNING'
+                ? 'Gửi Gradient (Worker ➔ PS)'
+                : isCommitted
+                ? 'Đã đồng bộ · Sẵn sàng bước tiếp'
+                : 'DTP/1 Sẵn sàng'}
+            </span>
+          </div>
+
           <button
             type="button"
-            onClick={() => setShowMetricsOverlay(prev => !prev)}
+            onClick={() => setShowMetricsHud(prev => !prev)}
             className={`px-2.5 py-1 rounded transition-colors flex items-center gap-1 border border-white/[0.07] ${
-              showMetricsOverlay
+              showMetricsHud
                 ? 'bg-[#1a1a1e] text-[#f3f3f4]'
                 : 'bg-[#171719] text-[#73737c] hover:text-[#f3f3f4]'
             }`}
-            title="Toggle transmission path metrics (speeds, progress, latency)"
+            title="Toggle transmission line telemetry badges"
           >
-            <Wifi className="w-3 h-3 text-blue-400" />
+            <Wifi className="w-3 h-3 text-blue-400" aria-hidden="true" />
             <span>Metrics HUD</span>
           </button>
         </div>
       </div>
 
-      {/* Stage Selector Pills (Reflecting the 4 drawings) */}
-      <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs scrollbar-none">
-        <span className="text-[11px] text-[#73737c] shrink-0 mr-1">Topology Views:</span>
-        <button
-          type="button"
-          onClick={() => {
-            setIsLiveAutoMode(false);
-            setSelectedPhase('phase-1');
-          }}
-          className={`px-2.5 py-1 rounded transition-colors shrink-0 flex items-center gap-1.5 ${
-            currentPhase === 'phase-1'
-              ? 'bg-sky-950/60 text-sky-300 border border-sky-500/40 font-medium'
-              : 'bg-[#171719] text-[#73737c] hover:text-[#f3f3f4] border border-white/[0.06]'
-          }`}
-        >
-          <CloudIcon className="w-3 h-3 text-sky-400" />
-          <span>1. Cloud Download</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => {
-            setIsLiveAutoMode(false);
-            setSelectedPhase('phase-2');
-          }}
-          className={`px-2.5 py-1 rounded transition-colors shrink-0 flex items-center gap-1.5 ${
-            currentPhase === 'phase-2'
-              ? 'bg-amber-950/60 text-amber-300 border border-amber-500/40 font-medium'
-              : 'bg-[#171719] text-[#73737c] hover:text-[#f3f3f4] border border-white/[0.06]'
-          }`}
-        >
-          <Activity className="w-3 h-3 text-amber-400" />
-          <span>2. Gradient Push (1/3 Sync)</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => {
-            setIsLiveAutoMode(false);
-            setSelectedPhase('phase-3');
-          }}
-          className={`px-2.5 py-1 rounded transition-colors shrink-0 flex items-center gap-1.5 ${
-            currentPhase === 'phase-3'
-              ? 'bg-amber-950/60 text-amber-300 border border-amber-500/40 font-medium'
-              : 'bg-[#171719] text-[#73737c] hover:text-[#f3f3f4] border border-white/[0.06]'
-          }`}
-        >
-          <ShieldCheck className="w-3 h-3 text-amber-400" />
-          <span>3. Barrier Sync (Syncing...)</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => {
-            setIsLiveAutoMode(false);
-            setSelectedPhase('phase-4');
-          }}
-          className={`px-2.5 py-1 rounded transition-colors shrink-0 flex items-center gap-1.5 ${
-            currentPhase === 'phase-4'
-              ? 'bg-emerald-950/60 text-emerald-300 border border-emerald-500/40 font-medium'
-              : 'bg-[#171719] text-[#73737c] hover:text-[#f3f3f4] border border-white/[0.06]'
-          }`}
-        >
-          <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-          <span>4. Parameter Pull (Sync OK)</span>
-        </button>
-      </div>
-
-      {/* Main Canvas Area: Interactive SVG & HTML Node overlay */}
+      {/* Main Canvas Area: Interactive SVG Link Layer with Computer Monitors & Server Chassis */}
       <div className="relative w-full h-[540px] sm:h-[580px] bg-[#09090b] rounded border border-white/[0.07] overflow-hidden">
         {/* Subtle grid pattern background */}
         <div
           className="absolute inset-0 opacity-[0.035] pointer-events-none"
           style={{
-            backgroundImage: `radial-gradient(#ffffff 1px, transparent 1px)`,
+            backgroundImage: 'radial-gradient(#ffffff 1px, transparent 1px)',
             backgroundSize: '24px 24px',
           }}
+          aria-hidden="true"
         />
 
-        {/* SVG Transmission Vector Paths & Moving Packet Signals */}
+        {/* SVG Transmission Vector Paths & Moving Packet Signals (Rendered BEHIND nodes) */}
         <svg
           className="absolute inset-0 w-full h-full pointer-events-none"
-          viewBox="0 0 1000 600"
+          viewBox="0 0 1000 580"
           preserveAspectRatio="none"
+          aria-hidden="true"
         >
-          <defs>
-            {/* Arrowhead markers */}
-            <marker
-              id="arrow-green"
-              viewBox="0 0 10 10"
-              refX="8"
-              refY="5"
-              markerWidth="7"
-              markerHeight="7"
-              orient="auto-start-reverse"
-            >
-              <path d="M 0 1 L 10 5 L 0 9 z" fill="#10b981" />
-            </marker>
-            <marker
-              id="arrow-amber"
-              viewBox="0 0 10 10"
-              refX="8"
-              refY="5"
-              markerWidth="7"
-              markerHeight="7"
-              orient="auto-start-reverse"
-            >
-              <path d="M 0 1 L 10 5 L 0 9 z" fill="#f59e0b" />
-            </marker>
-            <marker
-              id="arrow-sky"
-              viewBox="0 0 10 10"
-              refX="8"
-              refY="5"
-              markerWidth="7"
-              markerHeight="7"
-              orient="auto-start-reverse"
-            >
-              <path d="M 0 1 L 10 5 L 0 9 z" fill="#38bdf8" />
-            </marker>
-            <marker
-              id="arrow-gray"
-              viewBox="0 0 10 10"
-              refX="8"
-              refY="5"
-              markerWidth="7"
-              markerHeight="7"
-              orient="auto-start-reverse"
-            >
-              <path d="M 0 1 L 10 5 L 0 9 z" fill="#52525b" />
-            </marker>
-          </defs>
+          {/* Radar orbit line when 0 workers */}
+          {observedWorkersCount === 0 && (
+            <ellipse
+              cx="500"
+              cy="280"
+              rx="320"
+              ry="160"
+              fill="none"
+              stroke="#27272a"
+              strokeWidth="1.5"
+              strokeDasharray="4 6"
+              opacity="0.6"
+            />
+          )}
 
-          {/* Node Center Coordinates in 1000x600 viewBox:
-              Center: (500, 275)
-              Worker 01: (230, 140)
-              Worker 02: (770, 140)
-              Worker 03: (500, 480)
-          */}
+          {/* Dynamic SVG links between each worker monitor and server rack */}
+          {workers.map((worker, idx) => {
+            const coord = workerCoords[idx];
+            if (!coord) return null;
 
-          {/* PATH 1: Center <--> Worker 01 */}
-          {(() => {
-            const isToCenter = worker1Data.flowDirection === 'to-center';
-            const isFromCenter = worker1Data.flowDirection === 'from-center';
-            const strokeColor =
-              worker1Data.stateType === 'ok'
-                ? '#10b981'
-                : currentPhase === 'phase-1'
-                ? '#38bdf8'
-                : '#f59e0b';
-            const markerId =
-              worker1Data.stateType === 'ok'
-                ? 'url(#arrow-green)'
-                : currentPhase === 'phase-1'
-                ? 'url(#arrow-sky)'
-                : 'url(#arrow-amber)';
+            const isWorkerFailed = worker.state === 'FAILED' || worker.state === 'DISCONNECTED';
+            const { x1, y1, x2, y2 } = computeLinkEndpoints(
+              coord.x,
+              coord.y,
+              coord.cardWidth,
+              coord.cardHeight,
+              serverCoord.x,
+              serverCoord.y,
+              serverCoord.width,
+              serverCoord.height
+            );
 
-            // Line segment between node boundaries
-            // W1 center (230, 140) -> Center (500, 275): dx = 270, dy = 135
-            // Start at W1 edge: (285, 168), End at Center edge: (445, 248)
-            const x1 = isToCenter ? 285 : 445;
-            const y1 = isToCenter ? 168 : 248;
-            const x2 = isToCenter ? 445 : 285;
-            const y2 = isToCenter ? 248 : 168;
+            // Flow configuration based strictly on currentStep state & running status
+            const isBroadcastingNow = isBroadcasting;
+            const shouldAnimate =
+              !prefersReducedMotion &&
+              (attempt?.state === 'RUNNING' || isCollecting || isBroadcastingNow || isUpdating);
+
+            let strokeColor = '#f59e0b';
+            let strokeDash = '4 4';
+            let pathD = `M ${x1} ${y1} L ${x2} ${y2}`; // worker -> server
+            let particleColor = '#fbbf24';
+
+            if (isWorkerFailed) {
+              strokeColor = '#f43f5e';
+              strokeDash = '3 3';
+            } else if (isBroadcastingNow) {
+              strokeColor = '#10b981';
+              strokeDash = '4 4';
+              pathD = `M ${x2} ${y2} L ${x1} ${y1}`; // server -> worker
+              particleColor = '#34d399';
+            } else if (isUpdating) {
+              strokeColor = '#f59e0b';
+              strokeDash = '2 2';
+              particleColor = '#f59e0b';
+            } else if (isCommitted) {
+              strokeColor = '#10b981';
+              strokeDash = 'none';
+              particleColor = '#34d399';
+            }
 
             return (
-              <g key="link-w1">
-                {/* Background path */}
+              <g key={`topo-link-${worker.sessionId || worker.workerId || idx}`}>
+                {/* Glow underlay line */}
+                <line
+                  x1={x1}
+                  y1={y1}
+                  x2={x2}
+                  y2={y2}
+                  stroke={strokeColor}
+                  strokeWidth="4"
+                  strokeOpacity="0.18"
+                />
+
+                {/* Main transmission line */}
                 <line
                   x1={x1}
                   y1={y1}
@@ -592,462 +398,373 @@ export const TrainingTopologyVisualizer: React.FC<TrainingTopologyVisualizerProp
                   y2={y2}
                   stroke={strokeColor}
                   strokeWidth="2.2"
-                  strokeOpacity={worker1Data.linkActive ? '0.9' : '0.4'}
-                  strokeDasharray={worker1Data.stateType === 'active' ? '5 4' : 'none'}
-                  markerEnd={markerId}
-                  className="transition-all duration-300"
+                  strokeOpacity="0.85"
+                  strokeDasharray={strokeDash}
                 />
 
-                {/* Animated transmission pulse particle */}
-                {worker1Data.linkActive && (
-                  <circle r="4.5" fill={strokeColor} opacity="0.95">
-                    <animateMotion
-                      path={`M ${x1} ${y1} L ${x2} ${y2}`}
-                      dur="1.4s"
-                      repeatCount="indefinite"
-                    />
-                  </circle>
+                {/* Realtime flowing data packet pulses along the transmission vector */}
+                {shouldAnimate && !isWorkerFailed && (
+                  <>
+                    <circle r="4" fill={particleColor} opacity="0.95">
+                      <animateMotion
+                        path={pathD}
+                        dur="1.5s"
+                        repeatCount="indefinite"
+                      />
+                    </circle>
+                    <circle r="2.5" fill={particleColor} opacity="0.75">
+                      <animateMotion
+                        path={pathD}
+                        dur="1.5s"
+                        begin="0.75s"
+                        repeatCount="indefinite"
+                      />
+                    </circle>
+                  </>
                 )}
               </g>
             );
-          })()}
-
-          {/* PATH 2: Center <--> Worker 02 */}
-          {(() => {
-            const isToCenter = worker2Data.flowDirection === 'to-center';
-            const isFromCenter = worker2Data.flowDirection === 'from-center';
-            const strokeColor =
-              worker2Data.stateType === 'ok'
-                ? '#10b981'
-                : currentPhase === 'phase-1'
-                ? '#38bdf8'
-                : '#f59e0b';
-            const markerId =
-              worker2Data.stateType === 'ok'
-                ? 'url(#arrow-green)'
-                : currentPhase === 'phase-1'
-                ? 'url(#arrow-sky)'
-                : 'url(#arrow-amber)';
-
-            // Center (500, 275) <--> W2 (770, 140)
-            const x1 = isToCenter ? 715 : 555;
-            const y1 = isToCenter ? 168 : 248;
-            const x2 = isToCenter ? 555 : 715;
-            const y2 = isToCenter ? 248 : 168;
-
-            return (
-              <g key="link-w2">
-                <line
-                  x1={x1}
-                  y1={y1}
-                  x2={x2}
-                  y2={y2}
-                  stroke={strokeColor}
-                  strokeWidth="2.2"
-                  strokeOpacity={worker2Data.linkActive ? '0.9' : '0.4'}
-                  strokeDasharray={worker2Data.stateType === 'active' ? '5 4' : 'none'}
-                  markerEnd={markerId}
-                  className="transition-all duration-300"
-                />
-
-                {worker2Data.linkActive && (
-                  <circle r="4.5" fill={strokeColor} opacity="0.95">
-                    <animateMotion
-                      path={`M ${x1} ${y1} L ${x2} ${y2}`}
-                      dur="1.5s"
-                      repeatCount="indefinite"
-                    />
-                  </circle>
-                )}
-              </g>
-            );
-          })()}
-
-          {/* PATH 3: Center <--> Worker 03 */}
-          {(() => {
-            const isToCenter = worker3Data.flowDirection === 'to-center';
-            const isFromCenter = worker3Data.flowDirection === 'from-center';
-            const strokeColor =
-              worker3Data.stateType === 'ok'
-                ? '#10b981'
-                : currentPhase === 'phase-1'
-                ? '#38bdf8'
-                : '#f59e0b';
-            const markerId =
-              worker3Data.stateType === 'ok'
-                ? 'url(#arrow-green)'
-                : currentPhase === 'phase-1'
-                ? 'url(#arrow-sky)'
-                : 'url(#arrow-amber)';
-
-            // Center (500, 275) <--> W3 (500, 480)
-            const x1 = 500;
-            const y1 = isToCenter ? 415 : 340;
-            const x2 = 500;
-            const y2 = isToCenter ? 340 : 415;
-
-            return (
-              <g key="link-w3">
-                <line
-                  x1={x1}
-                  y1={y1}
-                  x2={x2}
-                  y2={y2}
-                  stroke={strokeColor}
-                  strokeWidth="2.2"
-                  strokeOpacity={worker3Data.linkActive ? '0.9' : '0.4'}
-                  strokeDasharray={worker3Data.stateType === 'active' ? '5 4' : 'none'}
-                  markerEnd={markerId}
-                  className="transition-all duration-300"
-                />
-
-                {worker3Data.linkActive && (
-                  <circle r="4.5" fill={strokeColor} opacity="0.95">
-                    <animateMotion
-                      path={`M ${x1} ${y1} L ${x2} ${y2}`}
-                      dur="1.3s"
-                      repeatCount="indefinite"
-                    />
-                  </circle>
-                )}
-              </g>
-            );
-          })()}
+          })}
         </svg>
 
-        {/* TRANSMISSION SPECS & METRICS LABELS (Thông số đường truyền) */}
-        {showMetricsOverlay && (
-          <>
-            {/* Link 1 Metric Badge (Between Center & Worker 01) */}
+        {/* TRANSMISSION LINE TELEMETRY BADGES (Trao / Nhận) */}
+        {showMetricsHud && workers.map((worker, idx) => {
+          const coord = workerCoords[idx];
+          if (!coord) return null;
+
+          const midX = (coord.x + serverCoord.x) / 2;
+          const midY = (coord.y + serverCoord.y) / 2;
+          const contrib = contributions.find(c => c.workerId === worker.workerId);
+
+          const isTransferringToWorker = isBroadcasting;
+
+          return (
             <div
-              className="absolute left-[33%] top-[25%] -translate-x-1/2 -translate-y-1/2 z-10 pointer-events-auto"
+              key={`hud-badge-${worker.sessionId || worker.workerId || idx}`}
+              style={{
+                left: `${(midX / 1000) * 100}%`,
+                top: `${(midY / 580) * 100}%`,
+              }}
+              className="absolute -translate-x-1/2 -translate-y-1/2 z-10 pointer-events-none"
             >
-              <div className="bg-[#121214]/90 backdrop-blur-xs border border-white/[0.08] px-2 py-1 rounded shadow-lg text-[10px] space-y-0.5 max-w-[140px]">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[#73737c]">Speed:</span>
-                  <span className={worker1Data.speed ? 'text-amber-400 font-mono font-medium' : 'text-emerald-400 font-mono'}>
-                    {worker1Data.speed || '10 Gbps OK'}
+              <div className="bg-[#121214]/95 backdrop-blur-xs border border-white/[0.1] px-2.5 py-1.5 rounded shadow-lg text-[10px] space-y-1 min-w-[125px] text-center">
+                <div className="flex items-center justify-between gap-2 border-b border-white/[0.06] pb-0.5">
+                  <span className="text-[#73737c]">DTP/1 Link:</span>
+                  <span className="text-emerald-400 font-medium">TCP Connected</span>
+                </div>
+                <div className="flex items-center justify-between gap-1 text-[9px]">
+                  <span className="text-[#73737c]">Trao/Nhận:</span>
+                  <span className={isTransferringToWorker ? 'text-emerald-400 font-medium' : 'text-amber-400 font-medium'}>
+                    {isTransferringToWorker
+                      ? `PS ➔ W: Trọng số v${currentStep?.outputModelVersion || attempt?.modelVersion || '—'}`
+                      : isUpdating
+                      ? 'PS: Đồng bộ Barrier'
+                      : contrib?.contributionAccepted
+                      ? 'W ➔ PS: Đã nộp Gradient'
+                      : 'W ➔ PS: Đang đẩy Gradient'}
                   </span>
                 </div>
-                <div className="flex items-center justify-between gap-2 text-[9px] text-[#73737c]">
-                  <span>Latency:</span>
-                  <span className="text-[#a1a1a8] font-mono">{worker1Data.latency}</span>
-                </div>
+              </div>
+            </div>
+          );
+        })}
+
+        {/* PARAMETER SERVER RACK CHASSIS */}
+        <div
+          onClick={onOpenServerDetails}
+          style={{
+            left: `${(serverCoord.x / 1000) * 100}%`,
+            top: `${(serverCoord.y / 580) * 100}%`,
+            width: `${serverCoord.width}px`,
+          }}
+          className="absolute -translate-x-1/2 -translate-y-1/2 z-20 cursor-pointer group transition-transform duration-200 hover:scale-[1.02]"
+          role="button"
+          tabIndex={0}
+          onKeyDown={e => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              onOpenServerDetails?.();
+            }
+          }}
+          aria-label="Inspect Parameter Server details"
+        >
+          <div
+            className={`w-full rounded-lg bg-[#141416] p-3 shadow-2xl border-2 transition-all duration-300 relative ${
+              isStale
+                ? 'border-amber-500/50 shadow-amber-500/10'
+                : isUpdating
+                ? 'border-amber-400 shadow-amber-400/20'
+                : isCommitted || isBroadcasting
+                ? 'border-emerald-500 shadow-emerald-500/20'
+                : 'border-emerald-500 shadow-emerald-500/10'
+            }`}
+          >
+            {/* Left & Right Rack Ears with screw indicators */}
+            <div className="absolute left-1 top-2 bottom-2 w-1 border-r border-zinc-700/60 flex flex-col justify-between py-1" aria-hidden="true">
+              <div className="w-1 h-1 rounded-full bg-zinc-600" />
+              <div className="w-1 h-1 rounded-full bg-zinc-600" />
+            </div>
+            <div className="absolute right-1 top-2 bottom-2 w-1 border-l border-zinc-700/60 flex flex-col justify-between py-1" aria-hidden="true">
+              <div className="w-1 h-1 rounded-full bg-zinc-600" />
+              <div className="w-1 h-1 rounded-full bg-zinc-600" />
+            </div>
+
+            {/* Server Faceplate Header */}
+            <div className="flex items-center justify-between pl-2 pr-2 pb-1.5 mb-1.5 border-b border-white/[0.08]">
+              <div className="flex items-center gap-1.5">
+                <ServerIcon
+                  className={`w-3.5 h-3.5 ${
+                    isUpdating
+                      ? 'text-amber-400'
+                      : isCommitted || isBroadcasting
+                      ? 'text-emerald-400'
+                      : 'text-emerald-400'
+                  }`}
+                  aria-hidden="true"
+                />
+                <span className="text-xs font-bold text-[#f3f3f4] tracking-wide">
+                  Parameter Server
+                </span>
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" aria-hidden="true" />
+                <span className="text-[10px] font-mono text-[#73737c]">DTP/1</span>
               </div>
             </div>
 
-            {/* Link 2 Metric Badge (Between Center & Worker 02) */}
-            <div
-              className="absolute left-[67%] top-[25%] -translate-x-1/2 -translate-y-1/2 z-10 pointer-events-auto"
-            >
-              <div className="bg-[#121214]/90 backdrop-blur-xs border border-white/[0.08] px-2 py-1 rounded shadow-lg text-[10px] space-y-0.5 max-w-[140px]">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[#73737c]">Speed:</span>
-                  <span className={worker2Data.speed ? 'text-amber-400 font-mono font-medium' : 'text-emerald-400 font-mono'}>
-                    {worker2Data.speed || '10 Gbps OK'}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between gap-2 text-[9px] text-[#73737c]">
-                  <span>Latency:</span>
-                  <span className="text-[#a1a1a8] font-mono">{worker2Data.latency}</span>
-                </div>
+            {/* Server Console Status Panel */}
+            <div className="mx-1 bg-[#09090b] rounded p-2 border border-white/[0.04] space-y-1 font-mono text-[10px]">
+              <div className="flex items-center justify-between">
+                <span className="text-[#73737c]">Barrier:</span>
+                <span
+                  className={`font-semibold ${
+                    isCommitted
+                      ? 'text-emerald-400'
+                      : isUpdating
+                      ? 'text-amber-400'
+                      : 'text-emerald-400'
+                  }`}
+                >
+                  {isBroadcasting
+                    ? 'Broadcasting Weights'
+                    : isSyncComplete
+                    ? 'Barrier Synced'
+                    : isUpdating
+                    ? 'All-Reduce Update'
+                    : acceptedCount != null && expectedCount != null
+                    ? `Syncing: ${acceptedCount}/${expectedCount} Workers`
+                    : 'Awaiting Gradients'}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[#73737c]">
+                <span>Step:</span>
+                <span className="text-[#f3f3f4]">
+                  {currentStep ? `#${currentStep.operationId}` : 'Pending'}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[#73737c]">
+                <span>Model:</span>
+                <span className="text-emerald-400">
+                  {currentStep?.outputModelVersion
+                    ? `v${currentStep.outputModelVersion}`
+                    : (attempt?.modelVersion || '—')}
+                </span>
               </div>
             </div>
 
-            {/* Link 3 Metric Badge (Between Center & Worker 03) */}
-            <div
-              className="absolute left-[54%] top-[65%] -translate-x-1/2 -translate-y-1/2 z-10 pointer-events-auto"
-            >
-              <div className="bg-[#121214]/90 backdrop-blur-xs border border-white/[0.08] px-2 py-1 rounded shadow-lg text-[10px] space-y-0.5 max-w-[140px]">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[#73737c]">Speed:</span>
-                  <span className={worker3Data.speed ? 'text-amber-400 font-mono font-medium' : 'text-emerald-400 font-mono'}>
-                    {worker3Data.speed || '10 Gbps OK'}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between gap-2 text-[9px] text-[#73737c]">
-                  <span>Latency:</span>
-                  <span className="text-[#a1a1a8] font-mono">{worker3Data.latency}</span>
-                </div>
+            {/* Server LED Drive Status Bar */}
+            <div className="mx-1 mt-2 pt-1.5 border-t border-white/[0.06] flex items-center justify-between text-[9px] text-[#73737c]">
+              <div className="flex items-center gap-1" aria-hidden="true">
+                <span className="w-1 h-1 rounded-full bg-emerald-400" />
+                <span className="w-1 h-1 rounded-full bg-emerald-400" />
+                <span className="w-1 h-1 rounded-full bg-amber-400" />
               </div>
+              <span className="font-mono">Runtime Coordinator</span>
             </div>
-          </>
+          </div>
+        </div>
+
+        {/* EMPTY STATE (When 0 workers are observed) */}
+        {observedWorkersCount === 0 && (
+          <div className="absolute left-1/2 bottom-[12%] -translate-x-1/2 z-20 text-center max-w-sm px-4 py-2.5 bg-[#121214]/90 border border-white/[0.08] rounded-lg shadow-xl text-xs space-y-1">
+            <div className="flex items-center justify-center gap-1.5 text-[#a1a1a8] font-medium">
+              <Radio className="w-3.5 h-3.5 text-zinc-500" aria-hidden="true" />
+              <span>0 Worker Sessions Observed</span>
+            </div>
+            <p className="text-[11px] text-[#73737c]">
+              Workers will appear here dynamically as they connect to the Parameter Server via DTP/1.
+            </p>
+          </div>
         )}
 
-        {/* NODE 1: WORKER 01 (Top-Left) */}
-        <div
-          onClick={() => {
-            setSelectedNodeId('w1');
-            const w = workers[0];
-            if (w && onSelectWorker) onSelectWorker(w);
-          }}
-          className={`absolute left-[7%] sm:left-[12%] lg:left-[14%] top-[6%] sm:top-[8%] z-20 cursor-pointer group transition-transform duration-200 hover:scale-[1.03]`}
-        >
-          <div
-            className={`w-36 h-36 sm:w-44 sm:h-44 rounded-full bg-[#121214] flex flex-col items-center justify-center p-3 text-center transition-all duration-300 shadow-xl border-2 ${
-              worker1Data.stateType === 'ok'
-                ? 'border-emerald-500 shadow-emerald-500/10'
-                : 'border-amber-400 shadow-amber-400/10'
-            }`}
-          >
-            {/* Retro-modern Computer/Workstation Illustration */}
-            <div className="relative mb-1">
-              <svg className="w-10 h-10 sm:w-11 sm:h-11" viewBox="0 0 64 64" fill="none">
-                {/* Monitor display */}
-                <rect x="12" y="10" width="40" height="28" rx="4" fill="#1e293b" stroke="#64748b" strokeWidth="2.5" />
-                <rect x="17" y="15" width="30" height="18" rx="1.5" fill="#0f172a" />
-                {/* Code lines on screen */}
-                <line x1="20" y1="20" x2="36" y2="20" stroke={worker1Data.stateType === 'ok' ? '#10b981' : '#f59e0b'} strokeWidth="1.8" strokeLinecap="round" />
-                <line x1="20" y1="25" x2="42" y2="25" stroke={worker1Data.stateType === 'ok' ? '#10b981' : '#f59e0b'} strokeWidth="1.8" strokeLinecap="round" />
-                {/* Neck/Stand */}
-                <path d="M 28 38 L 36 38 L 38 43 L 26 43 Z" fill="#475569" />
-                {/* Base desktop chassis */}
-                <rect x="10" y="43" width="44" height="9" rx="2" fill="#334155" stroke="#475569" strokeWidth="1.5" />
-                <circle cx="48" cy="47.5" r="1.5" fill={worker1Data.stateType === 'ok' ? '#10b981' : '#f59e0b'} />
-                <line x1="16" y1="47.5" x2="28" y2="47.5" stroke="#64748b" strokeWidth="1.5" strokeLinecap="round" />
-              </svg>
-            </div>
+        {/* DYNAMIC WORKER NODES (Stylized Computer Monitors displaying machine parameters on screen) */}
+        {workers.map((worker, idx) => {
+          const coord = workerCoords[idx];
+          if (!coord) return null;
 
-            {/* Label */}
-            <div className="text-xs sm:text-sm font-semibold text-[#f3f3f4] group-hover:text-white transition-colors">
-              Worker 01
-            </div>
+          const isWorkerFailed = worker.state === 'FAILED' || worker.state === 'DISCONNECTED';
+          const isReady = worker.state === 'READY' || worker.state === 'RUNNING';
+          const contrib = contributions.find(c => c.workerId === worker.workerId);
 
-            {/* Dynamic Status matching drawings */}
+          const monitorBorderClass = isWorkerFailed
+            ? 'border-rose-500 shadow-rose-500/10'
+            : isCommitted || contrib?.contributionAccepted
+            ? 'border-emerald-500 shadow-emerald-500/10'
+            : 'border-amber-400 shadow-amber-400/10';
+
+          const statusColor = isWorkerFailed
+            ? 'text-rose-400'
+            : isCommitted || contrib?.contributionAccepted
+            ? 'text-emerald-400'
+            : 'text-amber-400';
+
+          let statusText = worker.state;
+          if (isBroadcasting) {
+            statusText = 'Receiving Weights';
+          } else if (isCommitted || contrib?.contributionAccepted) {
+            statusText = 'Gradients Pushed';
+          } else if (isCollecting || attempt?.state === 'RUNNING') {
+            statusText = 'Streaming Gradients';
+          } else if (isReady) {
+            statusText = 'Training Active';
+          }
+
+          const machineName = worker.nodeLabel || `node-${worker.workerId}`;
+
+          return (
             <div
-              className={`text-xs sm:text-[13px] font-medium mt-0.5 transition-colors ${
-                worker1Data.stateType === 'ok' ? 'text-emerald-400' : 'text-amber-400'
-              }`}
+              key={worker.sessionId || `worker-monitor-${worker.workerId}`}
+              onClick={() => onSelectWorker?.(worker)}
+              style={{
+                left: `${(coord.x / 1000) * 100}%`,
+                top: `${(coord.y / 580) * 100}%`,
+                width: `${coord.cardWidth}px`,
+              }}
+              className="absolute -translate-x-1/2 -translate-y-1/2 z-20 cursor-pointer group transition-transform duration-200 hover:scale-[1.03]"
+              role="button"
+              tabIndex={0}
+              onKeyDown={e => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  onSelectWorker?.(worker);
+                }
+              }}
+              aria-label={`Inspect Worker ${worker.workerId} on ${machineName}`}
             >
-              {worker1Data.status}
-            </div>
+              {/* Computer Workstation Monitor Illustration */}
+              <div className="flex flex-col items-center">
+                {/* Monitor Screen Frame */}
+                <div
+                  className={`w-full rounded-lg bg-[#141416] p-2.5 shadow-2xl border-2 transition-all duration-300 ${monitorBorderClass}`}
+                >
+                  {/* Top Bezel: Status dot + Worker ID + Machine Name (Tên máy) */}
+                  <div className="flex items-center justify-between pb-1.5 mb-1.5 border-b border-white/[0.08]">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span
+                        className={`w-2 h-2 rounded-full shrink-0 ${
+                          isWorkerFailed
+                            ? 'bg-rose-400'
+                            : isCommitted || contrib?.contributionAccepted
+                            ? 'bg-emerald-400'
+                            : 'bg-amber-400'
+                        }`}
+                        aria-hidden="true"
+                      />
+                      <span className="text-xs font-bold text-[#f3f3f4] group-hover:text-white truncate">
+                        Worker {worker.workerId}
+                      </span>
+                    </div>
 
-            {/* Transmission speed if present */}
-            {worker1Data.speed && (
-              <div className="text-[11px] sm:text-xs font-mono text-amber-300 mt-0.5">
-                {worker1Data.speed}
-              </div>
-            )}
-          </div>
-        </div>
+                    {/* Machine Name (Tên của máy hiển thị nổi bật) */}
+                    <span
+                      className="text-[10px] font-mono text-[#a1a1a8] truncate max-w-[105px] px-1 py-0.5 rounded bg-white/[0.04]"
+                      title={machineName}
+                    >
+                      {machineName}
+                    </span>
+                  </div>
 
-        {/* NODE 2: WORKER 02 (Top-Right) */}
-        <div
-          onClick={() => {
-            setSelectedNodeId('w2');
-            const w = workers[1];
-            if (w && onSelectWorker) onSelectWorker(w);
-          }}
-          className={`absolute right-[7%] sm:right-[12%] lg:right-[14%] top-[6%] sm:top-[8%] z-20 cursor-pointer group transition-transform duration-200 hover:scale-[1.03]`}
-        >
-          <div
-            className={`w-36 h-36 sm:w-44 sm:h-44 rounded-full bg-[#121214] flex flex-col items-center justify-center p-3 text-center transition-all duration-300 shadow-xl border-2 ${
-              worker2Data.stateType === 'ok'
-                ? 'border-emerald-500 shadow-emerald-500/10'
-                : 'border-amber-400 shadow-amber-400/10'
-            }`}
-          >
-            {/* Retro-modern Computer/Workstation Illustration */}
-            <div className="relative mb-1">
-              <svg className="w-10 h-10 sm:w-11 sm:h-11" viewBox="0 0 64 64" fill="none">
-                <rect x="12" y="10" width="40" height="28" rx="4" fill="#1e293b" stroke="#64748b" strokeWidth="2.5" />
-                <rect x="17" y="15" width="30" height="18" rx="1.5" fill="#0f172a" />
-                <line x1="20" y1="20" x2="38" y2="20" stroke={worker2Data.stateType === 'ok' ? '#10b981' : '#f59e0b'} strokeWidth="1.8" strokeLinecap="round" />
-                <line x1="20" y1="25" x2="32" y2="25" stroke={worker2Data.stateType === 'ok' ? '#10b981' : '#f59e0b'} strokeWidth="1.8" strokeLinecap="round" />
-                <path d="M 28 38 L 36 38 L 38 43 L 26 43 Z" fill="#475569" />
-                <rect x="10" y="43" width="44" height="9" rx="2" fill="#334155" stroke="#475569" strokeWidth="1.5" />
-                <circle cx="48" cy="47.5" r="1.5" fill={worker2Data.stateType === 'ok' ? '#10b981' : '#f59e0b'} />
-                <line x1="16" y1="47.5" x2="28" y2="47.5" stroke="#64748b" strokeWidth="1.5" strokeLinecap="round" />
-              </svg>
-            </div>
-
-            <div className="text-xs sm:text-sm font-semibold text-[#f3f3f4] group-hover:text-white transition-colors">
-              Worker 02
-            </div>
-
-            <div
-              className={`text-xs sm:text-[13px] font-medium mt-0.5 transition-colors ${
-                worker2Data.stateType === 'ok' ? 'text-emerald-400' : 'text-amber-400'
-              }`}
-            >
-              {worker2Data.status}
-            </div>
-
-            {worker2Data.speed && (
-              <div className="text-[11px] sm:text-xs font-mono text-amber-300 mt-0.5">
-                {worker2Data.speed}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* NODE 3: CENTER SERVER (Cloud Server in Phase 1 / Parameter Server in Phase 2, 3, 4) */}
-        <div
-          onClick={() => {
-            setSelectedNodeId(centerServerData.isCloud ? 'cloud' : 'ps');
-            if (onOpenServerDetails) onOpenServerDetails();
-          }}
-          className="absolute left-1/2 top-[44%] sm:top-[43%] -translate-x-1/2 -translate-y-1/2 z-20 cursor-pointer group transition-transform duration-200 hover:scale-[1.03]"
-        >
-          {centerServerData.isCloud ? (
-            /* Cloud Server Shape (Image 1) */
-            <div className="relative w-48 h-36 sm:w-56 sm:h-40 flex flex-col items-center justify-center p-3 text-center">
-              {/* Organic Cloud SVG background */}
-              <svg className="absolute inset-0 w-full h-full drop-shadow-xl" viewBox="0 0 200 130" fill="none">
-                <path
-                  d="M 50 95 
-                     L 155 95 
-                     A 28 28 0 0 0 170 42 
-                     A 34 34 0 0 0 132 20 
-                     A 42 42 0 0 0 68 28 
-                     A 30 30 0 0 0 35 68 
-                     A 28 28 0 0 0 50 95 Z"
-                  fill="#182234"
-                  stroke="#38bdf8"
-                  strokeWidth="2.5"
-                />
-              </svg>
-
-              {/* Cloud Server Content */}
-              <div className="relative z-10 flex flex-col items-center justify-center -mt-2">
-                <CloudIcon className="w-8 h-8 text-sky-400 mb-1" />
-                <div className="text-sm sm:text-base font-semibold text-[#f3f3f4]">
-                  Cloud Server
+                  {/* Monitor Screen Internal Display */}
+                  <div className="bg-[#09090b] rounded p-2 border border-white/[0.04] space-y-1 font-mono text-[10px]">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[#73737c]">State:</span>
+                      <span className={`font-semibold ${statusColor}`}>{statusText}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-[#73737c]">
+                      <span>Shard:</span>
+                      <span className="text-[#f3f3f4] truncate max-w-[100px]">
+                        {worker.assignedShard || (worker.shardId != null ? `shard-${worker.shardId}` : 'Ready')}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between text-[#73737c]">
+                      <span>Model:</span>
+                      <span className="text-emerald-400">
+                        {worker.currentModelVersion != null
+                          ? `v${worker.currentModelVersion}`
+                          : worker.localModelVersion != null
+                          ? `v${worker.localModelVersion}`
+                          : '—'}
+                      </span>
+                    </div>
+                  </div>
                 </div>
-                <div className="text-xs text-sky-300 font-medium mt-0.5">
-                  Distributing Datasets
-                </div>
-                <div className="text-[10px] text-[#94a3b8] font-mono mt-0.5">
-                  CIFAR-10 (50k items)
-                </div>
+
+                {/* Monitor Stand Neck & Base */}
+                <div className="w-5 h-2 bg-zinc-700 -mt-px" aria-hidden="true" />
+                <div className="w-16 h-1.5 bg-zinc-600 rounded-sm shadow-md" aria-hidden="true" />
               </div>
             </div>
-          ) : (
-            /* Parameter Server Circle with Server Rack Icon (Image 2, 3, 4) */
-            <div
-              className={`w-40 h-40 sm:w-48 sm:h-48 rounded-full bg-[#121214] flex flex-col items-center justify-center p-3 text-center transition-all duration-300 shadow-2xl border-2 ${centerServerData.borderClass}`}
-            >
-              {/* Server Rack Illustration */}
-              <div className="relative mb-1">
-                <svg className="w-10 h-10 sm:w-11 sm:h-11" viewBox="0 0 64 64" fill="none">
-                  {/* Outer rack chassis */}
-                  <rect x="18" y="10" width="28" height="44" rx="2" fill="#1e293b" stroke="#64748b" strokeWidth="2" />
-                  {/* Rack units / bays */}
-                  <rect x="22" y="14" width="20" height="6" rx="1" fill="#0f172a" />
-                  <circle cx="25" cy="17" r="1" fill="#10b981" />
-                  <line x1="28" y1="17" x2="38" y2="17" stroke="#475569" strokeWidth="1" />
-
-                  <rect x="22" y="23" width="20" height="6" rx="1" fill="#0f172a" />
-                  <circle cx="25" cy="26" r="1" fill={centerServerData.stateType === 'ok' ? '#10b981' : '#f59e0b'} />
-                  <line x1="28" y1="26" x2="38" y2="26" stroke="#475569" strokeWidth="1" />
-
-                  <rect x="22" y="32" width="20" height="6" rx="1" fill="#0f172a" />
-                  <circle cx="25" cy="35" r="1" fill="#10b981" />
-                  <line x1="28" y1="35" x2="38" y2="35" stroke="#475569" strokeWidth="1" />
-
-                  {/* Mesh grill base */}
-                  <rect x="22" y="41" width="20" height="9" rx="1" fill="#334155" />
-                  <line x1="24" y1="44" x2="38" y2="44" stroke="#475569" strokeWidth="1" strokeDasharray="1 1" />
-                  <line x1="24" y1="47" x2="38" y2="47" stroke="#475569" strokeWidth="1" strokeDasharray="1 1" />
-                </svg>
-              </div>
-
-              <div className="text-xs sm:text-sm font-semibold text-[#f3f3f4] group-hover:text-white transition-colors leading-tight">
-                Parameter Server
-              </div>
-
-              {/* Status text matching images: Syncing: 1/3 Workers / Syncing... / Sync OK */}
-              <div
-                className={`text-xs sm:text-[13px] font-medium mt-1 leading-tight ${centerServerData.textColor}`}
-              >
-                {centerServerData.status}
-              </div>
-
-              {/* Substatus: Wait: 8ms / Aggregating / Broadcasting */}
-              <div
-                className={`text-[11px] sm:text-xs font-mono mt-0.5 leading-tight ${centerServerData.textColor}`}
-              >
-                {centerServerData.substatus}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* NODE 4: WORKER 03 (Bottom-Center) */}
-        <div
-          onClick={() => {
-            setSelectedNodeId('w3');
-            const w = workers[2];
-            if (w && onSelectWorker) onSelectWorker(w);
-          }}
-          className={`absolute left-1/2 bottom-[4%] sm:bottom-[6%] -translate-x-1/2 z-20 cursor-pointer group transition-transform duration-200 hover:scale-[1.03]`}
-        >
-          <div
-            className={`w-36 h-36 sm:w-44 sm:h-44 rounded-full bg-[#121214] flex flex-col items-center justify-center p-3 text-center transition-all duration-300 shadow-xl border-2 ${
-              worker3Data.stateType === 'ok'
-                ? 'border-emerald-500 shadow-emerald-500/10'
-                : 'border-amber-400 shadow-amber-400/10'
-            }`}
-          >
-            {/* Retro-modern Computer/Workstation Illustration */}
-            <div className="relative mb-1">
-              <svg className="w-10 h-10 sm:w-11 sm:h-11" viewBox="0 0 64 64" fill="none">
-                <rect x="12" y="10" width="40" height="28" rx="4" fill="#1e293b" stroke="#64748b" strokeWidth="2.5" />
-                <rect x="17" y="15" width="30" height="18" rx="1.5" fill="#0f172a" />
-                <line x1="20" y1="20" x2="40" y2="20" stroke={worker3Data.stateType === 'ok' ? '#10b981' : '#f59e0b'} strokeWidth="1.8" strokeLinecap="round" />
-                <line x1="20" y1="25" x2="30" y2="25" stroke={worker3Data.stateType === 'ok' ? '#10b981' : '#f59e0b'} strokeWidth="1.8" strokeLinecap="round" />
-                <path d="M 28 38 L 36 38 L 38 43 L 26 43 Z" fill="#475569" />
-                <rect x="10" y="43" width="44" height="9" rx="2" fill="#334155" stroke="#475569" strokeWidth="1.5" />
-                <circle cx="48" cy="47.5" r="1.5" fill={worker3Data.stateType === 'ok' ? '#10b981' : '#f59e0b'} />
-                <line x1="16" y1="47.5" x2="28" y2="47.5" stroke="#64748b" strokeWidth="1.5" strokeLinecap="round" />
-              </svg>
-            </div>
-
-            <div className="text-xs sm:text-sm font-semibold text-[#f3f3f4] group-hover:text-white transition-colors">
-              Worker 03
-            </div>
-
-            <div
-              className={`text-xs sm:text-[13px] font-medium mt-0.5 transition-colors ${
-                worker3Data.stateType === 'ok' ? 'text-emerald-400' : 'text-amber-400'
-              }`}
-            >
-              {worker3Data.status}
-            </div>
-
-            {worker3Data.speed && (
-              <div className="text-[11px] sm:text-xs font-mono text-amber-300 mt-0.5">
-                {worker3Data.speed}
-              </div>
-            )}
-          </div>
-        </div>
+          );
+        })}
       </div>
 
       {/* FOOTER METRICS SUMMARY BAR */}
       <div className="bg-[#171719] border border-white/[0.06] rounded p-3 text-xs flex flex-col md:flex-row md:items-center justify-between gap-3">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-[#73737c]">Transmission Protocol:</span>
-          <span className="font-mono text-[#f3f3f4] bg-white/[0.04] px-1.5 py-0.5 rounded">
-            gRPC Binary Stream (DTP v1.3)
+          <span className="font-mono text-[#f3f3f4] bg-white/[0.04] px-1.5 py-0.5 rounded border border-white/[0.06]">
+            DTP/1 · Persistent TCP
           </span>
-          <span className="text-[#73737c]">·</span>
+          <span className="text-[#73737c]" aria-hidden="true">·</span>
           <span className="text-[#73737c]">Strict BSP Barrier:</span>
-          <span className="text-emerald-400 font-medium">3/3 Workers Active</span>
+          <span className="text-emerald-400 font-medium">
+            {expectedWorkers > 0
+              ? `${observedWorkersCount}/${expectedWorkers} Workers Active`
+              : `${observedWorkersCount} Workers Active`}
+          </span>
+          {isPartialProjection && (
+            <span className="px-1.5 py-0.2 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20 text-[10px] font-mono">
+              Partial Projection
+            </span>
+          )}
         </div>
 
-        <div className="flex items-center gap-4 text-xs text-[#a1a1a8]">
+        <div className="flex items-center gap-4 text-xs text-[#a1a1a8] flex-wrap">
           <div>
-            <span className="text-[#73737c] mr-1.5">Avg RTT:</span>
-            <span className="font-mono text-[#f3f3f4]">1.24 ms</span>
+            <span className="text-[#73737c] mr-1.5">Step:</span>
+            <span className="font-mono text-[#f3f3f4]">
+              {currentStep ? `#${currentStep.operationId}` : '—'}
+            </span>
           </div>
           <div>
-            <span className="text-[#73737c] mr-1.5">Network Jitter:</span>
-            <span className="font-mono text-[#f3f3f4]">0.18 ms</span>
+            <span className="text-[#73737c] mr-1.5">Epoch:</span>
+            <span className="font-mono text-[#f3f3f4]">
+              {currentStep?.epoch ?? attempt?.epoch ?? '—'}
+            </span>
+          </div>
+          <div>
+            <span className="text-[#73737c] mr-1.5">Batch Samples:</span>
+            <span className="font-mono text-[#f3f3f4]">
+              {currentStep?.totalSampleCount != null
+                ? `${currentStep.totalSampleCount.toLocaleString()}`
+                : 'Pending'}
+            </span>
           </div>
           <div>
             <span className="text-[#73737c] mr-1.5">Model Weights:</span>
-            <span className="font-mono text-[#f3f3f4]">{currentStep?.outputModelVersion || 'v3264'}</span>
+            <span className="font-mono text-emerald-400">
+              {currentStep?.outputModelVersion
+                ? `v${currentStep.outputModelVersion}`
+                : attempt?.modelVersion || 'Pending'}
+            </span>
           </div>
         </div>
       </div>
