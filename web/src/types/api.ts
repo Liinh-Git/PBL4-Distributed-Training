@@ -566,6 +566,7 @@ export interface AttemptDetailData {
   state: AttemptState;
   execution_mode: ExecutionMode;
   training_strategy?: TrainingStrategy | null;
+  model_id?: string | null;
   expected_workers?: number | null;
   membership?: MembershipData | null;
   epoch?: number | null;

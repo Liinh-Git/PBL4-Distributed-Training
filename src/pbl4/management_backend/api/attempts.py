@@ -48,6 +48,7 @@ from pbl4.management_backend.schemas.event import (
 from pbl4.management_backend.schemas.step import (
     StepDetail,
     StepListItem,
+    StepMetrics,
     StepTiming,
     WorkerStepItem,
 )
@@ -436,6 +437,20 @@ def get_step(attempt_id: str, step_id: int):
     with db.get_connection() as conn:
         step = attempt_service.get_step(conn, attempt_id, step_id)
     worker_steps = step.get("worker_steps", [])
+    metrics_data = step.get("metrics")
+    metrics = (
+        StepMetrics(
+            loss=metrics_data.get("loss"),
+            accuracy=metrics_data.get("accuracy"),
+        )
+        if metrics_data
+        else None
+    )
+    is_step_applied = step["state"] in (
+        "WAITING_PARAMETER_APPLIED",
+        "CHECKPOINTING",
+        "COMMITTED",
+    )
     return ItemResponse(
         data=StepDetail(
             training_strategy=step["training_strategy"],
@@ -451,10 +466,12 @@ def get_step(attempt_id: str, step_id: int):
                 started_at=step["started_at"],
                 update_completed_at=step.get("update_completed_at"),
                 synchronization_completed_at=step.get("synchronization_completed_at"),
+                checkpoint_completed_at=step.get("checkpoint_completed_at"),
                 committed_at=step.get("committed_at"),
             )
             if step.get("started_at")
             else None,
+            metrics=metrics,
             worker_steps=[
                 WorkerStepItem(
                     worker_id=ws["worker_id"],
@@ -462,6 +479,15 @@ def get_step(attempt_id: str, step_id: int):
                     shard_id=ws["shard_id"],
                     batch_id=ws["batch_id"],
                     sample_count=ws["sample_count"],
+                    contribution_accepted=ws.get("contribution_accepted", True),
+                    parameter_applied=ws.get("parameter_applied", is_step_applied),
+                    loss=ws.get("loss"),
+                    accuracy=ws.get("accuracy"),
+                    compute_ms=ws.get("compute_ms"),
+                    upload_ms=ws.get("upload_ms"),
+                    parameter_apply_ms=ws.get("parameter_apply_ms"),
+                    bytes_sent=ws.get("bytes_sent"),
+                    bytes_received=ws.get("bytes_received"),
                 )
                 for ws in worker_steps
             ],

@@ -243,6 +243,30 @@ def test_checkpoint_started_projects_synchronization_boundary() -> None:
     )
 
 
+def test_attempt_state_changed_event_cleans_up_allocations() -> None:
+    occurred_at = "2026-09-11T01:02:03+00:00"
+    payload = {
+        "attempt_id": "attempt-1",
+        "event_type": "attempt.state_changed",
+        "occurred_at": occurred_at,
+        "details": {"state": "ABORTED", "failure_code": "USER_ABORTED", "failure_message": "User requested abort"},
+    }
+    with (
+        patch("pbl4.management_backend.repositories.attempt_repository.update_attempt_state") as mock_update,
+        patch("pbl4.management_backend.services.allocation_service.cleanup_allocations_for_attempt") as mock_cleanup,
+    ):
+        RuntimeGateway._project_runtime_event(object(), payload)
+
+        mock_update.assert_called_once()
+        assert mock_update.call_args[0][1] == "attempt-1"
+        assert mock_update.call_args[0][2] == "ABORTED"
+
+        mock_cleanup.assert_called_once()
+        assert mock_cleanup.call_args[0][1] == "attempt-1"
+        assert mock_cleanup.call_args[1]["failure_code"] == "USER_ABORTED"
+
+
+
 def test_snapshot_creation_uses_runtime_owned_session_metadata() -> None:
     gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
     connected_at = "2026-09-11T01:00:00+00:00"

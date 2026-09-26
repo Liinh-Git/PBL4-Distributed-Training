@@ -267,7 +267,7 @@ class ParameterServer:
                     duplicate_admission = True
                     registered = None
                 else:
-                    session_id = self._next_session_id
+                    session_id = int(time.time() * 1000) * 1000 + (self._next_session_id % 1000)
                     self._next_session_id += 1
                     registered = self.registry.register(session_id, time.monotonic())
                     if is_managed:

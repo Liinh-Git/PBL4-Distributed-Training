@@ -125,7 +125,20 @@ def update_step(
 def get_step(conn: psycopg.Connection, attempt_id: str, step_id: int) -> dict | None:
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT * FROM steps WHERE attempt_id = %s AND step_id = %s",
+            """
+            SELECT s.*,
+                (
+                    SELECT c.completed_at
+                    FROM checkpoints c
+                    WHERE c.created_by_attempt_id = s.attempt_id
+                      AND c.source_step_id = s.step_id
+                      AND c.state = 'COMPLETE'
+                    ORDER BY c.model_version DESC
+                    LIMIT 1
+                ) AS checkpoint_completed_at
+            FROM steps s
+            WHERE s.attempt_id = %s AND s.step_id = %s
+            """,
             (attempt_id, step_id),
         )
         row = cur.fetchone()

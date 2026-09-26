@@ -89,13 +89,20 @@ export interface WorkerSession {
 export interface WorkerContribution {
   workerId: number;
   sessionId: string;
-  shardId?: string | null;
-  batchId: string;
+  shardId?: string | number | null;
+  batchId: string | number;
   sampleCount: number;
   samples?: number; // legacy alias
   contributionAccepted: boolean;
   parameterApplied: boolean;
   contribution?: string; // legacy alias
+  loss?: number | null;
+  accuracy?: number | null;
+  computeMs?: number | null;
+  uploadMs?: number | null;
+  parameterApplyMs?: number | null;
+  bytesSent?: number | null;
+  bytesReceived?: number | null;
 }
 
 export interface StepTimings {
@@ -117,17 +124,18 @@ export interface TrainingStep {
   operationId: number;
   stepId?: number; // alias
   attemptId: string;
-  trainingStrategy?: 'strict_bsp';
+  trainingStrategy?: 'strict_bsp' | string;
   state: StepState;
   epoch: number;
   batchOrdinal: number;
-  inputModelVersion: string;
-  outputModelVersion: string;
+  inputModelVersion: string | number;
+  outputModelVersion: string | number;
   totalSampleCount: number;
   timings: StepTimings;
   workerContributions: WorkerContribution[];
   loss?: number;
   accuracy?: number;
+  metrics?: { loss?: number | null; accuracy?: number | null; [key: string]: any };
 }
 
 export interface DatasetShard {

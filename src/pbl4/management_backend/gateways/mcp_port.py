@@ -79,6 +79,11 @@ class McpClientPort(ABC):
     def set_dataset_resolver(self, resolver: DatasetResolver | None) -> None:
         """Register the Backend catalog resolver for Runtime-originated requests."""
 
+    @property
+    def runtime_instance_id(self) -> str | None:
+        """Return runtime instance ID if connected and known."""
+        return None
+
 
 class TruthfulDisconnectedMcpPort(McpClientPort):
     """Truthful production port when Lâm's MCP/1 client is not integrated.
@@ -250,7 +255,7 @@ class RealMcpClientPort(McpClientPort):
         timeout: float = 5.0,
         reconnect_interval: float = 1.0,
     ) -> None:
-        self._host = host
+        self._host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
         self._port = port
         self._backend_instance_id = backend_instance_id or f"backend-{uuid4()}"
         self._timeout = timeout
@@ -278,6 +283,10 @@ class RealMcpClientPort(McpClientPort):
     @property
     def is_connected(self) -> bool:
         return self._connected.is_set()
+
+    @property
+    def runtime_instance_id(self) -> str | None:
+        return self._runtime_instance_id if self._connected.is_set() else None
 
     def connect(self) -> bool:
         """Connect and complete MGMT_HELLO; safe to call again after disconnect."""

@@ -12,6 +12,12 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+from dotenv import load_dotenv
+
+# Ensure .env is populated into os.environ for non-pydantic consumers
+load_dotenv()
+
+
 class BackendSettings(BaseSettings):
     """All configuration for the Management Backend process.
 
@@ -24,6 +30,10 @@ class BackendSettings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+    )
+
+    canonical_parameter_manifest_hash: str | None = Field(
+        default=None, alias="CANONICAL_PARAMETER_MANIFEST_HASH"
     )
 
     # ─── Server ───────────────────────────────────────────────────────────────
@@ -80,18 +90,22 @@ class BackendSettings(BaseSettings):
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
     # ─── CORS ─────────────────────────────────────────────────────────────────
-    cors_origins: list[str] = Field(
+    cors_origins: list[str] | str = Field(
         default=["http://localhost:5173", "http://localhost:3000"],
         alias="CORS_ORIGINS",
     )
 
-    @field_validator("cors_origins", mode="before")
+    @field_validator("cors_origins", mode="after")
     @classmethod
-    def split_cors(cls, v: object) -> object:
-        """Allow CORS_ORIGINS to be a comma-separated string in env."""
+    def split_cors(cls, v: object) -> list[str]:
+        """Allow CORS_ORIGINS to be a comma-separated string or empty in env."""
         if isinstance(v, str):
+            if not v.strip():
+                return ["http://localhost:5173", "http://localhost:3000"]
             return [o.strip() for o in v.split(",") if o.strip()]
-        return v
+        if isinstance(v, list):
+            return [str(o).strip() for o in v if str(o).strip()]
+        return ["http://localhost:5173", "http://localhost:3000"]
 
     @field_validator("backend_port", mode="before")
     @classmethod

@@ -96,7 +96,9 @@ class RuntimeGateway:
 
     @property
     def runtime_instance_id(self) -> str | None:
-        return self._runtime_instance_id
+        if self._runtime_instance_id is not None:
+            return self._runtime_instance_id
+        return getattr(self._port, "runtime_instance_id", None)
 
     def set_runtime_instance_id(self, instance_id: str | None) -> None:
         self._runtime_instance_id = instance_id
@@ -230,13 +232,17 @@ class RuntimeGateway:
         return snap
 
     def on_disconnect(self) -> None:
-        """Preserve the last Attempt projection and mark it stale on disconnect."""
+        """Mark cached snapshot stale and abort active attempts on disconnect."""
         self._cached_snapshot["stale"] = True
         for attempt_id, cursor in self._attempt_cursors.items():
             cursor.stale = True
             if attempt_id in self._attempt_snapshots:
                 self._attempt_snapshots[attempt_id]["stale"] = True
-        logger.info("Runtime disconnected; snapshot marked stale, attempt preserved.")
+        logger.info("Runtime disconnected; snapshot marked stale, aborting active attempts.")
+        self._abort_active_attempts_on_runtime_down(
+            failure_code="RUNTIME_DISCONNECTED",
+            failure_message="Runtime MCP connection was lost",
+        )
 
     def reset_runtime_context(self) -> None:
         """Clear in-memory snapshots, cursors, and abort pending waiters on instance change."""
@@ -253,6 +259,99 @@ class RuntimeGateway:
                 )
         self._pending_results.clear()
         logger.info("Runtime context and cursors reset due to runtime instance change.")
+        self._abort_active_attempts_on_runtime_down(
+            failure_code="RUNTIME_RESTARTED",
+            failure_message="Runtime restarted with new instance ID",
+        )
+
+    def _abort_active_attempts_on_runtime_down(
+        self,
+        *,
+        expected_attempt_id: str | None = None,
+        failure_code: str = "RUNTIME_DISCONNECTED",
+        failure_message: str = "Runtime MCP connection was lost",
+    ) -> None:
+        """Abort any active DB attempt that is not active on Runtime and free allocations."""
+        try:
+            from pbl4.management_backend import db
+            from pbl4.management_backend.repositories import attempt_repository
+            from pbl4.management_backend.services import allocation_service
+            from pbl4.management_backend.websocket import hub
+
+            now = datetime.now(UTC)
+            aborted_attempt_id: str | None = None
+
+            with db.transaction() as conn:
+                active_attempt = attempt_repository.get_active_attempt(conn)
+                if active_attempt is None:
+                    return
+
+                attempt_id = active_attempt["attempt_id"]
+                if expected_attempt_id is not None and attempt_id == expected_attempt_id:
+                    return
+
+                if (
+                    failure_code == "RUNTIME_INSTANCE_IDLE"
+                    and active_attempt.get("state") == "CREATED"
+                ):
+                    created_at = active_attempt.get("created_at")
+                    if created_at and (now - created_at).total_seconds() < 3.0:
+                        logger.info(
+                            "Preserving recently created attempt %s during idle snapshot reconciliation",
+                            attempt_id,
+                        )
+                        return
+
+                logger.warning(
+                    "Aborting active attempt %s due to runtime down/reconciliation: code=%s, reason=%s",
+                    attempt_id,
+                    failure_code,
+                    failure_message,
+                )
+
+                attempt_repository.update_attempt_state(
+                    conn,
+                    attempt_id,
+                    new_state="ABORTED",
+                    ended_at=now,
+                    failure_code=failure_code,
+                    failure_message=failure_message,
+                )
+
+                allocation_service.cleanup_allocations_for_attempt(
+                    conn,
+                    attempt_id,
+                    now=now,
+                    failure_code="ATTEMPT_ABORTED",
+                    failure_message=failure_message,
+                )
+                aborted_attempt_id = attempt_id
+
+            if aborted_attempt_id:
+                try:
+                    hub.broadcast_sync(
+                        aborted_attempt_id,
+                        {
+                            "kind": "ATTEMPT_STATE_CHANGED",
+                            "attempt_id": aborted_attempt_id,
+                            "runtime_event_seq": None,
+                            "occurred_at": now.isoformat(),
+                            "payload": {
+                                "attempt_id": aborted_attempt_id,
+                                "state": "ABORTED",
+                                "failure_code": failure_code,
+                                "failure_message": failure_message,
+                            },
+                        },
+                    )
+                except Exception as exc:
+                    logger.debug("Failed to broadcast abort event for %s: %s", aborted_attempt_id, exc)
+
+        except (RuntimeError, psycopg.OperationalError, psycopg_pool.PoolTimeout) as exc:
+            logger.warning("Database unavailable during attempt abort on runtime down: %s", exc)
+        except Exception as exc:
+            logger.error("Error aborting active attempts on runtime down: %s", exc, exc_info=True)
+
 
     # ─── Inbound Management Message Dispatcher ────────────────────────────────
 
@@ -319,7 +418,17 @@ class RuntimeGateway:
         snap_seq = snapshot["last_runtime_event_seq"]
         if attempt_id is None:
             self.update_snapshot(snapshot)
+            self._abort_active_attempts_on_runtime_down(
+                failure_code="RUNTIME_INSTANCE_IDLE",
+                failure_message="Runtime reported no active attempt; aborting stale active attempt in DB",
+            )
             return
+
+        self._abort_active_attempts_on_runtime_down(
+            expected_attempt_id=attempt_id,
+            failure_code="RUNTIME_SUPERSEDED_ATTEMPT",
+            failure_message=f"Runtime reported active attempt '{attempt_id}'; aborting stale prior attempt in DB",
+        )
 
         workers = snapshot.get("workers")
         if workers is not None and not isinstance(workers, list):
@@ -343,6 +452,7 @@ class RuntimeGateway:
             from pbl4.management_backend import db
             from pbl4.management_backend.repositories import (
                 attempt_repository,
+                node_repository,
                 worker_session_repository,
             )
 
@@ -403,15 +513,23 @@ class RuntimeGateway:
                     connected_at = worker.get("connected_at")
                     if isinstance(connected_at, str):
                         connected_at = datetime.fromisoformat(connected_at.replace("Z", "+00:00"))
+                    node_id = worker.get("node_id")
+                    node_label = worker.get("node_label") or "node-unknown"
+                    if node_id and (node_label == "node-unknown" or not node_label):
+                        node_row = node_repository.get_node(conn, node_id)
+                        if node_row and node_row.get("display_name"):
+                            node_label = node_row["display_name"]
+                            worker["node_label"] = node_label
+
                     updated = worker_session_repository.update_snapshot_projection(
                         conn,
                         session_id=session_id,
                         attempt_id=attempt_id,
                         worker_id=worker["worker_id"],
-                        node_label=worker["node_label"],
+                        node_label=node_label,
                         state=worker["state"],
                         last_heartbeat_at=heartbeat,
-                        node_id=worker.get("node_id"),
+                        node_id=node_id,
                         allocation_id=worker.get("allocation_id"),
                     )
                     if updated is None:
@@ -430,12 +548,12 @@ class RuntimeGateway:
                             session_id=session_id,
                             attempt_id=attempt_id,
                             worker_id=worker["worker_id"],
-                            node_label=worker["node_label"],
+                            node_label=node_label,
                             protocol_version=protocol_version,
                             state=worker["state"],
                             connected_at=connected_at,
                             last_heartbeat_at=heartbeat,
-                            node_id=worker.get("node_id"),
+                            node_id=node_id,
                             allocation_id=worker.get("allocation_id"),
                         )
         except (psycopg.OperationalError, psycopg_pool.PoolTimeout) as exc:
@@ -613,6 +731,16 @@ class RuntimeGateway:
                     started_at=occurred_at if state == "RUNNING" else None,
                     ended_at=occurred_at if state in {"COMPLETED", "FAILED", "ABORTED"} else None,
                 )
+                if state in {"COMPLETED", "FAILED", "ABORTED"}:
+                    from pbl4.management_backend.services import allocation_service
+
+                    allocation_service.cleanup_allocations_for_attempt(
+                        conn,
+                        attempt_id,
+                        now=occurred_at,
+                        failure_code=details.get("failure_code") or "ATTEMPT_TERMINATED",
+                        failure_message=details.get("failure_message") or f"Attempt transitioned to {state}",
+                    )
             return
         if event_type == "step.started":
             step_id = int(details["step_id"])

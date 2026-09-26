@@ -15,8 +15,14 @@ import {
   WifiOff,
 } from 'lucide-react';
 import { useAttemptStream } from '../hooks/useAttemptStream';
-import { attemptsService, metricsService, workersService, stepsService } from '../api';
-import { MetricItemData, WorkerSessionItemData, StepListItemData } from '../types/api';
+import { attemptsService, metricsService, workersService, stepsService, systemService } from '../api';
+import {
+  MetricItemData,
+  WorkerSessionItemData,
+  StepListItemData,
+  CapabilitiesData,
+  StepDetailData,
+} from '../types/api';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { LiveActivityConsole } from '../components/live/LiveActivityConsole';
 import { CompactSyncViz } from '../components/training/CompactSyncViz';
@@ -97,6 +103,52 @@ export const LiveTrainingPage: React.FC = () => {
 
     fetchMetrics();
   }, [resolvedAttemptId, stream.lastReceivedSeq]);
+
+  // System capabilities (protocol versions, runtime instance, supported models, feature flags)
+  const [capabilities, setCapabilities] = useState<CapabilitiesData | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    systemService
+      .getCapabilities()
+      .then((res) => {
+        if (isMounted) setCapabilities(res.data);
+      })
+      .catch(() => {});
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Step Details cache (authoritative worker telemetry: compute_ms, upload_ms, loss, accuracy, timings)
+  const [stepDetailsMap, setStepDetailsMap] = useState<Record<number, StepDetailData>>({});
+
+  useEffect(() => {
+    if (!resolvedAttemptId || stream.steps.length === 0) return;
+    let isMounted = true;
+
+    const fetchStepDetails = async () => {
+      const topSteps = stream.steps.slice(0, 10);
+      for (const st of topSteps) {
+        if (!stepDetailsMap[st.step_id]) {
+          try {
+            const res = await stepsService.getStep(resolvedAttemptId, st.step_id);
+            if (isMounted && res.data) {
+              setStepDetailsMap((prev) => ({ ...prev, [st.step_id]: res.data }));
+            }
+          } catch {
+            // Ignore background step fetch error
+          }
+        }
+      }
+    };
+
+    fetchStepDetails();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [resolvedAttemptId, stream.steps.map((s) => s.step_id).join(',')]);
 
   // UI state
   const [activeTab, setActiveTab] = useState<'live' | 'topology' | 'metrics' | 'technical'>('live');
@@ -208,26 +260,68 @@ export const LiveTrainingPage: React.FC = () => {
     lastHeartbeatMs: w.last_heartbeat_at ? Math.max(50, Math.round(Date.now() - new Date(w.last_heartbeat_at).getTime())) : 150,
   }));
 
-  const legacyStepsAdapter: any[] = steps.map(st => ({
-    stepId: st.step_id,
-    operationId: st.operation_id,
-    epoch: st.epoch,
-    batchOrdinal: st.batch_ordinal,
-    state: st.state,
-    inputModelVersion: st.input_model_version,
-    outputModelVersion: st.output_model_version || st.input_model_version + 1,
-    totalSampleCount: st.total_sample_count || 192,
-    timings: {
-      startedAt: 'T-10s',
-      committedAt: st.committed_at || 'T-2s',
-      totalDurationMs: 420,
-    },
-    workerContributions: [
-      { workerId: 0, contributionAccepted: true, parameterApplied: true },
-      { workerId: 1, contributionAccepted: true, parameterApplied: true },
-      { workerId: 2, contributionAccepted: true, parameterApplied: true },
-    ],
-  }));
+  const legacyStepsAdapter: any[] = steps.map((st) => {
+    const detail = stepDetailsMap[st.step_id];
+    const workerSteps = detail?.worker_steps;
+    const workerContributions =
+      workerSteps && workerSteps.length > 0
+        ? workerSteps.map((ws) => ({
+            workerId: ws.worker_id,
+            sessionId: ws.session_id,
+            shardId: ws.shard_id,
+            batchId: ws.batch_id,
+            sampleCount: ws.sample_count,
+            samples: ws.sample_count,
+            contributionAccepted: ws.contribution_accepted ?? true,
+            parameterApplied: ws.parameter_applied ?? true,
+            loss: ws.loss,
+            accuracy: ws.accuracy,
+            computeMs: ws.compute_ms,
+            uploadMs: ws.upload_ms,
+            parameterApplyMs: ws.parameter_apply_ms,
+            bytesSent: ws.bytes_sent,
+            bytesReceived: ws.bytes_received,
+          }))
+        : workers.map((w) => ({
+            workerId: w.worker_id,
+            sessionId: w.session_id,
+            shardId: w.shard_id,
+            batchId: st.batch_ordinal,
+            sampleCount: Math.round((st.total_sample_count || 192) / (workers.length || 1)),
+            samples: Math.round((st.total_sample_count || 192) / (workers.length || 1)),
+            contributionAccepted: true,
+            parameterApplied: true,
+          }));
+
+    const timing = detail?.timing;
+    const totalDurationMs =
+      timing?.started_at && timing?.committed_at
+        ? Math.max(0, new Date(timing.committed_at).getTime() - new Date(timing.started_at).getTime())
+        : 420;
+
+    return {
+      stepId: st.step_id,
+      operationId: st.operation_id,
+      epoch: st.epoch,
+      batchOrdinal: st.batch_ordinal,
+      state: st.state,
+      inputModelVersion: st.input_model_version,
+      outputModelVersion: st.output_model_version || st.input_model_version + 1,
+      totalSampleCount: st.total_sample_count || 192,
+      loss: detail?.metrics?.loss,
+      accuracy: detail?.metrics?.accuracy,
+      metrics: detail?.metrics,
+      timings: {
+        startedAt: timing?.started_at || 'T-10s',
+        committedAt: timing?.committed_at || st.committed_at || 'T-2s',
+        updateCompletedAt: timing?.update_completed_at,
+        synchronizationCompletedAt: timing?.synchronization_completed_at,
+        checkpointCompletedAt: timing?.checkpoint_completed_at,
+        totalDurationMs,
+      },
+      workerContributions,
+    };
+  });
 
   return (
     <div className="space-y-4 w-full pb-10 font-sans select-none">
@@ -270,8 +364,18 @@ export const LiveTrainingPage: React.FC = () => {
             Attempt <span className="font-mono text-[#a1a1a8]">{attempt.attempt_id}</span> (Job: {attempt.job_id})
           </div>
 
-          {/* Connection Status Indicator */}
-          <div className="flex items-center gap-2 text-[11px]">
+          {/* Connection & Runtime Status Indicators */}
+          <div className="flex items-center gap-2 text-[11px] flex-wrap">
+            {capabilities?.runtime_instance_id && (
+              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-white/[0.04] border border-white/[0.06] text-[#a1a1a8] font-mono">
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    capabilities.runtime_connected ? 'bg-emerald-400' : 'bg-rose-400'
+                  }`}
+                />
+                <span>Runtime: {capabilities.runtime_instance_id}</span>
+              </span>
+            )}
             {stream.connectionState === 'CONNECTED' && (
               <span className="inline-flex items-center gap-1.5 text-emerald-400 font-mono">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
@@ -308,28 +412,60 @@ export const LiveTrainingPage: React.FC = () => {
               <AttemptStateBadge state={attempt.state} />
             </div>
 
-            <div className="flex items-center gap-2 text-xs text-[#73737c] flex-wrap">
-              <span>Epoch {snapshot?.epoch || attempt.epoch || 1}</span>
-              <span>·</span>
-              <span>Model v{snapshot?.model_version || attempt.model_version || 1}</span>
-              <span>·</span>
-              <span>{workers.length} active workers</span>
-              <span>·</span>
-              <span>Mode: {attempt.execution_mode}</span>
-            </div>
+            {(() => {
+              const modelInfo =
+                capabilities?.supported_models?.find(
+                  (m) => m.model_id === (attempt.model_id || 'resnet18_groupnorm')
+                ) || capabilities?.supported_models?.[0];
+              const modelDisplayName =
+                modelInfo?.display_name || attempt.model_id || 'ResNet-18 (GroupNorm)';
+              const modelTaskType = modelInfo?.task_type || 'image_classification';
+              const trainingStrategy =
+                attempt.training_strategy ||
+                capabilities?.supported_training_strategies?.[0] ||
+                'strict_bsp';
+
+              return (
+                <div className="flex items-center gap-2 text-xs text-[#73737c] flex-wrap">
+                  <span className="text-[#f3f3f4] font-medium">{modelDisplayName}</span>
+                  <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 font-mono text-[10px] border border-blue-500/20">
+                    {modelTaskType}
+                  </span>
+                  <span>·</span>
+                  <span>Epoch {snapshot?.epoch || attempt.epoch || 1}</span>
+                  <span>·</span>
+                  <span>Model v{snapshot?.model_version || attempt.model_version || 1}</span>
+                  <span>·</span>
+                  <span>{workers.length} active workers</span>
+                  <span>·</span>
+                  <span className="font-mono text-[#a1a1a8]">Strategy: {trainingStrategy}</span>
+                </div>
+              );
+            })()}
           </div>
 
           {/* Action buttons */}
           <div className="flex items-center gap-2 self-start sm:self-center">
-            <button
-              type="button"
-              onClick={handleRequestCheckpoint}
-              disabled={attempt.state !== 'RUNNING'}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-[#171719] hover:bg-[#202024] text-[#f3f3f4] text-xs font-normal transition-colors border border-white/[0.07] disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              <Save className="w-3.5 h-3.5 text-[#73737c]" />
-              <span>Checkpoint</span>
-            </button>
+            {(() => {
+              const manualCheckpointAllowed =
+                capabilities?.feature_flags?.manual_checkpoint_request !== false;
+              return (
+                <button
+                  type="button"
+                  onClick={handleRequestCheckpoint}
+                  disabled={attempt.state !== 'RUNNING' || !manualCheckpointAllowed}
+                  title={
+                    !manualCheckpointAllowed
+                      ? 'Manual checkpoint disabled by system capabilities'
+                      : 'Trigger immediate checkpoint'
+                  }
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-[#171719] hover:bg-[#202024] text-[#f3f3f4] text-xs font-normal transition-colors border border-white/[0.07] disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <Save className="w-3.5 h-3.5 text-[#73737c]" />
+                  <span>Checkpoint</span>
+                </button>
+              );
+            })()}
 
             {/* Overflow Menu */}
             <div className="relative">
@@ -538,28 +674,55 @@ export const LiveTrainingPage: React.FC = () => {
                     </div>
                   </div>
 
+                  {/* Real Step Metrics if available */}
+                  {stepDetailsMap[activeStep.step_id]?.metrics && (
+                    <div className="grid grid-cols-2 divide-x divide-white/[0.04] py-1 text-xs border-t border-white/[0.04]">
+                      <div>
+                        <div className="text-[11px] text-[#73737c]">Loss</div>
+                        <div className="text-amber-400 mt-0.5 font-mono font-medium">
+                          {stepDetailsMap[activeStep.step_id].metrics?.loss !== undefined &&
+                          stepDetailsMap[activeStep.step_id].metrics?.loss !== null
+                            ? Number(stepDetailsMap[activeStep.step_id].metrics?.loss).toFixed(4)
+                            : '—'}
+                        </div>
+                      </div>
+                      <div className="pl-3">
+                        <div className="text-[11px] text-[#73737c]">Accuracy</div>
+                        <div className="text-emerald-400 mt-0.5 font-mono font-medium">
+                          {stepDetailsMap[activeStep.step_id].metrics?.accuracy !== undefined &&
+                          stepDetailsMap[activeStep.step_id].metrics?.accuracy !== null
+                            ? `${Number(stepDetailsMap[activeStep.step_id].metrics?.accuracy).toFixed(2)}%`
+                            : '—'}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   <div className="pt-2 border-t border-white/[0.07]">
                     <button
                       type="button"
-                      onClick={() => setSelectedStep({
-                        stepId: activeStep.step_id,
-                        operationId: activeStep.operation_id,
-                        epoch: activeStep.epoch,
-                        batchOrdinal: activeStep.batch_ordinal,
-                        state: activeStep.state,
-                        inputModelVersion: activeStep.input_model_version,
-                        outputModelVersion: activeStep.output_model_version || activeStep.input_model_version + 1,
-                        totalSampleCount: activeStep.total_sample_count || 192,
-                        attemptId: attempt.attempt_id,
-                        timings: {
-                          startedAt: 'T-10s',
-                          committedAt: activeStep.committed_at || 'In progress',
-                          totalDurationMs: 420,
-                        },
-                      })}
+                      onClick={() =>
+                        setSelectedStep({
+                          stepId: activeStep.step_id,
+                          operationId: activeStep.operation_id,
+                          epoch: activeStep.epoch,
+                          batchOrdinal: activeStep.batch_ordinal,
+                          state: activeStep.state,
+                          inputModelVersion: activeStep.input_model_version,
+                          outputModelVersion:
+                            activeStep.output_model_version || activeStep.input_model_version + 1,
+                          totalSampleCount: activeStep.total_sample_count || 192,
+                          attemptId: attempt.attempt_id,
+                          timings: {
+                            startedAt: 'T-10s',
+                            committedAt: activeStep.committed_at || 'In progress',
+                            totalDurationMs: 420,
+                          },
+                        })
+                      }
                       className="text-xs text-[#73737c] hover:text-[#f3f3f4] inline-flex items-center gap-1 transition-colors"
                     >
-                      <span>Inspect step timings</span>
+                      <span>Inspect step telemetry & worker gates</span>
                       <ChevronRight className="w-3 h-3 text-[#73737c]" />
                     </button>
                   </div>
@@ -672,6 +835,116 @@ export const LiveTrainingPage: React.FC = () => {
             </div>
           </div>
 
+          {/* System Capabilities Section */}
+          {capabilities && (
+            <div className="pt-4 border-t border-white/[0.07] space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="text-xs font-semibold text-[#f3f3f4]">
+                    System Capabilities (API v{capabilities.api_version})
+                  </h4>
+                  <p className="text-[11px] text-[#73737c]">
+                    DTP/1 parameter-server and MCP/1 management protocols
+                  </p>
+                </div>
+                <span
+                  className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-mono ${
+                    capabilities.runtime_connected
+                      ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                      : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                  }`}
+                >
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      capabilities.runtime_connected ? 'bg-emerald-400' : 'bg-rose-400'
+                    }`}
+                  />
+                  <span>
+                    {capabilities.runtime_connected
+                      ? `Runtime Connected: ${capabilities.runtime_instance_id || 'active'}`
+                      : 'Runtime Disconnected'}
+                  </span>
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+                <div className="p-3 bg-[#171719] rounded border border-white/[0.04]">
+                  <div className="text-[11px] text-[#73737c]">DTP Wire Versions</div>
+                  <div className="text-[#f3f3f4] font-mono mt-1">
+                    {(capabilities.dtp_versions || []).map((v) => `DTP/${v}`).join(', ') || 'DTP/1'}
+                  </div>
+                </div>
+
+                <div className="p-3 bg-[#171719] rounded border border-white/[0.04]">
+                  <div className="text-[11px] text-[#73737c]">MCP Control Versions</div>
+                  <div className="text-[#f3f3f4] font-mono mt-1">
+                    {(capabilities.mcp_versions || []).map((v) => `MCP/${v}`).join(', ') || 'MCP/1'}
+                  </div>
+                </div>
+
+                <div className="p-3 bg-[#171719] rounded border border-white/[0.04]">
+                  <div className="text-[11px] text-[#73737c]">Supported Strategies</div>
+                  <div className="text-blue-400 font-mono mt-1">
+                    {(capabilities.supported_training_strategies || []).join(', ') || 'strict_bsp'}
+                  </div>
+                </div>
+
+                <div className="p-3 bg-[#171719] rounded border border-white/[0.04]">
+                  <div className="text-[11px] text-[#73737c]">Feature Flags</div>
+                  <div className="flex items-center gap-1.5 mt-1 flex-wrap text-[11px] font-mono">
+                    <span
+                      className={`px-1.5 py-0.5 rounded ${
+                        capabilities.feature_flags?.manual_checkpoint_request
+                          ? 'bg-emerald-500/10 text-emerald-400'
+                          : 'bg-zinc-800 text-zinc-400'
+                      }`}
+                    >
+                      chkpt: {capabilities.feature_flags?.manual_checkpoint_request ? 'on' : 'off'}
+                    </span>
+                    <span
+                      className={`px-1.5 py-0.5 rounded ${
+                        capabilities.feature_flags?.attempt_websocket_stream
+                          ? 'bg-emerald-500/10 text-emerald-400'
+                          : 'bg-zinc-800 text-zinc-400'
+                      }`}
+                    >
+                      ws_stream: {capabilities.feature_flags?.attempt_websocket_stream ? 'on' : 'off'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Supported Models Catalog */}
+              {capabilities.supported_models && capabilities.supported_models.length > 0 && (
+                <div className="p-3 bg-[#171719] rounded border border-white/[0.04] space-y-2">
+                  <div className="text-[11px] font-medium text-[#a1a1a8]">
+                    Catalog Models ({capabilities.supported_models.length})
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+                    {capabilities.supported_models.map((m) => (
+                      <div
+                        key={m.model_id}
+                        className="px-2.5 py-1.5 rounded bg-white/[0.02] border border-white/[0.04] flex items-center justify-between"
+                      >
+                        <div className="min-w-0">
+                          <div className="text-[#f3f3f4] font-medium truncate">
+                            {m.display_name}
+                          </div>
+                          <div className="text-[10px] text-[#73737c] font-mono truncate">
+                            {m.model_id}
+                          </div>
+                        </div>
+                        <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 font-mono text-[10px] shrink-0 border border-blue-500/20">
+                          {m.task_type}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="pt-2 border-t border-white/[0.07] flex justify-end">
             <button
               type="button"
@@ -749,6 +1022,7 @@ export const LiveTrainingPage: React.FC = () => {
 
       <StepInspectorDrawer
         step={selectedStep}
+        attemptId={attempt?.attempt_id}
         onClose={() => setSelectedStep(null)}
       />
     </div>
