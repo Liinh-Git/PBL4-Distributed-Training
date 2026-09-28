@@ -6,14 +6,21 @@ from pbl4.runtime.runtime_events import RuntimeEvent
 
 
 def _priority(event: RuntimeEvent) -> int:
+    state = event.details.get("state") if isinstance(event.details, dict) else None
     if (
-        event.severity in ("ERROR", "CRITICAL")
-        or event.event_type.startswith("checkpoint.")
-        or event.event_type.endswith(".state_changed")
+        state in ("COMPLETED", "FAILED", "ABORTED")
         or event.event_type == "attempt.failed"
+        or event.severity in ("ERROR", "CRITICAL")
+    ):
+        return 3
+    if (
+        event.event_type.startswith("checkpoint.")
+        or event.event_type.endswith(".state_changed")
     ):
         return 2
-    return 0 if event.event_type == "metric.sample" else 1
+    if event.event_type == "metric.sample":
+        return 0
+    return 1
 
 
 class EventEmitter:
@@ -65,10 +72,24 @@ class EventEmitter:
             self._events.append(event)
             return event
 
+    def peek(self, limit: int | None = None) -> tuple[RuntimeEvent, ...]:
+        with self._lock:
+            if limit is not None:
+                return tuple(self._events[:limit])
+            return tuple(self._events)
+
+    def ack(self, sequence: int) -> bool:
+        with self._lock:
+            for i, event in enumerate(self._events):
+                if event.runtime_event_seq == sequence:
+                    del self._events[: i + 1]
+                    return True
+            return False
+
     def drain(self, after_sequence: int = 0) -> tuple[RuntimeEvent, ...]:
         with self._lock:
             events = tuple(e for e in self._events if e.runtime_event_seq > after_sequence)
-            self._events.clear()
+            self._events = [e for e in self._events if e.runtime_event_seq <= after_sequence]
             return events
 
     def snapshot(self) -> dict[str, int]:

@@ -621,27 +621,41 @@ class _AttemptRunner:
             coordinator.worker_failed(worker_id, session_id)
 
     def _forward_events(self) -> None:
-        while not self.terminal or (
-            self._events is not None and self._events.snapshot()["queued_event_count"]
+        while not self._process._stopping.is_set() and (
+            not self.terminal
+            or (self._events is not None and self._events.snapshot()["queued_event_count"] > 0)
         ):
             events = self._events
             if events is None or not self._management.backend_connected:
                 time.sleep(0.1)
                 continue
-            for event in events.drain():
-                self._management.send_runtime_event(
-                    {
-                        "attempt_id": event.attempt_id,
-                        "job_id": event.job_id,
-                        "runtime_event_seq": event.runtime_event_seq,
-                        "event_type": event.event_type,
-                        "event_schema_version": event.event_schema_version,
-                        "occurred_at": event.occurred_at,
-                        "source_component": event.source_component,
-                        "severity": event.severity,
-                        "details": event.details,
-                    }
-                )
+            batch = events.peek(limit=64)
+            if not batch:
+                time.sleep(0.05)
+                continue
+            for event in batch:
+                if self._process._stopping.is_set() or not self._management.backend_connected:
+                    break
+                payload = {
+                    "attempt_id": event.attempt_id,
+                    "job_id": event.job_id,
+                    "runtime_event_seq": event.runtime_event_seq,
+                    "event_type": event.event_type,
+                    "event_schema_version": event.event_schema_version,
+                    "occurred_at": event.occurred_at,
+                    "source_component": event.source_component,
+                    "severity": event.severity,
+                    "details": event.details,
+                }
+                if self._management.send_runtime_event(payload):
+                    events.ack(event.runtime_event_seq)
+                else:
+                    logger.warning(
+                        "Failed to send runtime event seq=%s (%s), stopping batch for retry",
+                        event.runtime_event_seq,
+                        event.event_type,
+                    )
+                    break
             time.sleep(0.05)
 
     def snapshot(self, runtime_instance_id: str) -> dict[str, object]:
