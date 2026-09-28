@@ -258,14 +258,14 @@ class RuntimeGateway:
         """Return the current management-visible runtime snapshot."""
         if attempt_id is None:
             snap = dict(self._cached_snapshot)
-            snap["stale"] = not self.connected
+            snap["stale"] = bool(self._cached_snapshot.get("stale", False) or not self.connected)
             return snap
 
         snap = dict(self._attempt_snapshots.get(attempt_id, self._empty_snapshot()))
         cursor = self.get_cursor(attempt_id)
         snap["attempt_id"] = attempt_id
         snap["active_attempt_id"] = attempt_id
-        snap["stale"] = cursor.stale or not self.connected
+        snap["stale"] = bool(cursor.stale or snap.get("stale", False) or not self.connected)
         snap["observed_at"] = cursor.observed_at
         snap["runtime_event_seq"] = cursor.authoritative_snapshot_seq
         return snap
@@ -282,16 +282,24 @@ class RuntimeGateway:
         return snap
 
     def on_disconnect(self) -> None:
-        """Mark cached snapshot stale and abort active attempts on disconnect."""
+        """Mark cached snapshot and cursors stale on disconnect without mutating DB Attempt."""
         self._cached_snapshot["stale"] = True
         for attempt_id, cursor in self._attempt_cursors.items():
             cursor.stale = True
             if attempt_id in self._attempt_snapshots:
                 self._attempt_snapshots[attempt_id]["stale"] = True
-        logger.info("Runtime disconnected; snapshot marked stale, aborting active attempts.")
-        self._abort_active_attempts_on_runtime_down(
-            failure_code="RUNTIME_DISCONNECTED",
-            failure_message="Runtime MCP connection was lost",
+        for cmd_id, future in list(self._pending_results.items()):
+            if not future.done():
+                future.set_exception(
+                    RuntimeUnavailableError(
+                        f"Runtime MCP connection was lost; command {cmd_id} aborted",
+                        command_id=cmd_id,
+                    )
+                )
+        self._pending_results.clear()
+        logger.info(
+            "Runtime MCP disconnected; snapshot marked stale/degraded. "
+            "DB Attempt state and worker allocations preserved."
         )
 
     def reset_runtime_context(self) -> None:
@@ -309,10 +317,6 @@ class RuntimeGateway:
                 )
         self._pending_results.clear()
         logger.info("Runtime context and cursors reset due to runtime instance change.")
-        self._abort_active_attempts_on_runtime_down(
-            failure_code="RUNTIME_RESTARTED",
-            failure_message="Runtime restarted with new instance ID",
-        )
 
     def _abort_active_attempts_on_runtime_down(
         self,
@@ -434,11 +438,12 @@ class RuntimeGateway:
         """MGMT_HELLO_ACK -> ALWAYS request GET_STATE."""
         logger.info("Received MGMT_HELLO_ACK: %s", payload)
         new_instance_id = payload.get("runtime_instance_id")
-        if (
+        instance_changed = (
             self._runtime_instance_id is not None
             and new_instance_id is not None
             and self._runtime_instance_id != new_instance_id
-        ):
+        )
+        if instance_changed:
             logger.warning(
                 "Runtime instance changed from %s to %s; clearing old attempt contexts",
                 self._runtime_instance_id,
@@ -452,6 +457,11 @@ class RuntimeGateway:
         state = self._port.request_state()
         if state:
             self.handle_state_snapshot(state)
+        elif instance_changed:
+            self._abort_active_attempts_on_runtime_down(
+                failure_code="RUNTIME_RESTARTED",
+                failure_message="Runtime restarted with new instance ID but provided no state snapshot",
+            )
 
     def handle_state_snapshot(self, snapshot: dict[str, Any]) -> None:
         """STATE_SNAPSHOT -> authoritative Runtime projection reconciliation."""

@@ -160,9 +160,17 @@ def test_runtime_instance_unchanged_preserves_context_on_reconnect() -> None:
     assert cursor.max_seen_seq == 15
 
 
-def test_runtime_disconnect_aborts_active_attempt_and_cleans_allocations() -> None:
+def test_runtime_disconnect_marks_stale_without_aborting_active_attempt_or_cleaning_allocations() -> None:
     port = FakeMcpClientPort(initially_connected=True)
     gateway = RuntimeGateway(port)
+
+    # Establish initial session with active attempt-1
+    gateway.handle_hello_ack({"runtime_instance_id": "runtime-1"})
+    cursor = gateway.get_cursor("attempt-active-1")
+    cursor.max_seen_seq = 10
+    cursor.highest_contiguous_seq = 10
+    cursor.stale = False
+    gateway._attempt_snapshots["attempt-active-1"] = {"state": "RUNNING", "stale": False}
 
     active_attempt = {
         "attempt_id": "attempt-active-1",
@@ -186,21 +194,212 @@ def test_runtime_disconnect_aborts_active_attempt_and_cleans_allocations() -> No
     ):
         gateway.on_disconnect()
 
-        mock_update_state.assert_called_once()
-        args, kwargs = mock_update_state.call_args
-        assert args[1] == "attempt-active-1"
-        assert kwargs["new_state"] == "ABORTED"
-        assert kwargs["failure_code"] == "RUNTIME_DISCONNECTED"
+        # Architecture invariant: Transport disconnect must NOT mutate DB attempt state or cleanup allocations
+        mock_update_state.assert_not_called()
+        mock_cleanup.assert_not_called()
+        mock_broadcast.assert_not_called()
 
-        mock_cleanup.assert_called_once()
-        c_args, _ = mock_cleanup.call_args
-        assert c_args[1] == "attempt-active-1"
+        # Projection is truthfully marked stale
+        assert gateway.get_snapshot()["stale"] is True
+        assert gateway.get_cursor("attempt-active-1").stale is True
+        assert gateway.get_snapshot("attempt-active-1")["stale"] is True
 
-        mock_broadcast.assert_called_once()
-        b_args, _ = mock_broadcast.call_args
-        assert b_args[0] == "attempt-active-1"
-        assert b_args[1]["payload"]["state"] == "ABORTED"
-        assert b_args[1]["payload"]["failure_code"] == "RUNTIME_DISCONNECTED"
+
+def test_mcp_disconnect_in_running_preserves_attempt_and_allocations() -> None:
+    """Mandatory test: MCP disconnect during RUNNING -> DB Attempt remains RUNNING/stale, Worker DTP not stopped."""
+    port = FakeMcpClientPort(initially_connected=True)
+    gateway = RuntimeGateway(port)
+
+    gateway.handle_hello_ack({"runtime_instance_id": "runtime-1"})
+    cursor = gateway.get_cursor("attempt-running-1")
+    cursor.stale = False
+    gateway._attempt_snapshots["attempt-running-1"] = {"state": "RUNNING", "epoch": 1, "stale": False}
+
+    # Add in-flight command
+    waiter: concurrent.futures.Future[dict] = concurrent.futures.Future()
+    gateway._pending_results["cmd-in-flight"] = waiter
+
+    with (
+        patch("pbl4.management_backend.db.transaction"),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.get_active_attempt",
+            return_value={"attempt_id": "attempt-running-1", "state": "RUNNING"},
+        ),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.update_attempt_state"
+        ) as mock_update_state,
+        patch(
+            "pbl4.management_backend.services.allocation_service.cleanup_allocations_for_attempt"
+        ) as mock_cleanup,
+    ):
+        gateway.on_disconnect()
+
+        # DB Attempt is NOT aborted
+        mock_update_state.assert_not_called()
+        # Worker allocations are NOT cleaned up
+        mock_cleanup.assert_not_called()
+
+        # In-flight command is aborted with RuntimeUnavailableError
+        assert waiter.done() is True
+        with pytest.raises(RuntimeUnavailableError):
+            waiter.result()
+
+        # Gateway reports degraded / stale state
+        assert gateway.get_cursor("attempt-running-1").stale is True
+        assert gateway.get_snapshot("attempt-running-1")["stale"] is True
+
+
+def test_mcp_reconnect_same_instance_reconciles_running_and_completed() -> None:
+    """Mandatory test: Reconnect same runtime_instance_id + snapshot RUNNING/COMPLETED -> Backend reconcile correctly."""
+    port = FakeMcpClientPort(initially_connected=True)
+    gateway = RuntimeGateway(port)
+
+    # Initial connection
+    gateway.handle_hello_ack({"runtime_instance_id": "runtime-1"})
+    cursor = gateway.get_cursor("attempt-rec-1")
+    cursor.max_seen_seq = 10
+    cursor.highest_contiguous_seq = 10
+    cursor.authoritative_snapshot_seq = 10
+    gateway._attempt_snapshots["attempt-rec-1"] = {"state": "RUNNING", "epoch": 1}
+
+    # 1. MCP disconnects
+    gateway.on_disconnect()
+    assert gateway.get_cursor("attempt-rec-1").stale is True
+
+    # 2a. Reconnect with SAME instance, snapshot still RUNNING (progressed to epoch 2, seq 20)
+    port.snapshot_to_return = _build_snapshot(
+        instance_id="runtime-1",
+        active_attempt_id="attempt-rec-1",
+        last_runtime_event_seq=20,
+    )
+    port.snapshot_to_return["epoch"] = 2
+    port.snapshot_to_return["attempt_state"] = "RUNNING"
+
+    with (
+        patch("pbl4.management_backend.db.transaction"),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.get_attempt",
+            return_value={"attempt_id": "attempt-rec-1", "state": "RUNNING", "runtime_metadata": {}},
+        ),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.update_attempt_state",
+            return_value={"state": "RUNNING"},
+        ) as mock_update_state,
+        patch(
+            "pbl4.management_backend.services.allocation_service.cleanup_allocations_for_attempt"
+        ) as mock_cleanup,
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync"),
+    ):
+        gateway.handle_hello_ack({"runtime_instance_id": "runtime-1"})
+
+        # Reconciled to RUNNING, cursor unstaled
+        assert gateway.get_cursor("attempt-rec-1").stale is False
+        assert gateway.get_snapshot("attempt-rec-1")["stale"] is False
+        assert gateway.get_snapshot("attempt-rec-1")["epoch"] == 2
+        mock_cleanup.assert_not_called()
+
+    # 2b. Reconnect with SAME instance, but training COMPLETED while disconnected
+    gateway.on_disconnect()
+    assert gateway.get_cursor("attempt-rec-1").stale is True
+
+    port.snapshot_to_return = _build_snapshot(
+        instance_id="runtime-1",
+        active_attempt_id="attempt-rec-1",
+        last_runtime_event_seq=30,
+    )
+    port.snapshot_to_return["epoch"] = 5
+    port.snapshot_to_return["attempt_state"] = "COMPLETED"
+
+    with (
+        patch("pbl4.management_backend.db.transaction"),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.get_attempt",
+            return_value={"attempt_id": "attempt-rec-1", "state": "RUNNING", "runtime_metadata": {}},
+        ),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.update_attempt_state",
+            return_value={"state": "COMPLETED"},
+        ) as mock_update_completed,
+        patch(
+            "pbl4.management_backend.services.allocation_service.cleanup_allocations_for_attempt"
+        ) as mock_cleanup_completed,
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync"),
+    ):
+        gateway.handle_hello_ack({"runtime_instance_id": "runtime-1"})
+
+        # Reconciled to COMPLETED, allocations cleaned up normally on completion
+        mock_update_completed.assert_called()
+        assert mock_update_completed.call_args[0][2] == "COMPLETED"
+        mock_cleanup_completed.assert_called_once()
+        assert gateway.get_cursor("attempt-rec-1").stale is False
+        assert gateway.get_snapshot("attempt-rec-1")["stale"] is False
+
+
+def test_runtime_instance_restart_distinguished_from_tcp_reconnect() -> None:
+    """Mandatory test: Runtime instance restart must be clearly distinguished from TCP reconnect."""
+    port = FakeMcpClientPort(initially_connected=True)
+    gateway = RuntimeGateway(port)
+
+    # Initial connection to runtime-1
+    gateway.handle_hello_ack({"runtime_instance_id": "runtime-1"})
+    cursor = gateway.get_cursor("attempt-1")
+    cursor.max_seen_seq = 15
+    gateway._attempt_snapshots["attempt-1"] = {"state": "RUNNING"}
+
+    # --- Scenario A: Ordinary TCP disconnect and reconnect (same runtime_instance_id) ---
+    gateway.on_disconnect()
+    assert gateway.get_cursor("attempt-1").stale is True
+
+    # Reconnect with same runtime-1 and running snapshot
+    port.snapshot_to_return = _build_snapshot(
+        instance_id="runtime-1",
+        active_attempt_id="attempt-1",
+        last_runtime_event_seq=15,
+    )
+    with (
+        patch("pbl4.management_backend.db.transaction"),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.get_attempt",
+            return_value={"state": "RUNNING", "runtime_metadata": {}},
+        ),
+        patch("pbl4.management_backend.repositories.attempt_repository.update_attempt_state"),
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync"),
+    ):
+        gateway.handle_hello_ack({"runtime_instance_id": "runtime-1"})
+
+    # Context is preserved, NOT reset
+    assert "attempt-1" in gateway._attempt_snapshots
+    assert gateway.get_cursor("attempt-1").max_seen_seq == 15
+
+    # --- Scenario B: Actual process restart (new runtime_instance_id = runtime-2) ---
+    port.snapshot_to_return = _build_snapshot(
+        instance_id="runtime-2",
+        active_attempt_id=None,  # New instance is fresh and idle
+    )
+    with (
+        patch("pbl4.management_backend.db.transaction"),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.get_active_attempt",
+            return_value={"attempt_id": "attempt-1", "state": "RUNNING"},
+        ),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.update_attempt_state"
+        ) as mock_abort_state,
+        patch(
+            "pbl4.management_backend.services.allocation_service.cleanup_allocations_for_attempt"
+        ) as mock_cleanup,
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync"),
+    ):
+        gateway.handle_hello_ack({"runtime_instance_id": "runtime-2"})
+
+    # Instance changed: context was reset
+    assert gateway.runtime_instance_id == "runtime-2"
+    assert len(gateway._attempt_snapshots) == 0
+    # Authoritative idle snapshot resulted in aborting stale attempt in DB
+    mock_abort_state.assert_called_once()
+    assert mock_abort_state.call_args[1]["new_state"] == "ABORTED"
+    assert mock_abort_state.call_args[1]["failure_code"] == "RUNTIME_INSTANCE_IDLE"
+    mock_cleanup.assert_called_once()
 
 
 def test_runtime_instance_change_aborts_active_attempt() -> None:
