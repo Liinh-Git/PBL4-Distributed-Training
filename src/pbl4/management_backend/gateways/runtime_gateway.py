@@ -596,6 +596,10 @@ class RuntimeGateway:
                     connected_at = worker.get("connected_at")
                     if isinstance(connected_at, str):
                         connected_at = datetime.fromisoformat(connected_at.replace("Z", "+00:00"))
+                    disconnected_at = worker.get("disconnected_at")
+                    if isinstance(disconnected_at, str):
+                        disconnected_at = datetime.fromisoformat(disconnected_at.replace("Z", "+00:00"))
+                    failure_code = worker.get("failure_code")
                     node_id = worker.get("node_id")
                     node_label = worker.get("node_label") or "node-unknown"
                     if node_id and (node_label == "node-unknown" or not node_label):
@@ -612,6 +616,8 @@ class RuntimeGateway:
                         node_label=node_label,
                         state=worker["state"],
                         last_heartbeat_at=heartbeat,
+                        disconnected_at=disconnected_at,
+                        failure_code=failure_code,
                         node_id=node_id,
                         allocation_id=worker.get("allocation_id"),
                     )
@@ -636,6 +642,8 @@ class RuntimeGateway:
                             state=worker["state"],
                             connected_at=connected_at,
                             last_heartbeat_at=heartbeat,
+                            disconnected_at=disconnected_at,
+                            failure_code=failure_code,
                             node_id=node_id,
                             allocation_id=worker.get("allocation_id"),
                         )

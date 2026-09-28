@@ -147,6 +147,7 @@ class ParameterServer:
         self._server = TcpServer(host, port, self._serve_connection)
         self._lock = threading.Lock()
         self._connections: dict[int, _Connection] = {}
+        self._session_metadata: dict[int, dict[str, object]] = {}
         self._admitted_allocation_ids: set[str] = set()
         self._manifest_workers: set[int] = set()
         self._next_session_id = 1
@@ -178,25 +179,41 @@ class ParameterServer:
 
     def worker_snapshots(self) -> tuple[dict[str, object], ...]:
         """Return management metadata without exposing live socket objects."""
-        sessions = {item.worker_id: item for item in self.registry.snapshot()}
         with self._lock:
-            return tuple(
-                {
-                    "worker_id": worker_id,
-                    "session_id": connection.session_id,
-                    "node_label": connection.node_label,
-                    "state": sessions[worker_id].state.value,
-                    "protocol_version": connection.protocol_version,
-                    "connected_at": connection.connected_at,
-                    "last_heartbeat_at": connection.last_heartbeat_at,
-                    "shard_id": connection.shard_id,
-                    "local_model_version": connection.local_model_version,
-                    "node_id": connection.node_id,
-                    "allocation_id": connection.allocation_id,
-                }
-                for worker_id, connection in sorted(self._connections.items())
-                if worker_id in sessions
-            )
+            snapshots = []
+            for session in self.registry.snapshot():
+                meta = self._session_metadata.get(session.worker_id, {})
+                live_conn = self._connections.get(session.worker_id)
+                is_live = live_conn is not None and live_conn.session_id == session.session_id
+                last_heartbeat = (
+                    live_conn.last_heartbeat_at if is_live else meta.get("last_heartbeat_at")
+                )
+                disconnected_at = meta.get("disconnected_at")
+                if session.state in (SessionState.DISCONNECTED, SessionState.FAILED) and not disconnected_at:
+                    disconnected_at = datetime.now(UTC).isoformat()
+
+                snapshots.append(
+                    {
+                        "worker_id": session.worker_id,
+                        "session_id": session.session_id,
+                        "node_label": meta.get("node_label", "node-unknown"),
+                        "state": session.state.value,
+                        "protocol_version": meta.get("protocol_version", 1),
+                        "connected_at": meta.get("connected_at", ""),
+                        "last_heartbeat_at": last_heartbeat,
+                        "disconnected_at": disconnected_at,
+                        "failure_code": session.failure_code,
+                        "shard_id": live_conn.shard_id if is_live else meta.get("shard_id"),
+                        "local_model_version": (
+                            live_conn.local_model_version
+                            if is_live
+                            else meta.get("local_model_version")
+                        ),
+                        "node_id": meta.get("node_id"),
+                        "allocation_id": meta.get("allocation_id"),
+                    }
+                )
+            return tuple(snapshots)
 
     def wait_for_manifests(self, timeout: float) -> bool:
         deadline = time.monotonic() + timeout
@@ -317,6 +334,19 @@ class ParameterServer:
                     allocation_id=str(hello.allocation_id) if is_managed else None,
                 )
                 self._connections[registered.worker_id] = connection
+                self._session_metadata[registered.worker_id] = {
+                    "worker_id": registered.worker_id,
+                    "session_id": session_id,
+                    "node_label": str(hello.node_label),
+                    "protocol_version": 1,
+                    "connected_at": connected_at,
+                    "last_heartbeat_at": connected_at,
+                    "disconnected_at": None,
+                    "node_id": str(hello.node_id) if is_managed else None,
+                    "allocation_id": str(hello.allocation_id) if is_managed else None,
+                    "shard_id": None,
+                    "local_model_version": None,
+                }
                 self._membership_changed.notify_all()
 
             ack = HelloAck.from_dict(
@@ -345,6 +375,13 @@ class ParameterServer:
         finally:
             if connection is not None:
                 connection.assembler.discard()
+                now_mono = time.monotonic()
+                now_iso = datetime.now(UTC).isoformat()
+                with self._lock:
+                    meta = self._session_metadata.get(connection.worker_id)
+                    if meta is not None and meta.get("session_id") == connection.session_id:
+                        if meta.get("disconnected_at") is None:
+                            meta["disconnected_at"] = now_iso
                 with self._membership_changed:
                     self._connections.pop(connection.worker_id, None)
                     self._manifest_workers.discard(connection.worker_id)
@@ -354,7 +391,7 @@ class ParameterServer:
                         connection.worker_id,
                         connection.session_id,
                         SessionState.DISCONNECTED,
-                        time.monotonic(),
+                        now_mono,
                     )
                 if self._disconnect_handler is not None:
                     self._disconnect_handler(connection.worker_id, connection.session_id)
@@ -378,7 +415,11 @@ class ParameterServer:
             with contextlib.suppress(ValueError):
                 self.registry.heartbeat(connection.worker_id, connection.session_id, now)
             with self._lock:
-                connection.last_heartbeat_at = datetime.now(UTC).isoformat()
+                iso_now = datetime.now(UTC).isoformat()
+                connection.last_heartbeat_at = iso_now
+                meta = self._session_metadata.get(connection.worker_id)
+                if meta is not None and meta.get("session_id") == connection.session_id:
+                    meta["last_heartbeat_at"] = iso_now
             identity = (
                 TransferIdentity(
                     frame.header.session_id,
@@ -399,7 +440,11 @@ class ParameterServer:
 
             if frame.header.message_type == MESSAGE_TYPE_SHARD_READY:
                 assert message is not None
-                connection.shard_id = int(message.shard_id)
+                with self._lock:
+                    connection.shard_id = int(message.shard_id)
+                    meta = self._session_metadata.get(connection.worker_id)
+                    if meta is not None and meta.get("session_id") == connection.session_id:
+                        meta["shard_id"] = connection.shard_id
                 self.registry.transition(
                     connection.worker_id,
                     connection.session_id,
@@ -464,7 +509,11 @@ class ParameterServer:
                     self._model_init_handler(complete)
             elif frame.header.message_type == MESSAGE_TYPE_READY:
                 assert isinstance(message, Ready)
-                connection.local_model_version = int(message.model_version)
+                with self._lock:
+                    connection.local_model_version = int(message.model_version)
+                    meta = self._session_metadata.get(connection.worker_id)
+                    if meta is not None and meta.get("session_id") == connection.session_id:
+                        meta["local_model_version"] = connection.local_model_version
                 self.registry.transition(
                     connection.worker_id,
                     connection.session_id,
@@ -474,7 +523,11 @@ class ParameterServer:
                 connection.validator.set_phase(ConnectionPhase.READY)
             elif frame.header.message_type == MESSAGE_TYPE_HEARTBEAT:
                 assert isinstance(message, Heartbeat)
-                connection.local_model_version = int(message.local_model_version)
+                with self._lock:
+                    connection.local_model_version = int(message.local_model_version)
+                    meta = self._session_metadata.get(connection.worker_id)
+                    if meta is not None and meta.get("session_id") == connection.session_id:
+                        meta["local_model_version"] = connection.local_model_version
             elif frame.header.message_type == MESSAGE_TYPE_GRADIENT_META:
                 assert identity is not None and isinstance(message, GradientMeta)
                 connection.assembler.begin_gradient(identity, message)

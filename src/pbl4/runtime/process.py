@@ -535,6 +535,7 @@ class _AttemptRunner:
         finally:
             if self._server is not None:
                 self._server.stop()
+                self._final_workers = self._server.worker_snapshots()
             coordinator = self._coordinator
             if coordinator is not None:
                 self._set_state(str(coordinator.snapshot()["state"]))
@@ -692,19 +693,26 @@ class _AttemptRunner:
             last_seq = 0
             gap_count = 0
         server = self._server
-        raw_workers = server.worker_snapshots() if server is not None else self._final_workers
+        if self.terminal and self._final_workers:
+            raw_workers = self._final_workers
+        elif server is not None:
+            raw_workers = server.worker_snapshots()
+        else:
+            raw_workers = self._final_workers
         captured = _now()
         workers = [
             {
                 "worker_id": item["worker_id"],
                 "session_id": str(item["session_id"]),
-                "node_label": item["node_label"],
+                "node_label": item.get("node_label", "node-unknown"),
                 "state": item["state"],
-                "protocol_version": item["protocol_version"],
+                "protocol_version": item.get("protocol_version", 1),
                 "connected_at": item["connected_at"],
-                "last_heartbeat_at": item["last_heartbeat_at"],
-                "shard_id": item["shard_id"],
-                "local_model_version": item["local_model_version"],
+                "last_heartbeat_at": item.get("last_heartbeat_at"),
+                "disconnected_at": item.get("disconnected_at"),
+                "failure_code": item.get("failure_code"),
+                "shard_id": item.get("shard_id"),
+                "local_model_version": item.get("local_model_version"),
                 "node_id": item.get("node_id"),
                 "allocation_id": item.get("allocation_id"),
             }
