@@ -3,6 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 from contextlib import contextmanager
 from datetime import UTC, datetime
+import json
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -13,7 +14,10 @@ from pbl4.management_backend.gateways.runtime_gateway import (
     DatabaseUnavailableError,
     RuntimeGateway,
 )
-from pbl4.management_backend.services.event_ingest import RuntimeEventIngestResult
+from pbl4.management_backend.services.event_ingest import (
+    ConflictingEventPayloadError,
+    RuntimeEventIngestResult,
+)
 from pbl4.management_protocol.codec import McpCodec
 from pbl4.management_protocol.messages import CommandResult, McpEnvelope
 
@@ -523,3 +527,470 @@ def test_state_snapshot_programming_error_does_not_broadcast() -> None:
     # Invariants:
     assert gateway.get_authoritative_snapshot("attempt-bug") is None
     mock_broadcast.assert_not_called()
+
+
+def test_event_gap_preflight_fences_projection_and_prevents_db_mutation() -> None:
+    """Preflight check fences projection and prevents DB mutation when seq > expected."""
+    gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
+    cursor = gateway.get_cursor("attempt-gap-1")
+    cursor.highest_contiguous_seq = 100
+    cursor.max_seen_seq = 100
+    cursor.gap_fenced = False
+
+    fake_conn = MagicMock()
+
+    @contextmanager
+    def fake_transaction():
+        yield fake_conn
+
+    @contextmanager
+    def fake_get_connection():
+        yield fake_conn
+
+    event_payload = {
+        "attempt_id": "attempt-gap-1",
+        "job_id": "job-1",
+        "runtime_event_seq": 102,
+        "event_type": "attempt.state_changed",
+        "event_schema_version": 1,
+        "severity": "INFO",
+        "occurred_at": datetime.now(UTC).isoformat(),
+        "source_component": "runtime",
+        "details": {"state": "COMPLETED"},
+    }
+
+    with (
+        patch("pbl4.management_backend.db.transaction", fake_transaction),
+        patch("pbl4.management_backend.db.get_connection", fake_get_connection),
+        patch(
+            "pbl4.management_backend.services.event_ingest.ingest_runtime_event",
+            return_value=RuntimeEventIngestResult(row={"id": 102}, inserted=True),
+        ),
+        patch(
+            "pbl4.management_backend.repositories.event_repository.get_event_by_seq",
+            return_value=None,
+        ),
+        patch.object(gateway, "_project_runtime_event") as mock_project,
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync") as mock_broadcast,
+    ):
+        gateway.handle_runtime_event(event_payload)
+
+    # Invariants:
+    # 1. DB projection was NOT called because event 102 is non-contiguous (expected 101)
+    mock_project.assert_not_called()
+    # 2. Attempt cursor is now gap_fenced
+    cursor = gateway.get_cursor("attempt-gap-1")
+    assert cursor.gap_fenced is True
+    assert cursor.highest_contiguous_seq == 100
+    assert cursor.max_seen_seq == 102
+    # 3. GAP notification broadcasted with snapshot_required=True
+    gap_calls = [
+        call
+        for call in mock_broadcast.call_args_list
+        if len(call.args) > 1
+        and isinstance(call.args[1], dict)
+        and call.args[1].get("kind") == "GAP"
+    ]
+    assert len(gap_calls) == 1
+    assert gap_calls[0].args[1]["payload"]["snapshot_required"] is True
+
+
+def test_missing_event_arrival_drains_gap_and_reconciles_db_projection() -> None:
+    """Arrival of missing event projects it, drains subsequent stored events, and un-fences."""
+    gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
+    cursor = gateway.get_cursor("attempt-gap-2")
+    cursor.highest_contiguous_seq = 100
+    cursor.max_seen_seq = 102
+    cursor.gap_fenced = True
+
+    fake_conn = MagicMock()
+
+    @contextmanager
+    def fake_transaction():
+        yield fake_conn
+
+    @contextmanager
+    def fake_get_connection():
+        yield fake_conn
+
+    # Missing event 101 arriving now
+    event_101_payload = {
+        "attempt_id": "attempt-gap-2",
+        "job_id": "job-1",
+        "runtime_event_seq": 101,
+        "event_type": "step.started",
+        "event_schema_version": 1,
+        "severity": "INFO",
+        "occurred_at": datetime.now(UTC).isoformat(),
+        "source_component": "runtime",
+        "details": {
+            "step_id": 1,
+            "operation_id": 1,
+            "training_strategy": "strict_bsp",
+            "epoch": 0,
+            "batch_ordinal": 0,
+            "input_model_version": 0,
+        },
+    }
+
+    # Event 102 was already persisted in DB during previous out-of-order arrival
+    db_event_102 = {
+        "attempt_id": "attempt-gap-2",
+        "job_id": "job-1",
+        "runtime_event_seq": 102,
+        "event_type": "attempt.state_changed",
+        "event_schema_version": 1,
+        "severity": "INFO",
+        "occurred_at": datetime.now(UTC),
+        "source_component": "runtime",
+        "payload": {"state": "COMPLETED"},
+    }
+
+    def fake_get_event_by_seq(_conn: Any, _attempt_id: str, seq: int) -> dict[str, Any] | None:
+        if seq == 102:
+            return db_event_102
+        return None
+
+    projected_events: list[dict[str, Any]] = []
+
+    def fake_project(_conn: Any, payload: dict[str, Any]) -> None:
+        projected_events.append(payload)
+
+    with (
+        patch("pbl4.management_backend.db.transaction", fake_transaction),
+        patch("pbl4.management_backend.db.get_connection", fake_get_connection),
+        patch(
+            "pbl4.management_backend.services.event_ingest.ingest_runtime_event",
+            return_value=RuntimeEventIngestResult(row={"id": 101}, inserted=True),
+        ),
+        patch(
+            "pbl4.management_backend.repositories.event_repository.get_event_by_seq",
+            side_effect=fake_get_event_by_seq,
+        ),
+        patch.object(gateway, "_project_runtime_event", side_effect=fake_project),
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync"),
+    ):
+        gateway.handle_runtime_event(event_101_payload)
+
+    # Invariants:
+    # 1. Event 101 was projected, and pre-persisted event 102 was drained and projected
+    assert len(projected_events) == 2
+    assert projected_events[0]["runtime_event_seq"] == 101
+    assert projected_events[1]["runtime_event_seq"] == 102
+    # 2. Cursor continuity reconciled and un-fenced
+    cursor = gateway.get_cursor("attempt-gap-2")
+    assert cursor.highest_contiguous_seq == 102
+    assert cursor.max_seen_seq == 102
+    assert cursor.gap_fenced is False
+
+
+def test_authoritative_snapshot_reconciles_gap_and_unfences_projection() -> None:
+    """Authoritative snapshot reconciles gap, resets cursor continuity, and allows future events."""
+    gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
+    cursor = gateway.get_cursor("attempt-gap-snap")
+    cursor.highest_contiguous_seq = 100
+    cursor.max_seen_seq = 105
+    cursor.gap_fenced = True
+
+    fake_conn = MagicMock()
+
+    @contextmanager
+    def fake_transaction():
+        yield fake_conn
+
+    snapshot_payload = _valid_snapshot_dict(
+        active_attempt_id="attempt-gap-snap",
+        last_runtime_event_seq=105,
+        attempt_state="RUNNING",
+    )
+
+    with (
+        patch("pbl4.management_backend.db.transaction", fake_transaction),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.get_attempt",
+            return_value={"state": "RUNNING", "runtime_metadata": {}},
+        ),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.update_attempt_state"
+        ),
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync"),
+    ):
+        gateway.handle_state_snapshot(snapshot_payload)
+
+    # Invariants:
+    # 1. Authoritative snapshot advances highest_contiguous_seq to 105 and un-fences gap
+    cursor = gateway.get_cursor("attempt-gap-snap")
+    assert cursor.highest_contiguous_seq == 105
+    assert cursor.authoritative_snapshot_seq == 105
+    assert cursor.gap_fenced is False
+
+    # 2. Subsequent event 106 arrives and is recognized as contiguous
+    event_106 = {
+        "attempt_id": "attempt-gap-snap",
+        "job_id": "job-1",
+        "runtime_event_seq": 106,
+        "event_type": "attempt.state_changed",
+        "event_schema_version": 1,
+        "severity": "INFO",
+        "occurred_at": datetime.now(UTC).isoformat(),
+        "source_component": "runtime",
+        "details": {"state": "COMPLETED"},
+    }
+
+    projected: list[dict[str, Any]] = []
+    with (
+        patch("pbl4.management_backend.db.transaction", fake_transaction),
+        patch("pbl4.management_backend.db.get_connection", fake_transaction),
+        patch(
+            "pbl4.management_backend.services.event_ingest.ingest_runtime_event",
+            return_value=RuntimeEventIngestResult(row={"id": 106}, inserted=True),
+        ),
+        patch(
+            "pbl4.management_backend.repositories.event_repository.get_event_by_seq",
+            return_value=None,
+        ),
+        patch.object(
+            gateway,
+            "_project_runtime_event",
+            side_effect=lambda _c, p: projected.append(p),
+        ),
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync"),
+    ):
+        gateway.handle_runtime_event(event_106)
+
+    assert len(projected) == 1
+    assert projected[0]["runtime_event_seq"] == 106
+    assert cursor.highest_contiguous_seq == 106
+    assert cursor.gap_fenced is False
+
+
+def test_duplicate_event_idempotency_and_conflict_raises_integrity_error() -> None:
+    """Duplicate event with same payload is idempotent; conflicting payload raises integrity error."""
+    gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
+    fake_conn = MagicMock()
+
+    @contextmanager
+    def fake_transaction():
+        yield fake_conn
+
+    event_payload = {
+        "attempt_id": "attempt-dup",
+        "job_id": "job-1",
+        "runtime_event_seq": 1,
+        "event_type": "attempt.state_changed",
+        "event_schema_version": 1,
+        "severity": "INFO",
+        "occurred_at": datetime.now(UTC).isoformat(),
+        "source_component": "runtime",
+        "details": {"state": "RUNNING"},
+    }
+
+    # Case 1: Identical duplicate (ingest_runtime_event returns inserted=False)
+    with (
+        patch("pbl4.management_backend.db.transaction", fake_transaction),
+        patch("pbl4.management_backend.db.get_connection", fake_transaction),
+        patch(
+            "pbl4.management_backend.services.event_ingest.ingest_runtime_event",
+            return_value=RuntimeEventIngestResult(row={"id": 1}, inserted=False),
+        ),
+        patch.object(gateway, "_project_runtime_event") as mock_project,
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync") as mock_broadcast,
+    ):
+        # Should execute cleanly without error and without re-projecting
+        gateway.handle_runtime_event(event_payload)
+        mock_project.assert_not_called()
+        mock_broadcast.assert_not_called()
+
+    # Case 2: Conflicting payload with same seq raises ConflictingEventPayloadError
+    with (
+        patch("pbl4.management_backend.db.transaction", fake_transaction),
+        patch(
+            "pbl4.management_backend.services.event_ingest.ingest_runtime_event",
+            side_effect=ConflictingEventPayloadError(
+                "Payload conflict for attempt seq 1"
+            ),
+        ),
+    ):
+        with pytest.raises(ConflictingEventPayloadError, match="Payload conflict"):
+            gateway.handle_runtime_event(event_payload)
+
+
+def test_completed_attempt_ignores_delayed_running_event() -> None:
+    """COMPLETED + delayed RUNNING event -> remains COMPLETED, ended_at preserved."""
+    from pbl4.management_backend.repositories import attempt_repository
+
+    fake_conn = MagicMock()
+    ended_at = datetime(2026, 9, 28, 10, 0, 0, tzinfo=UTC)
+    current_attempt = {
+        "attempt_id": "attempt-comp",
+        "state": "COMPLETED",
+        "ended_at": ended_at,
+        "started_at": datetime(2026, 9, 28, 9, 0, 0, tzinfo=UTC),
+        "runtime_metadata": {"model_version": 5},
+    }
+
+    with patch(
+        "pbl4.management_backend.repositories.attempt_repository.get_attempt",
+        return_value=current_attempt,
+    ):
+        # 1. Direct call to update_attempt_state
+        res = attempt_repository.update_attempt_state(fake_conn, "attempt-comp", "RUNNING")
+        assert res["state"] == "COMPLETED"
+        assert res["ended_at"] == ended_at
+
+        # 2. Call via _project_runtime_event
+        gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
+        event_payload = {
+            "attempt_id": "attempt-comp",
+            "event_type": "attempt.state_changed",
+            "occurred_at": datetime.now(UTC).isoformat(),
+            "details": {"state": "RUNNING"},
+        }
+        with patch("pbl4.management_backend.services.allocation_service.cleanup_allocations_for_attempt") as mock_cleanup:
+            gateway._project_runtime_event(fake_conn, event_payload)
+            mock_cleanup.assert_not_called()
+
+
+def test_failed_attempt_ignores_stale_snapshot_running() -> None:
+    """FAILED + stale snapshot RUNNING -> remains FAILED in DB and gateway projection."""
+    gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
+    cursor = gateway.get_cursor("attempt-failed-1")
+    cursor.authoritative_snapshot_seq = 50
+    cursor.highest_contiguous_seq = 50
+
+    fake_conn = MagicMock()
+
+    @contextmanager
+    def fake_transaction():
+        yield fake_conn
+
+    # Stale snapshot with lower sequence number (40 < 50)
+    stale_snap = _valid_snapshot_dict(
+        active_attempt_id="attempt-failed-1",
+        last_runtime_event_seq=40,
+        attempt_state="RUNNING",
+    )
+
+    with (
+        patch("pbl4.management_backend.db.transaction", fake_transaction),
+        patch("pbl4.management_backend.repositories.attempt_repository.get_attempt") as mock_get_attempt,
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync") as mock_broadcast,
+    ):
+        gateway.handle_state_snapshot(stale_snap)
+        # Sequence guard stops before DB transaction is executed
+        mock_get_attempt.assert_not_called()
+        mock_broadcast.assert_not_called()
+
+    # Authoritative cursor is not rolled back
+    assert cursor.authoritative_snapshot_seq == 50
+    assert cursor.highest_contiguous_seq == 50
+
+    # Also test when snapshot seq is current/higher but DB attempt is already FAILED
+    current_failed_attempt = {
+        "attempt_id": "attempt-failed-1",
+        "state": "FAILED",
+        "ended_at": datetime.now(UTC),
+        "runtime_metadata": {"authoritative_snapshot_seq": 50},
+    }
+    same_seq_snap = _valid_snapshot_dict(
+        active_attempt_id="attempt-failed-1",
+        last_runtime_event_seq=50,
+        attempt_state="RUNNING",
+    )
+    with (
+        patch("pbl4.management_backend.db.transaction", fake_transaction),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.get_attempt",
+            return_value=current_failed_attempt,
+        ),
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync"),
+    ):
+        gateway.handle_state_snapshot(same_seq_snap)
+
+    authoritative = gateway.get_authoritative_snapshot("attempt-failed-1")
+    assert authoritative is not None
+    assert authoritative["attempt_state"] == "FAILED"
+
+
+def test_snapshot_seq_lower_than_authoritative_does_not_rollback_state_or_cursor_or_model_version() -> None:
+    """Snapshot seq lower than authoritative_snapshot_seq does not rollback state/model_version/cursor."""
+    gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
+    cursor = gateway.get_cursor("attempt-rollback-guard")
+    cursor.authoritative_snapshot_seq = 100
+    cursor.highest_contiguous_seq = 100
+
+    # Seed in-memory snapshot
+    gateway._attempt_snapshots["attempt-rollback-guard"] = {
+        "attempt_id": "attempt-rollback-guard",
+        "attempt_state": "RUNNING",
+        "model_version": 10,
+        "runtime_event_seq": 100,
+    }
+
+    stale_snapshot = _valid_snapshot_dict(
+        active_attempt_id="attempt-rollback-guard",
+        last_runtime_event_seq=80,
+        attempt_state="WAITING_WORKERS",
+        model_version=5,
+    )
+
+    fake_conn = MagicMock()
+
+    @contextmanager
+    def fake_transaction():
+        yield fake_conn
+
+    with (
+        patch("pbl4.management_backend.db.transaction", fake_transaction),
+        patch("pbl4.management_backend.repositories.attempt_repository.get_attempt") as mock_get_attempt,
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync") as mock_broadcast,
+    ):
+        gateway.handle_state_snapshot(stale_snapshot)
+        mock_get_attempt.assert_not_called()
+        mock_broadcast.assert_not_called()
+
+    # Verify invariants:
+    # 1. Cursor is not rolled back
+    assert cursor.authoritative_snapshot_seq == 100
+    assert cursor.highest_contiguous_seq == 100
+
+    # 2. Cached snapshot is not rolled back
+    cached = gateway.get_authoritative_snapshot("attempt-rollback-guard")
+    assert cached["model_version"] == 10
+    assert cached["attempt_state"] == "RUNNING"
+    assert cached["runtime_event_seq"] == 100
+
+
+def test_attempt_state_transition_validation() -> None:
+    """Validate Attempt state machine transitions and terminal monotonicity."""
+    from pbl4.management_backend.repositories.attempt_repository import (
+        is_valid_attempt_transition,
+    )
+
+    # 1. Idempotent replay is always valid
+    for state in ["CREATED", "WAITING_WORKERS", "PROVISIONING", "INITIALIZING", "RUNNING", "COMPLETED", "FAILED", "ABORTED"]:
+        assert is_valid_attempt_transition(state, state) is True
+
+    # 2. Terminal states cannot transition to ANY other state
+    for term in ["COMPLETED", "FAILED", "ABORTED"]:
+        for other in ["CREATED", "WAITING_WORKERS", "PROVISIONING", "INITIALIZING", "RUNNING"]:
+            assert is_valid_attempt_transition(term, other) is False
+        assert is_valid_attempt_transition(term, "FAILED" if term != "FAILED" else "ABORTED") is False
+
+    # 3. Progression order is monotonic forward
+    assert is_valid_attempt_transition("CREATED", "WAITING_WORKERS") is True
+    assert is_valid_attempt_transition("WAITING_WORKERS", "PROVISIONING") is True
+    assert is_valid_attempt_transition("PROVISIONING", "INITIALIZING") is True
+    assert is_valid_attempt_transition("INITIALIZING", "RUNNING") is True
+    assert is_valid_attempt_transition("RUNNING", "COMPLETED") is True
+
+    # 4. Backward progression is rejected
+    assert is_valid_attempt_transition("RUNNING", "WAITING_WORKERS") is False
+    assert is_valid_attempt_transition("INITIALIZING", "CREATED") is False
+
+    # 5. Non-terminal states can transition to FAILED or ABORTED
+    for active in ["CREATED", "WAITING_WORKERS", "PROVISIONING", "INITIALIZING", "RUNNING"]:
+        assert is_valid_attempt_transition(active, "FAILED") is True
+        assert is_valid_attempt_transition(active, "ABORTED") is True
+
+
