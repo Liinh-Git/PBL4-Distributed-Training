@@ -422,3 +422,53 @@ def test_a4_previous_valid_checkpoint_survives_aborted_step(tmp_path, monkeypatc
     assert snap["latest_checkpoint_id"] == previous.snapshot.checkpoint_id
     # The previous step's checkpoint is still independently verifiable
     assert manager.verify(previous).model.model_version == 8
+
+
+def test_coordinator_complete_transitions_directly_to_completed_without_completing(tmp_path):
+    coordinator, manager = running(tmp_path)
+    coordinator._events.drain()
+
+    # Step 0
+    op0, _ = updated(coordinator)
+    applied(coordinator, op0)
+    coordinator.checkpoint()
+
+    # Attempting complete when remaining schedule exists should fail
+    with pytest.raises(ValueError, match="Training schedule has remaining work"):
+        coordinator.complete()
+
+    # Step 1 (final scheduled step)
+    op1, _ = updated(coordinator)
+    applied(coordinator, op1)
+    coordinator.checkpoint()
+
+    # Drain previous events
+    coordinator._events.drain()
+
+    # Complete attempt
+    coordinator.complete()
+
+    # Verify snapshot
+    snap = coordinator.snapshot()
+    assert snap["state"] == "COMPLETED"
+
+    # Verify events emitted during complete(): exactly one attempt.state_changed to COMPLETED
+    events = coordinator._events.drain()
+    state_events = [e for e in events if e.event_type == "attempt.state_changed"]
+    assert len(state_events) == 1
+    assert state_events[0].details["previous_state"] == "RUNNING"
+    assert state_events[0].details["state"] == "COMPLETED"
+
+    # Verify no COMPLETING state in any event
+    all_details_states = [e.details.get("state") for e in events]
+    assert "COMPLETING" not in all_details_states
+
+
+def test_coordinator_complete_rejected_if_step_not_committed(tmp_path):
+    coordinator, manager = running(tmp_path)
+    op = coordinator.open_step()
+    coordinator.admit(contribution(op, 0))
+    # Step is currently COLLECTING_GRADIENTS (not COMMITTED)
+    with pytest.raises(ValueError, match="Attempt still has uncommitted work"):
+        coordinator.complete()
+

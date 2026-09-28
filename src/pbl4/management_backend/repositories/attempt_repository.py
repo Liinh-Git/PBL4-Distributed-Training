@@ -18,7 +18,6 @@ ACTIVE_ATTEMPT_STATES = {
     "PROVISIONING",
     "INITIALIZING",
     "RUNNING",
-    "COMPLETING",
 }
 ABORTABLE_ATTEMPT_STATES = {
     "CREATED",
@@ -173,7 +172,7 @@ def get_active_attempt(conn: psycopg.Connection) -> dict | None:
             SELECT * FROM attempts
             WHERE state IN (
                 'CREATED', 'WAITING_WORKERS', 'PROVISIONING',
-                'INITIALIZING', 'RUNNING', 'COMPLETING'
+                'INITIALIZING', 'RUNNING'
             )
             LIMIT 1
             """

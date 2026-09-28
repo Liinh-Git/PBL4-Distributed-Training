@@ -15,7 +15,6 @@ export type AttemptState =
   | 'PROVISIONING'
   | 'INITIALIZING'
   | 'RUNNING'
-  | 'COMPLETING'
   | 'COMPLETED'
   | 'FAILED'
   | 'ABORTED';

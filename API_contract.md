@@ -1336,7 +1336,7 @@ Resume cũng dùng Command START_ATTEMPT, nhưng Attempt mới có execution_mod
 ```text
 Query params (optional):
 - job_id: string. Ví dụ: job_demo_001
-- state: CREATED | WAITING_WORKERS | PROVISIONING | INITIALIZING | RUNNING | COMPLETING | COMPLETED | FAILED | ABORTED. Ví dụ: FAILED
+- state: CREATED | WAITING_WORKERS | PROVISIONING | INITIALIZING | RUNNING | COMPLETED | FAILED | ABORTED. Ví dụ: FAILED
 - execution_mode: FRESH | RETRY_FROM_START | RESUME. Ví dụ: FRESH
 - cursor: opaque string từ page.next_cursor
 - limit: integer 1..200, default 50

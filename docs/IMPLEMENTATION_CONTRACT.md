@@ -105,7 +105,7 @@ Runtime concurrency is organized by single-responsibility ownership rather than 
 
 | Subsystem / Entity | Single Responsibility Owner | Notes |
 |---|---|---|
-| Attempt lifecycle transitions | `Coordinator` | Coordinates phase transitions per canonical Domain/Data Model state machine (CREATED, WAITING_WORKERS, PROVISIONING, INITIALIZING, RUNNING, COMPLETING, COMPLETED, FAILED, ABORTED) |
+| Attempt lifecycle transitions | `Coordinator` | Coordinates phase transitions per canonical Domain/Data Model state machine (CREATED, WAITING_WORKERS, PROVISIONING, INITIALIZING, RUNNING, COMPLETED, FAILED, ABORTED) |
 | Worker session state | `WorkerRegistry` | Thread-safe session tracking and logical rank assignment |
 | Synchronization decisions | `SynchronizationPolicy` | Evaluates contribution admission and update readiness |
 | Canonical Model mutation | `UpdateEngine` & restore path | CanonicalModel mutation is restricted to the UpdateEngine update path and the approved restore path; no other component may mutate canonical parameters |

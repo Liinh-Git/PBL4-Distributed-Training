@@ -266,6 +266,37 @@ def test_attempt_state_changed_event_cleans_up_allocations() -> None:
         assert mock_cleanup.call_args[1]["failure_code"] == "USER_ABORTED"
 
 
+def test_attempt_state_changed_completed_projection_and_active_states() -> None:
+    from pbl4.management_backend.repositories import attempt_repository, job_repository
+
+    # Verify single source of truth and no COMPLETING in active attempt states
+    assert "COMPLETING" not in attempt_repository.ACTIVE_ATTEMPT_STATES
+    assert "COMPLETING" not in job_repository.ACTIVE_ATTEMPT_STATES
+    assert job_repository.ACTIVE_ATTEMPT_STATES is attempt_repository.ACTIVE_ATTEMPT_STATES
+
+    occurred_at = "2026-09-11T01:02:03+00:00"
+    payload = {
+        "attempt_id": "attempt-1",
+        "event_type": "attempt.state_changed",
+        "occurred_at": occurred_at,
+        "details": {"previous_state": "RUNNING", "state": "COMPLETED"},
+    }
+    with (
+        patch("pbl4.management_backend.repositories.attempt_repository.update_attempt_state") as mock_update,
+        patch("pbl4.management_backend.services.allocation_service.cleanup_allocations_for_attempt") as mock_cleanup,
+    ):
+        RuntimeGateway._project_runtime_event(object(), payload)
+
+        mock_update.assert_called_once()
+        assert mock_update.call_args[0][1] == "attempt-1"
+        assert mock_update.call_args[0][2] == "COMPLETED"
+        assert mock_update.call_args.kwargs["ended_at"] == datetime.fromisoformat(occurred_at)
+
+        mock_cleanup.assert_called_once()
+        assert mock_cleanup.call_args[0][1] == "attempt-1"
+
+
+
 
 def test_snapshot_creation_uses_runtime_owned_session_metadata() -> None:
     gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))

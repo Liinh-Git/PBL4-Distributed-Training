@@ -75,7 +75,7 @@ DBS chỉ thay đổi "mỗi Worker làm bao nhiêu dữ liệu". DBS không tha
 Không tạo dbs_bsp và không tạo DbsStrictBSP.
 ### 4.1. Trạng thái hiện có — DBS không tạo state mới
 DBS không thêm state mới vào Database, Attempt, WorkerSession hoặc StrictBSP. Giữ nguyên state machine hiện có trong codebase:
-- Attempt/Coordinator: CREATED → WAITING_WORKERS → PROVISIONING → INITIALIZING → RUNNING → COMPLETING → COMPLETED. FAILED và ABORTED là trạng thái kết thúc.
+- Attempt/Coordinator: CREATED → WAITING_WORKERS → PROVISIONING → INITIALIZING → RUNNING → COMPLETED. FAILED và ABORTED là trạng thái kết thúc.
 - WorkerSession: CONNECTING → REGISTERING → PROVISIONING → SHARD_READY → MODEL_SYNCING → READY. DISCONNECTED và FAILED là trạng thái kết thúc.
 - Step: COLLECTING_GRADIENTS → AGGREGATING → UPDATING → WAITING_PARAMETER_APPLIED → CHECKPOINTING → COMMITTED.
 WorkloadPlan và thống kê theo epoch chỉ là state nội bộ trong bộ nhớ Runtime; không tạo enum/state mới trong Database và không đưa vào WorkerSession lifecycle.
@@ -91,7 +91,7 @@ Mỗi synchronized step:
 6. Runtime broadcast parameter mới → nhận đủ N/N PARAMETER_APPLIED → ghi checkpoint blocking.
 7. Chỉ khi checkpoint thành công thì step chuyển COMMITTED, RecoveryCursor mới được advance và statistics của step mới được ghi cho DBS.
 Tại ranh giới epoch, nếu policy là dbs và epoch vừa hoàn tất có statistics đầy đủ, Runtime tính WorkloadPlan cho epoch kế tiếp. WorkloadPlan được cố định suốt một epoch và không thay đổi giữa các step.
-Khi schedule hết và step cuối đã COMMITTED, Attempt chuyển COMPLETING → COMPLETED.
+Khi schedule hết và step cuối đã COMMITTED, Attempt chuyển RUNNING → COMPLETED.
 
 ## 5. Work Unit
 
