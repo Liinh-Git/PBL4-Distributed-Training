@@ -17,6 +17,8 @@ import {
   DatasetItemData,
   DatasetBuildListItemData,
   JobPatchRequest,
+  WorkloadPolicy,
+  RequestedContractPatchV1,
 } from '../../types/api';
 
 interface EditJobModalProps {
@@ -41,6 +43,9 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
   const [seed, setSeed] = useState<number>(42);
   const [selectedModel, setSelectedModel] = useState<string>('resnet18_groupnorm');
   const [selectedBuildId, setSelectedBuildId] = useState<string>('');
+  const [workloadPolicy, setWorkloadPolicy] = useState<WorkloadPolicy>('equal');
+  const [initialPolicy, setInitialPolicy] = useState<WorkloadPolicy>('equal');
+  const [existingWups, setExistingWups] = useState<number | undefined>(undefined);
 
   const [datasets, setDatasets] = useState<DatasetItemData[]>([]);
   const [builds, setBuilds] = useState<DatasetBuildListItemData[]>([]);
@@ -89,6 +94,18 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
             setSeed(fullJob.requested_contract.training_seed ?? 42);
             setSelectedModel(fullJob.requested_contract.model_id || 'resnet18_groupnorm');
             setSelectedBuildId(fullJob.requested_contract.dataset_build_id || '');
+
+            const policy =
+              fullJob.requested_contract.workload_policy ||
+              (fullJob as any).workload_policy ||
+              (fullJob as any).resolved_contract?.workload?.policy;
+            if (policy === 'dbs' || policy === 'equal') {
+              setWorkloadPolicy(policy);
+              setInitialPolicy(policy);
+            }
+            if (fullJob.requested_contract.work_units_per_step !== undefined) {
+              setExistingWups(fullJob.requested_contract.work_units_per_step);
+            }
           }
         }
 
@@ -142,17 +159,23 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
           return;
         }
 
+        const patchContract: RequestedContractPatchV1 = {
+          dataset_build_id: selectedBuildId,
+          model_id: selectedModel,
+          epochs: Number(epochs),
+          learning_rate: Number(learningRate),
+          training_seed: Number(seed),
+          training_strategy: 'strict_bsp',
+          workload_policy: workloadPolicy,
+          ...(workloadPolicy === initialPolicy && existingWups !== undefined
+            ? { work_units_per_step: existingWups }
+            : {}),
+        };
+
         payload = {
           display_name: displayName.trim(),
           description: description.trim() || undefined,
-          requested_contract: {
-            dataset_build_id: selectedBuildId,
-            model_id: selectedModel,
-            epochs: Number(epochs),
-            learning_rate: Number(learningRate),
-            training_seed: Number(seed),
-            training_strategy: 'strict_bsp',
-          },
+          requested_contract: patchContract,
         };
       } else {
         // READY job: Only display_name and description can be updated (contract is frozen)
@@ -382,6 +405,66 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
                   />
                 </div>
               </div>
+
+              {/* Workload Policy */}
+              <div className="space-y-1.5 pt-1">
+                <label className="block text-[11px] font-medium text-[#a1a1a8]">
+                  Workload Policy
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={workloadPolicy === 'equal'}
+                    onClick={() => setWorkloadPolicy('equal')}
+                    className={`px-3 py-2 rounded border text-left transition-all ${
+                      workloadPolicy === 'equal'
+                        ? 'bg-[#1e1e24] border-blue-500/70 text-[#f3f3f4]'
+                        : 'bg-[#171719] border-white/[0.08] text-[#a1a1a8] hover:border-white/[0.15]'
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5 font-medium text-xs">
+                      <span
+                        className={`w-2.5 h-2.5 rounded-full border flex items-center justify-center ${
+                          workloadPolicy === 'equal' ? 'bg-blue-600 border-blue-500' : 'border-white/20'
+                        }`}
+                      >
+                        {workloadPolicy === 'equal' && <span className="w-1 h-1 rounded-full bg-white" />}
+                      </span>
+                      <span>Equal</span>
+                    </div>
+                    <p className="text-[10px] text-[#73737c] mt-1 leading-tight">
+                      Uniform workload across workers (Strict BSP)
+                    </p>
+                  </button>
+
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={workloadPolicy === 'dbs'}
+                    onClick={() => setWorkloadPolicy('dbs')}
+                    className={`px-3 py-2 rounded border text-left transition-all ${
+                      workloadPolicy === 'dbs'
+                        ? 'bg-[#1e1e24] border-blue-500/70 text-[#f3f3f4]'
+                        : 'bg-[#171719] border-white/[0.08] text-[#a1a1a8] hover:border-white/[0.15]'
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5 font-medium text-xs">
+                      <span
+                        className={`w-2.5 h-2.5 rounded-full border flex items-center justify-center ${
+                          workloadPolicy === 'dbs' ? 'bg-blue-600 border-blue-500' : 'border-white/20'
+                        }`}
+                      >
+                        {workloadPolicy === 'dbs' && <span className="w-1 h-1 rounded-full bg-white" />}
+                      </span>
+                      <span>DBS Adaptive</span>
+                    </div>
+                    <p className="text-[10px] text-[#73737c] mt-1 leading-tight">
+                      Dynamic balancing based on compute speed
+                    </p>
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 
@@ -391,7 +474,7 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
               <span className="text-[11px] font-semibold text-[#73737c]">
                 Locked Training Parameters
               </span>
-              <div className="grid grid-cols-2 gap-2 text-[11px]">
+              <div className="grid grid-cols-3 gap-2 text-[11px]">
                 <div className="p-2 rounded bg-[#171719] border border-white/[0.05]">
                   <span className="text-[#73737c] block">Model</span>
                   <span className="text-[#f3f3f4] font-medium">{job.model_id || 'resnet18'}</span>
@@ -399,6 +482,12 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
                 <div className="p-2 rounded bg-[#171719] border border-white/[0.05]">
                   <span className="text-[#73737c] block">Strategy</span>
                   <span className="text-[#f3f3f4] font-medium">{job.training_strategy || 'Strict BSP'}</span>
+                </div>
+                <div className="p-2 rounded bg-[#171719] border border-white/[0.05]">
+                  <span className="text-[#73737c] block">Workload</span>
+                  <span className="text-[#f3f3f4] font-medium">
+                    {workloadPolicy === 'dbs' ? 'DBS Adaptive' : 'Equal'}
+                  </span>
                 </div>
               </div>
             </div>

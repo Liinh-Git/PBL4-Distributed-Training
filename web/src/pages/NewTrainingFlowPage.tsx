@@ -50,6 +50,8 @@ export const NewTrainingFlowPage: React.FC = () => {
   const [learningRate, setLearningRate] = useState<number>(0.01);
   const [seed, setSeed] = useState<number>(42);
   const [workloadPolicy, setWorkloadPolicy] = useState<'equal' | 'dbs'>('equal');
+  const [initialPolicy, setInitialPolicy] = useState<'equal' | 'dbs'>('equal');
+  const [existingWups, setExistingWups] = useState<number | undefined>(undefined);
   const [jobName, setJobName] = useState<string>('');
   const [jobDescription, setJobDescription] = useState<string>('');
 
@@ -105,8 +107,16 @@ export const NewTrainingFlowPage: React.FC = () => {
             setEpochs(req.epochs);
             setLearningRate(req.learning_rate);
             setSeed(req.training_seed);
-            if (req.workload_policy === 'dbs' || req.workload_policy === 'equal') {
-              setWorkloadPolicy(req.workload_policy);
+            const pol =
+              req.workload_policy ||
+              (job as any).workload_policy ||
+              (job as any).resolved_contract?.workload?.policy;
+            if (pol === 'dbs' || pol === 'equal') {
+              setWorkloadPolicy(pol);
+              setInitialPolicy(pol);
+            }
+            if (req.work_units_per_step !== undefined) {
+              setExistingWups(req.work_units_per_step);
             }
 
             const matchingBuild = loadedBuilds.find(b => b.dataset_build_id === req.dataset_build_id);
@@ -226,6 +236,9 @@ export const NewTrainingFlowPage: React.FC = () => {
             training_seed: seed,
             training_strategy: 'strict_bsp',
             workload_policy: workloadPolicy,
+            ...(workloadPolicy === initialPolicy && existingWups !== undefined
+              ? { work_units_per_step: existingWups }
+              : {}),
           },
         });
         currentDraft = patchRes.data;
@@ -243,6 +256,9 @@ export const NewTrainingFlowPage: React.FC = () => {
             training_seed: seed,
             training_strategy: 'strict_bsp',
             workload_policy: workloadPolicy,
+            ...(workloadPolicy === initialPolicy && existingWups !== undefined
+              ? { work_units_per_step: existingWups }
+              : {}),
           },
         });
         currentDraft = createRes.data;

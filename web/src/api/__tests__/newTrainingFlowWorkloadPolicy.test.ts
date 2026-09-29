@@ -140,6 +140,110 @@ describe('WebUI Workload Policy Contract & Integration Tests (Bug #3)', () => {
     globalThis.fetch = originalFetch;
   });
 
+  test('Bug #4: Patching a different field preserves existing workload_policy="dbs"', async () => {
+    let capturedBody: any = null;
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      assert.strictEqual(String(input), 'http://localhost:8000/api/v1/jobs/job_dbs_existing');
+      assert.strictEqual(init?.method, 'PATCH');
+      capturedBody = JSON.parse(String(init?.body));
+      return new Response(
+        JSON.stringify({
+          data: {
+            job_id: 'job_dbs_existing',
+            display_name: 'DBS Job Updated Epochs',
+            state: 'DRAFT',
+            requested_contract: capturedBody.requested_contract,
+            created_at: '2026-09-29T12:00:00Z',
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    };
+
+    const client = new ApiClient('http://localhost:8000');
+    const service = new JobsService(client);
+
+    // User only changes epochs from 20 to 35 on a DBS job
+    const patchPayload: JobPatchRequest = {
+      requested_contract: {
+        epochs: 35,
+        training_strategy: 'strict_bsp',
+        workload_policy: 'dbs', // Policy preserved, not dropped or reset to equal
+      },
+    };
+
+    await service.patchJob('job_dbs_existing', patchPayload);
+    assert.strictEqual(capturedBody.requested_contract.epochs, 35);
+    assert.strictEqual(capturedBody.requested_contract.workload_policy, 'dbs');
+    assert.strictEqual(capturedBody.requested_contract.work_units_per_step, undefined);
+
+    globalThis.fetch = originalFetch;
+  });
+
+  test('Bug #4: Deterministic carry-forward of work_units_per_step when policy unchanged', async () => {
+    let capturedBody: any = null;
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      capturedBody = JSON.parse(String(init?.body));
+      return new Response(
+        JSON.stringify({
+          data: {
+            job_id: 'job_carry_forward',
+            state: 'DRAFT',
+            requested_contract: capturedBody.requested_contract,
+            created_at: '2026-09-29T12:00:00Z',
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    };
+
+    const client = new ApiClient('http://localhost:8000');
+    const service = new JobsService(client);
+
+    // Job had work_units_per_step=12 with DBS policy; user only edited learning_rate
+    const patchPayload: JobPatchRequest = {
+      requested_contract: {
+        learning_rate: 0.005,
+        training_strategy: 'strict_bsp',
+        workload_policy: 'dbs',
+        work_units_per_step: 12,
+      },
+    };
+
+    await service.patchJob('job_carry_forward', patchPayload);
+    assert.strictEqual(capturedBody.requested_contract.workload_policy, 'dbs');
+    assert.strictEqual(capturedBody.requested_contract.work_units_per_step, 12);
+
+    globalThis.fetch = originalFetch;
+  });
+
+  test('Bug #4: Static AST/Source inspection of EditJobModal: loads/saves workload_policy without user K input', () => {
+    const modalPath = path.resolve(process.cwd(), 'src/components/common/EditJobModal.tsx');
+    const content = fs.readFileSync(modalPath, 'utf-8');
+
+    // 1. Must define workloadPolicy state
+    assert.match(content, /const \[workloadPolicy,\s*setWorkloadPolicy\]\s*=\s*useState<WorkloadPolicy>\('equal'\)/);
+
+    // 2. Must load workload_policy from requested_contract
+    assert.match(content, /fullJob\.requested_contract\.workload_policy/);
+
+    // 3. Must expose UI options for Equal and DBS Adaptive
+    assert.match(content, /Equal/);
+    assert.match(content, /DBS Adaptive/);
+    assert.match(content, /setWorkloadPolicy\('equal'\)/);
+    assert.match(content, /setWorkloadPolicy\('dbs'\)/);
+
+    // 4. Must send workload_policy in patch payload
+    assert.match(content, /workload_policy:\s*workloadPolicy/);
+
+    // 5. Must NOT render any input field for work_units_per_step (K)
+    assert.doesNotMatch(content, /<input[^>]*name=["']work_units_per_step["']/i);
+    assert.doesNotMatch(content, /<input[^>]*value=\{workUnitsPerStep\}/i);
+    assert.doesNotMatch(content, /setWorkUnitsPerStep/);
+  });
+
   test('Static AST/Source inspection: NewTrainingFlowPage exposes Equal & DBS without user K input', () => {
     const pagePath = path.resolve(process.cwd(), 'src/pages/NewTrainingFlowPage.tsx');
     const content = fs.readFileSync(pagePath, 'utf-8');
