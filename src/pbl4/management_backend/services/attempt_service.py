@@ -23,6 +23,7 @@ from pbl4.management_backend.repositories import (
     attempt_repository,
     checkpoint_repository,
     command_repository,
+    dataset_build_repository,
     event_repository,
     job_repository,
     node_repository,
@@ -33,7 +34,9 @@ from pbl4.management_backend.services import idempotency, job_service
 from pbl4.management_backend.services.allocation_service import AllocationService
 from pbl4.management_backend.services.cluster_scheduler import (
     ClusterScheduler,
+    WorkerPlacementSpec,
 )
+from pbl4.management_backend.services.job_service import JobValidationError
 from pbl4.management_backend.services.dataset_service import (
     InvalidCursorError as InvalidCursorError,
 )
@@ -267,6 +270,49 @@ def _select_and_create_allocations(
 # ─── Start / Retry / Resume ──────────────────────────────────────────────────
 
 
+def _preflight_job_and_select_placements(
+    conn: psycopg.Connection,
+    job: dict[str, Any],
+    res: dict[str, Any] | None,
+) -> list[WorkerPlacementSpec]:
+    job_id = job["job_id"]
+    if not res or not isinstance(res, dict):
+        raise JobValidationError(f"Job '{job_id}' in READY state has no valid resolved_contract.")
+
+    dsb_id = (res.get("dataset") or {}).get("dataset_build_id")
+    if dsb_id:
+        build = dataset_build_repository.get_build(conn, dsb_id)
+        if build is None:
+            raise JobValidationError(f"Dataset build '{dsb_id}' not found.")
+        if build.get("state") != "READY":
+            raise JobValidationError(
+                f"Dataset build '{dsb_id}' is in state '{build.get('state')}'; must be READY."
+            )
+
+    sync_cfg = res.get("synchronization") or {}
+    expected_workers = sync_cfg.get("expected_workers")
+    if (
+        expected_workers is None
+        or not isinstance(expected_workers, int)
+        or isinstance(expected_workers, bool)
+        or expected_workers <= 0
+    ):
+        raise ValueError(
+            "Invalid or missing expected_workers in "
+            f"resolved_contract['synchronization']: {expected_workers!r}"
+        )
+
+    online_nodes = node_repository.list_nodes(
+        conn, state=node_repository.NODE_STATE_ONLINE, limit=1000
+    )
+    active_allocs = allocation_repository.list_active(conn)
+    return ClusterScheduler.select_placements(
+        expected_workers=expected_workers,
+        nodes=online_nodes,
+        active_allocations=active_allocs,
+    )
+
+
 def start_job(conn: psycopg.Connection, job_id: str, note: str | None = None) -> tuple[dict, dict]:
     """Start a FRESH attempt for a DRAFT or READY job.
 
@@ -291,13 +337,15 @@ def start_job(conn: psycopg.Connection, job_id: str, note: str | None = None) ->
             "(V1: only one active at a time)."
         )
 
-    attempt_id = _new_attempt_id()
-    command_id = _new_command_id()
-    now = datetime.now(UTC)
-
     res = job.get("resolved_contract")
     if isinstance(res, str):
         res = json.loads(res)
+
+    placements = _preflight_job_and_select_placements(conn, job, res)
+
+    attempt_id = _new_attempt_id()
+    command_id = _new_command_id()
+    now = datetime.now(UTC)
 
     request_payload = {
         "command_id": command_id,
@@ -321,8 +369,11 @@ def start_job(conn: psycopg.Connection, job_id: str, note: str | None = None) ->
                 execution_mode="FRESH",
                 created_at=now,
             )
-            _select_and_create_allocations(
-                conn, attempt_id=attempt_id, resolved_contract=res, now=now
+            AllocationService.create_allocations_for_attempt(
+                conn,
+                attempt_id=attempt_id,
+                placements=placements,
+                now=now,
             )
             cmd_row = command_repository.create_command(
                 conn,
@@ -356,13 +407,15 @@ def retry_job(conn: psycopg.Connection, job_id: str) -> tuple[dict, dict]:
             f"Active attempt '{active['attempt_id']}' is running. Abort it before retrying."
         )
 
-    attempt_id = _new_attempt_id()
-    command_id = _new_command_id()
-    now = datetime.now(UTC)
-
     res = job.get("resolved_contract")
     if isinstance(res, str):
         res = json.loads(res)
+
+    placements = _preflight_job_and_select_placements(conn, job, res)
+
+    attempt_id = _new_attempt_id()
+    command_id = _new_command_id()
+    now = datetime.now(UTC)
 
     request_payload = {
         "command_id": command_id,
@@ -385,8 +438,11 @@ def retry_job(conn: psycopg.Connection, job_id: str) -> tuple[dict, dict]:
                 execution_mode="RETRY_FROM_START",
                 created_at=now,
             )
-            _select_and_create_allocations(
-                conn, attempt_id=attempt_id, resolved_contract=res, now=now
+            AllocationService.create_allocations_for_attempt(
+                conn,
+                attempt_id=attempt_id,
+                placements=placements,
+                now=now,
             )
             cmd_row = command_repository.create_command(
                 conn,
@@ -461,6 +517,8 @@ def resume_job(conn: psycopg.Connection, job_id: str, checkpoint_id: str) -> tup
             f"Active attempt '{active['attempt_id']}' is running. Abort before resuming."
         )
 
+    placements = _preflight_job_and_select_placements(conn, job, res)
+
     attempt_id = _new_attempt_id()
     command_id = _new_command_id()
     now = datetime.now(UTC)
@@ -493,8 +551,11 @@ def resume_job(conn: psycopg.Connection, job_id: str, checkpoint_id: str) -> tup
                 resume_from_checkpoint_id=checkpoint_id,
                 created_at=now,
             )
-            _select_and_create_allocations(
-                conn, attempt_id=attempt_id, resolved_contract=res, now=now
+            AllocationService.create_allocations_for_attempt(
+                conn,
+                attempt_id=attempt_id,
+                placements=placements,
+                now=now,
             )
             cmd_row = command_repository.create_command(
                 conn,
@@ -879,6 +940,78 @@ def _extract_command_payload(cmd_row: dict[str, Any]) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _cleanup_and_fail_attempt(
+    db_module: Any,
+    *,
+    attempt_id: str,
+    command_id: str,
+    effective_key: str,
+    scope: str,
+    failure_code: str,
+    failure_message: str,
+    is_dispatch_failure: bool = False,
+    status_code: int = 502,
+) -> None:
+    now = datetime.now(UTC)
+    with db_module.transaction() as conn:
+        attempt_repository.update_attempt_state(
+            conn,
+            attempt_id,
+            new_state="FAILED",
+            ended_at=now,
+            failure_code=failure_code,
+            failure_message=failure_message,
+        )
+        command_repository.update_command_state(
+            conn,
+            command_id=command_id,
+            new_state="FAILED",
+            completed_at=now,
+            result={
+                "result_code": "FAILED",
+                "code": failure_code,
+                "message": failure_message,
+                "attempt_id": attempt_id,
+            },
+        )
+        try:
+            AllocationService.cleanup_allocations_for_attempt(
+                conn,
+                attempt_id,
+                now=now,
+                failure_code=failure_code,
+                failure_message=failure_message,
+            )
+        except Exception as alloc_exc:
+            logger.error("Failed to cleanup allocations for attempt %s: %s", attempt_id, alloc_exc)
+
+        if is_dispatch_failure:
+            idempotency.record_dispatch_failure(
+                conn,
+                endpoint_semantic_scope=scope,
+                idempotency_key=effective_key,
+                command_id=command_id,
+                resource_id=attempt_id,
+            )
+        else:
+            err_payload = {
+                "error": {
+                    "code": failure_code,
+                    "message": failure_message,
+                    "command_id": command_id,
+                }
+            }
+            idempotency.complete_record(
+                conn,
+                endpoint_semantic_scope=scope,
+                idempotency_key=effective_key,
+                response_status_code=status_code,
+                response_body=err_payload,
+                command_id=command_id,
+                resource_id=attempt_id,
+            )
+
+
 def _dispatch_workers_for_attempt(
     db_module: Any,
     *,
@@ -957,7 +1090,7 @@ def _dispatch_workers_for_attempt(
             len(dispatched),
             len(failed),
         )
-        # Send STOP_WORKER best-effort to already dispatched allocations
+        # Send STOP_WORKER best-effort to already dispatched allocations and mark them terminal
         for d_alloc in dispatched:
             try:
                 stop_cmd = AllocationService.build_stop_worker_command(
@@ -965,15 +1098,28 @@ def _dispatch_workers_for_attempt(
                     force=True,
                 )
                 node_gw.send_stop_worker(str(d_alloc["node_id"]), command=stop_cmd)
+            except Exception as exc:
+                logger.warning(
+                    "Failed best-effort STOP_WORKER to node %s: %s", d_alloc.get("node_id"), exc
+                )
+            try:
                 with db_module.transaction() as conn:
                     allocation_repository.update_desired_state(
                         conn,
                         str(d_alloc["allocation_id"]),
                         allocation_repository.DESIRED_STATE_STOPPED,
                     )
+                    AllocationService.record_failed(
+                        conn,
+                        str(d_alloc["allocation_id"]),
+                        failure_code="WORKER_SPAWN_FAILED",
+                        failure_message="Cancelled due to partial worker dispatch failure in attempt",
+                    )
             except Exception as exc:
                 logger.warning(
-                    "Failed best-effort STOP_WORKER to node %s: %s", d_alloc.get("node_id"), exc
+                    "Failed to record FAILED on dispatched alloc %s: %s",
+                    d_alloc.get("allocation_id"),
+                    exc,
                 )
 
         # Send ABORT_ATTEMPT to Runtime
@@ -984,13 +1130,31 @@ def _dispatch_workers_for_attempt(
                     attempt_id,
                     reason="Partial worker dispatch failure",
                 )
-            rt_gw.send_command_and_wait_result(
+            abort_res = rt_gw.send_command_and_wait_result(
                 command_type="ABORT_ATTEMPT",
                 command_id=str(abort_cmd_row["command_id"]),
                 target_id=attempt_id,
                 payload=_extract_command_payload(abort_cmd_row),
                 timeout=5.0,
             )
+            abort_state = (
+                abort_res.get("state", "SUCCEEDED")
+                if isinstance(abort_res, dict)
+                else "SUCCEEDED"
+            )
+            abort_result = (
+                abort_res.get("result")
+                if isinstance(abort_res, dict)
+                else None
+            )
+            with db_module.transaction() as conn:
+                command_repository.update_command_state(
+                    conn,
+                    command_id=str(abort_cmd_row["command_id"]),
+                    new_state=abort_state,
+                    completed_at=datetime.now(UTC),
+                    result=abort_result,
+                )
         except Exception as exc:
             logger.error(
                 "Failed to send ABORT_ATTEMPT to Runtime for attempt %s: %s", attempt_id, exc
@@ -1054,7 +1218,11 @@ def execute_start_job(
             attempt_id = str(cached_record["resource_id"])
             cmd_row = command_repository.get_command(conn, command_id)
             attempt_row = attempt_repository.get_attempt(conn, attempt_id)
-            if cmd_row and attempt_row:
+            if (
+                cmd_row
+                and attempt_row
+                and attempt_row.get("state") not in attempt_repository.TERMINAL_ATTEMPT_STATES
+            ):
                 dispatch_payload = _extract_command_payload(cmd_row)
             else:
                 attempt_row, cmd_row = start_job(conn, job_id, note=note)
@@ -1076,20 +1244,42 @@ def execute_start_job(
             payload=dispatch_payload,
             timeout=5.0,
         )
-    except RuntimeUnavailableError:
+    except RuntimeUnavailableError as exc:
         logger.warning(
-            "Runtime dispatch/acceptance failed for start_job cmd=%s attempt=%s (remains PENDING)",
+            "Runtime dispatch/acceptance failed for start_job cmd=%s attempt=%s: %s",
             command_id,
             attempt_id,
+            exc,
         )
-        with db_module.transaction() as conn:
-            idempotency.record_dispatch_failure(
-                conn,
-                endpoint_semantic_scope="JOB_START",
-                idempotency_key=effective_key,
-                command_id=command_id,
-                resource_id=attempt_id,
-            )
+        _cleanup_and_fail_attempt(
+            db_module,
+            attempt_id=attempt_id,
+            command_id=command_id,
+            effective_key=effective_key,
+            scope="JOB_START",
+            failure_code="RUNTIME_UNAVAILABLE",
+            failure_message=str(exc),
+            is_dispatch_failure=True,
+        )
+        raise
+    except Exception as exc:
+        err_code = getattr(exc, "code", "RUNTIME_UNAVAILABLE")
+        logger.warning(
+            "Runtime dispatch failed with exception for start_job cmd=%s attempt=%s: %s",
+            command_id,
+            attempt_id,
+            exc,
+        )
+        _cleanup_and_fail_attempt(
+            db_module,
+            attempt_id=attempt_id,
+            command_id=command_id,
+            effective_key=effective_key,
+            scope="JOB_START",
+            failure_code=err_code,
+            failure_message=str(exc),
+            is_dispatch_failure=True,
+        )
         raise
 
     cmd_state = cmd_result["state"]
@@ -1122,23 +1312,17 @@ def execute_start_job(
         )
     except Exception as exc:
         err_code = getattr(exc, "code", "WORKER_SPAWN_FAILED")
-        err_payload = {
-            "error": {
-                "code": err_code,
-                "message": str(exc),
-                "command_id": command_id,
-            }
-        }
-        with db_module.transaction() as conn:
-            idempotency.complete_record(
-                conn,
-                endpoint_semantic_scope="JOB_START",
-                idempotency_key=effective_key,
-                response_status_code=502,
-                response_body=err_payload,
-                command_id=command_id,
-                resource_id=attempt_id,
-            )
+        _cleanup_and_fail_attempt(
+            db_module,
+            attempt_id=attempt_id,
+            command_id=command_id,
+            effective_key=effective_key,
+            scope="JOB_START",
+            failure_code=err_code,
+            failure_message=str(exc),
+            is_dispatch_failure=False,
+            status_code=502,
+        )
         raise
 
     resp_payload = {
@@ -1212,7 +1396,11 @@ def execute_retry_job(
             attempt_id = str(cached_record["resource_id"])
             cmd_row = command_repository.get_command(conn, command_id)
             attempt_row = attempt_repository.get_attempt(conn, attempt_id)
-            if cmd_row and attempt_row:
+            if (
+                cmd_row
+                and attempt_row
+                and attempt_row.get("state") not in attempt_repository.TERMINAL_ATTEMPT_STATES
+            ):
                 dispatch_payload = _extract_command_payload(cmd_row)
             else:
                 attempt_row, cmd_row = retry_job(conn, job_id)
@@ -1234,20 +1422,42 @@ def execute_retry_job(
             payload=dispatch_payload,
             timeout=5.0,
         )
-    except RuntimeUnavailableError:
+    except RuntimeUnavailableError as exc:
         logger.warning(
-            "Runtime dispatch/acceptance failed for retry_job cmd=%s attempt=%s (remains PENDING)",
+            "Runtime dispatch/acceptance failed for retry_job cmd=%s attempt=%s: %s",
             command_id,
             attempt_id,
+            exc,
         )
-        with db_module.transaction() as conn:
-            idempotency.record_dispatch_failure(
-                conn,
-                endpoint_semantic_scope="JOB_RETRY",
-                idempotency_key=effective_key,
-                command_id=command_id,
-                resource_id=attempt_id,
-            )
+        _cleanup_and_fail_attempt(
+            db_module,
+            attempt_id=attempt_id,
+            command_id=command_id,
+            effective_key=effective_key,
+            scope="JOB_RETRY",
+            failure_code="RUNTIME_UNAVAILABLE",
+            failure_message=str(exc),
+            is_dispatch_failure=True,
+        )
+        raise
+    except Exception as exc:
+        err_code = getattr(exc, "code", "RUNTIME_UNAVAILABLE")
+        logger.warning(
+            "Runtime dispatch failed with exception for retry_job cmd=%s attempt=%s: %s",
+            command_id,
+            attempt_id,
+            exc,
+        )
+        _cleanup_and_fail_attempt(
+            db_module,
+            attempt_id=attempt_id,
+            command_id=command_id,
+            effective_key=effective_key,
+            scope="JOB_RETRY",
+            failure_code=err_code,
+            failure_message=str(exc),
+            is_dispatch_failure=True,
+        )
         raise
 
     cmd_state = cmd_result["state"]
@@ -1280,23 +1490,17 @@ def execute_retry_job(
         )
     except Exception as exc:
         err_code = getattr(exc, "code", "WORKER_SPAWN_FAILED")
-        err_payload = {
-            "error": {
-                "code": err_code,
-                "message": str(exc),
-                "command_id": command_id,
-            }
-        }
-        with db_module.transaction() as conn:
-            idempotency.complete_record(
-                conn,
-                endpoint_semantic_scope="JOB_RETRY",
-                idempotency_key=effective_key,
-                response_status_code=502,
-                response_body=err_payload,
-                command_id=command_id,
-                resource_id=attempt_id,
-            )
+        _cleanup_and_fail_attempt(
+            db_module,
+            attempt_id=attempt_id,
+            command_id=command_id,
+            effective_key=effective_key,
+            scope="JOB_RETRY",
+            failure_code=err_code,
+            failure_message=str(exc),
+            is_dispatch_failure=False,
+            status_code=502,
+        )
         raise
 
     resp_payload = {
@@ -1371,7 +1575,11 @@ def execute_resume_job(
             attempt_id = str(cached_record["resource_id"])
             cmd_row = command_repository.get_command(conn, command_id)
             attempt_row = attempt_repository.get_attempt(conn, attempt_id)
-            if cmd_row and attempt_row:
+            if (
+                cmd_row
+                and attempt_row
+                and attempt_row.get("state") not in attempt_repository.TERMINAL_ATTEMPT_STATES
+            ):
                 dispatch_payload = _extract_command_payload(cmd_row)
             else:
                 attempt_row, cmd_row = resume_job(conn, job_id, checkpoint_id)
@@ -1393,20 +1601,42 @@ def execute_resume_job(
             payload=dispatch_payload,
             timeout=5.0,
         )
-    except RuntimeUnavailableError:
+    except RuntimeUnavailableError as exc:
         logger.warning(
-            "Runtime dispatch/acceptance failed for resume_job cmd=%s attempt=%s (remains PENDING)",
+            "Runtime dispatch/acceptance failed for resume_job cmd=%s attempt=%s: %s",
             command_id,
             attempt_id,
+            exc,
         )
-        with db_module.transaction() as conn:
-            idempotency.record_dispatch_failure(
-                conn,
-                endpoint_semantic_scope="JOB_RESUME",
-                idempotency_key=effective_key,
-                command_id=command_id,
-                resource_id=attempt_id,
-            )
+        _cleanup_and_fail_attempt(
+            db_module,
+            attempt_id=attempt_id,
+            command_id=command_id,
+            effective_key=effective_key,
+            scope="JOB_RESUME",
+            failure_code="RUNTIME_UNAVAILABLE",
+            failure_message=str(exc),
+            is_dispatch_failure=True,
+        )
+        raise
+    except Exception as exc:
+        err_code = getattr(exc, "code", "RUNTIME_UNAVAILABLE")
+        logger.warning(
+            "Runtime dispatch failed with exception for resume_job cmd=%s attempt=%s: %s",
+            command_id,
+            attempt_id,
+            exc,
+        )
+        _cleanup_and_fail_attempt(
+            db_module,
+            attempt_id=attempt_id,
+            command_id=command_id,
+            effective_key=effective_key,
+            scope="JOB_RESUME",
+            failure_code=err_code,
+            failure_message=str(exc),
+            is_dispatch_failure=True,
+        )
         raise
 
     cmd_state = cmd_result["state"]
@@ -1439,23 +1669,17 @@ def execute_resume_job(
         )
     except Exception as exc:
         err_code = getattr(exc, "code", "WORKER_SPAWN_FAILED")
-        err_payload = {
-            "error": {
-                "code": err_code,
-                "message": str(exc),
-                "command_id": command_id,
-            }
-        }
-        with db_module.transaction() as conn:
-            idempotency.complete_record(
-                conn,
-                endpoint_semantic_scope="JOB_RESUME",
-                idempotency_key=effective_key,
-                response_status_code=502,
-                response_body=err_payload,
-                command_id=command_id,
-                resource_id=attempt_id,
-            )
+        _cleanup_and_fail_attempt(
+            db_module,
+            attempt_id=attempt_id,
+            command_id=command_id,
+            effective_key=effective_key,
+            scope="JOB_RESUME",
+            failure_code=err_code,
+            failure_message=str(exc),
+            is_dispatch_failure=False,
+            status_code=502,
+        )
         raise
 
     resp_payload = {
