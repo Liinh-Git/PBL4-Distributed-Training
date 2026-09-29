@@ -1,6 +1,7 @@
-import React from 'react';
-import { CheckCircle2, Clock, ArrowRight, Server, ShieldCheck } from 'lucide-react';
+import React, { useMemo } from 'react';
+import { CheckCircle2, Clock, ArrowRight, Server, ShieldCheck, AlertTriangle } from 'lucide-react';
 import { TrainingStep, WorkerSession } from '../../types';
+import { detectSlowWorkers, WorkerComputeTelemetry } from '../../utils/stragglerDetection';
 
 interface WorkerLiveStripProps {
   currentStep: TrainingStep;
@@ -8,6 +9,8 @@ interface WorkerLiveStripProps {
   expectedWorkers: number;
   onSelectWorker: (worker: WorkerSession) => void;
   onViewDetails: () => void;
+  recentSteps?: TrainingStep[];
+  workloadPolicy?: 'equal' | 'dbs' | string;
 }
 
 interface WorkerVisualState {
@@ -39,10 +42,24 @@ export const WorkerLiveStrip: React.FC<WorkerLiveStripProps> = ({
   expectedWorkers,
   onSelectWorker,
   onViewDetails,
+  recentSteps,
+  workloadPolicy,
 }) => {
   const contributions = currentStep?.workerContributions || [];
   const acceptedCount = contributions.filter(c => c.contributionAccepted).length;
   const isCommitted = currentStep?.state === 'COMMITTED';
+  const isDBS = workloadPolicy === 'dbs';
+
+  // Presentation heuristic: Analyze recent steps for compute stragglers
+  const stepsToAnalyze = useMemo(() => {
+    if (recentSteps && recentSteps.length > 0) return recentSteps;
+    return currentStep ? [currentStep] : [];
+  }, [recentSteps, currentStep]);
+
+  const slowWorkersMap = useMemo(
+    () => detectSlowWorkers(stepsToAnalyze),
+    [stepsToAnalyze]
+  );
 
   // Determine current sync status text
   let syncStatusText = '';
@@ -84,23 +101,47 @@ export const WorkerLiveStrip: React.FC<WorkerLiveStripProps> = ({
           const contrib = contributions.find(c => c.workerId === worker.workerId);
           const hasReceived = isCommitted || contrib?.contributionAccepted;
           const visual = getWorkerVisual(worker.state);
+          const telemetry = slowWorkersMap.get(worker.workerId);
+          const computeMs = contrib?.computeMs ?? telemetry?.currentComputeMs ?? telemetry?.medianComputeMs;
+          const isSlow = Boolean(telemetry?.isSlow);
 
           return (
             <button
               type="button"
               key={worker.workerId}
               onClick={() => onSelectWorker(worker)}
-              aria-label={`Worker ${worker.workerId}, ${visual.label}, ${hasReceived ? 'contribution received' : 'waiting for contribution'}`}
+              aria-label={`Worker ${worker.workerId}, ${visual.label}, ${hasReceived ? 'contribution received' : 'waiting for contribution'}${isSlow ? ', slow worker' : ''}`}
               className="p-2.5 rounded bg-[#171719] hover:bg-[#1f1f23] focus:outline-none focus:ring-1 focus:ring-blue-500/50 transition-colors cursor-pointer flex items-center justify-between group text-left w-full border-0"
             >
               <div className="flex items-center gap-2 min-w-0">
                 <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${visual.dotClass}`} />
                 <div className="min-w-0">
-                  <div className="text-xs font-semibold text-[#f3f3f4] group-hover:text-white transition-colors">
-                    Worker {worker.workerId}
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-xs font-semibold text-[#f3f3f4] group-hover:text-white transition-colors">
+                      Worker {worker.workerId}
+                    </span>
+                    {isSlow && (
+                      <span
+                        data-testid={`slow-badge-worker-${worker.workerId}`}
+                        className="px-1.5 py-0.2 rounded text-[10px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40 inline-flex items-center"
+                        title={`Compute straggler detected: median compute time (${Math.round(telemetry?.medianComputeMs || computeMs || 0)}ms) > 1.5x group median`}
+                      >
+                        Slow
+                      </span>
+                    )}
                   </div>
-                  <div className="text-[11px] text-[#73737c] truncate">
-                    {visual.label}
+                  <div className="text-[11px] text-[#73737c] truncate flex items-center gap-1.5 flex-wrap">
+                    <span>{visual.label}</span>
+                    {computeMs != null && (
+                      <span className="text-[#a1a1a8] font-mono">
+                        · {Math.round(computeMs)}ms
+                      </span>
+                    )}
+                    {isDBS && contrib?.sampleCount != null && (
+                      <span className="text-[#73737c]">
+                        · {contrib.sampleCount} units
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import {
   Save,
@@ -35,6 +35,7 @@ import { WorkerDetailDrawer } from '../components/drawers/WorkerDetailDrawer';
 import { StepInspectorDrawer } from '../components/drawers/StepInspectorDrawer';
 import { CopyableId } from '../components/common/CopyableId';
 import { AttemptStateBadge } from '../components/common/Badge';
+import { detectSlowWorkers } from '../utils/stragglerDetection';
 
 export const LiveTrainingPage: React.FC = () => {
   const [searchParams] = useSearchParams();
@@ -385,6 +386,11 @@ export const LiveTrainingPage: React.FC = () => {
     };
   });
 
+  const slowWorkersMap = useMemo(
+    () => detectSlowWorkers(legacyStepsAdapter),
+    [legacyStepsAdapter]
+  );
+
   return (
     <div className="space-y-4 w-full pb-10 font-sans select-none">
       {/* Toast Notification */}
@@ -724,6 +730,10 @@ export const LiveTrainingPage: React.FC = () => {
                           ? 'text-emerald-400'
                           : 'text-amber-400';
 
+                        const telemetry = slowWorkersMap.get(id);
+                        const computeTime = telemetry?.currentComputeMs ?? telemetry?.medianComputeMs;
+                        const isSlow = Boolean(telemetry?.isSlow);
+
                         rows.push(
                           <div
                             key={id}
@@ -741,9 +751,23 @@ export const LiveTrainingPage: React.FC = () => {
                             })}
                             className="py-2 flex items-center justify-between hover:text-[#f3f3f4] cursor-pointer transition-colors"
                           >
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-2 flex-wrap">
                               <span className="text-[#f3f3f4]">Worker {id}</span>
                               <span className="text-[11px] text-[#73737c]">{w.node_label || `node-${id}`}</span>
+                              {computeTime != null && (
+                                <span className="text-[10px] text-[#a1a1a8] font-mono">
+                                  · {Math.round(computeTime)}ms
+                                </span>
+                              )}
+                              {isSlow && (
+                                <span
+                                  data-testid={`slow-badge-worker-${id}`}
+                                  className="px-1.5 py-0.2 rounded text-[10px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40 inline-flex items-center"
+                                  title={`Compute straggler detected: median compute time (${Math.round(telemetry?.medianComputeMs || computeTime)}ms) > 1.5x group median`}
+                                >
+                                  Slow
+                                </span>
+                              )}
                             </div>
                             <span className={`text-[11px] font-mono ${stateColor}`}>
                               {w.state}
