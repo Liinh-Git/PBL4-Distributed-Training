@@ -287,6 +287,62 @@ def test_03_enroll_code_second_use_rejected(app_client: TestClient) -> None:
     assert err["code"] == "NODE_ENROLLMENT_CODE_INVALID"
 
 
+def test_03b_enroll_same_onetime_code_concurrent_race_atomic(
+    app_client: TestClient, pg_conn: psycopg.Connection
+) -> None:
+    """Test 5: Concurrently enroll two clients with the exact same one-time code.
+    Guarantees:
+    - Atomicity of consume_code_if_valid.
+    - Exactly one client succeeds (201).
+    - Other client receives NODE_ENROLLMENT_CODE_INVALID (400).
+    - Exactly one Node is created in the database.
+    """
+    code_res = app_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
+    raw_code = code_res.json()["data"]["enrollment_code"]
+    code_hash = hashlib.sha256(raw_code.encode("utf-8")).hexdigest()
+
+    import concurrent.futures
+
+    results: list[tuple[int, dict]] = []
+
+    def client_attempt(client_name: str) -> None:
+        resp = app_client.post(
+            "/api/v1/nodes/enroll",
+            json={
+                "enrollment_code": raw_code,
+                "display_name": f"Worker-{client_name}",
+            },
+        )
+        results.append((resp.status_code, resp.json()))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        f1 = executor.submit(client_attempt, "A")
+        f2 = executor.submit(client_attempt, "B")
+        f1.result()
+        f2.result()
+
+    status_codes = sorted([r[0] for r in results])
+    assert status_codes == [201, 400]
+
+    succ_res = [r[1] for r in results if r[0] == 201][0]
+    fail_res = [r[1] for r in results if r[0] == 400][0]
+
+    assert "node_id" in succ_res["data"]
+    assert fail_res["error"]["code"] == "NODE_ENROLLMENT_CODE_INVALID"
+
+    # Verify directly on DB: exactly one node exists for this enrollment code
+    succ_node_id = succ_res["data"]["node_id"]
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT node_id, display_name FROM nodes WHERE node_id = %s", (succ_node_id,))
+        rows = cur.fetchall()
+        assert len(rows) == 1
+
+        # The enrollment code is recorded as used
+        code_record = node_enrollment_repository.get_enrollment_code(pg_conn, code_hash)
+        assert code_record is not None
+        assert code_record["used_at"] is not None
+
+
 def test_04_expired_enrollment_code_rejected(
     app_client: TestClient, pg_conn: psycopg.Connection
 ) -> None:

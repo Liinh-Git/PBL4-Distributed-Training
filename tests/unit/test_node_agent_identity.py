@@ -15,7 +15,11 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from pbl4.node_agent.config import NodeAgentConfig
-from pbl4.node_agent.enrollment import enroll
+from pbl4.node_agent.enrollment import (
+    EnrollmentConnectionError,
+    EnrollmentError,
+    enroll,
+)
 from pbl4.node_agent.identity import (
     NodeIdentity,
     identity_path,
@@ -112,10 +116,11 @@ class TestNodeEnrollment(unittest.TestCase):
         self.assertEqual(identity.node_id, "node-enrolled-1")
         self.assertEqual(identity.node_secret, "secret-new-123")
 
-        # Verify request headers
+        # Verify request headers (Authorization must NOT be sent)
         req = mock_urlopen.call_args[0][0]
-        self.assertEqual(req.headers.get("Authorization"), "Bearer code-one-time-123")
+        self.assertIsNone(req.headers.get("Authorization"))
         self.assertEqual(req.headers.get("Content-type"), "application/json")
+        self.assertEqual(req.headers.get("Accept"), "application/json")
 
     @patch("urllib.request.urlopen")
     def test_enroll_success_wrapped_data_envelope(self, mock_urlopen: MagicMock) -> None:
@@ -144,6 +149,113 @@ class TestNodeEnrollment(unittest.TestCase):
         self.assertIn("401", str(ctx.exception))
         # Ensure enrollment code is not leaked in exception
         self.assertNotIn("code-invalid", str(ctx.exception))
+
+    @patch("urllib.request.urlopen")
+    def test_enroll_expired_code_raises_enrollment_error(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        err_body = json.dumps(
+            {
+                "error": {
+                    "code": "NODE_ENROLLMENT_CODE_EXPIRED",
+                    "message": "Enrollment code has expired.",
+                }
+            }
+        ).encode("utf-8")
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            url="http://test",
+            code=400,
+            msg="Bad Request",
+            hdrs=None,  # type: ignore[arg-type]
+            fp=io.BytesIO(err_body),
+        )
+
+        with self.assertRaises(EnrollmentError) as ctx:
+            enroll("http://127.0.0.1:8000", "code-expired")
+        self.assertEqual(ctx.exception.code, "NODE_ENROLLMENT_CODE_EXPIRED")
+        self.assertEqual(ctx.exception.message, "Enrollment code has expired.")
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("NODE_ENROLLMENT_CODE_EXPIRED", str(ctx.exception))
+        self.assertIn("Enrollment code has expired.", str(ctx.exception))
+        # Ensure raw secret is not leaked in exception
+        self.assertNotIn("code-expired", str(ctx.exception))
+
+    @patch("urllib.request.urlopen")
+    def test_enroll_invalid_code_raises_enrollment_error(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        err_body = json.dumps(
+            {
+                "error": {
+                    "code": "NODE_ENROLLMENT_CODE_INVALID",
+                    "message": "Enrollment code is invalid.",
+                }
+            }
+        ).encode("utf-8")
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            url="http://test",
+            code=400,
+            msg="Bad Request",
+            hdrs=None,  # type: ignore[arg-type]
+            fp=io.BytesIO(err_body),
+        )
+
+        with self.assertRaises(EnrollmentError) as ctx:
+            enroll("http://127.0.0.1:8000", "code-invalid")
+        self.assertEqual(ctx.exception.code, "NODE_ENROLLMENT_CODE_INVALID")
+        self.assertEqual(ctx.exception.message, "Enrollment code is invalid.")
+        self.assertNotIn("code-invalid", str(ctx.exception))
+
+    @patch("urllib.request.urlopen")
+    def test_enroll_already_used_code_raises_enrollment_error(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        err_body = json.dumps(
+            {
+                "error": {
+                    "code": "NODE_ENROLLMENT_CODE_INVALID",
+                    "message": "Enrollment code has already been used.",
+                }
+            }
+        ).encode("utf-8")
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            url="http://test",
+            code=400,
+            msg="Bad Request",
+            hdrs=None,  # type: ignore[arg-type]
+            fp=io.BytesIO(err_body),
+        )
+
+        with self.assertRaises(EnrollmentError) as ctx:
+            enroll("http://127.0.0.1:8000", "code-already-used")
+        self.assertEqual(ctx.exception.code, "NODE_ENROLLMENT_CODE_INVALID")
+        self.assertEqual(ctx.exception.message, "Enrollment code has already been used.")
+        self.assertNotIn("code-already-used", str(ctx.exception))
+
+    @patch("urllib.request.urlopen")
+    def test_enroll_non_json_error_fallback(self, mock_urlopen: MagicMock) -> None:
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            url="http://test",
+            code=502,
+            msg="Bad Gateway",
+            hdrs=None,  # type: ignore[arg-type]
+            fp=io.BytesIO(b"Bad Gateway: upstream connect error"),
+        )
+
+        with self.assertRaises(EnrollmentError) as ctx:
+            enroll("http://127.0.0.1:8000", "code-upstream-fail")
+        self.assertIsNone(ctx.exception.code)
+        self.assertEqual(ctx.exception.status_code, 502)
+        self.assertIn("502", str(ctx.exception))
+        self.assertIn("Bad Gateway", str(ctx.exception))
+
+    @patch("urllib.request.urlopen")
+    def test_enroll_connection_error_distinction(self, mock_urlopen: MagicMock) -> None:
+        mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
+
+        with self.assertRaises(EnrollmentConnectionError) as ctx:
+            enroll("http://127.0.0.1:8000", "code-conn-fail")
+        self.assertIn("Connection refused", str(ctx.exception))
 
     @patch("urllib.request.urlopen")
     def test_enroll_malformed_response_raises_value_error(self, mock_urlopen: MagicMock) -> None:
