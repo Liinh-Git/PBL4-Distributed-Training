@@ -335,8 +335,8 @@ export const LiveTrainingPage: React.FC = () => {
             batchId: ws.batch_id,
             sampleCount: ws.sample_count,
             samples: ws.sample_count,
-            contributionAccepted: ws.contribution_accepted ?? true,
-            parameterApplied: ws.parameter_applied ?? true,
+            contributionAccepted: typeof ws.contribution_accepted === 'boolean' ? ws.contribution_accepted : undefined,
+            parameterApplied: typeof ws.parameter_applied === 'boolean' ? ws.parameter_applied : undefined,
             loss: ws.loss,
             accuracy: ws.accuracy,
             computeMs: ws.compute_ms,
@@ -350,10 +350,10 @@ export const LiveTrainingPage: React.FC = () => {
             sessionId: w.session_id,
             shardId: w.shard_id,
             batchId: st.batch_ordinal,
-            sampleCount: Math.round((st.total_sample_count || 192) / (workers.length || 1)),
-            samples: Math.round((st.total_sample_count || 192) / (workers.length || 1)),
-            contributionAccepted: true,
-            parameterApplied: true,
+            sampleCount: st.total_sample_count && workers.length ? Math.round(st.total_sample_count / workers.length) : 0,
+            samples: st.total_sample_count && workers.length ? Math.round(st.total_sample_count / workers.length) : 0,
+            contributionAccepted: undefined,
+            parameterApplied: undefined,
           }));
 
     const timing = detail?.timing;
@@ -778,14 +778,14 @@ export const LiveTrainingPage: React.FC = () => {
                         rows.push(
                           <div
                             key={id}
-                            className="py-2 flex items-center justify-between opacity-80"
+                            className="py-2 flex items-center justify-between opacity-60"
                           >
                             <div className="flex items-center gap-2">
                               <span className="text-[#f3f3f4]">Worker {id}</span>
-                              <span className="text-[10px] text-[#73737c]">node-{id} (DTP active)</span>
+                              <span className="text-[11px] text-[#73737c]">Waiting for projection</span>
                             </div>
-                            <span className="text-[11px] font-mono text-emerald-400/80">
-                              ACTIVE (DTP)
+                            <span className="text-[11px] font-mono text-zinc-500">
+                              Not observed
                             </span>
                           </div>
                         );

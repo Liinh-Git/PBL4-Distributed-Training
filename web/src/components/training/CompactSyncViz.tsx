@@ -148,7 +148,7 @@ export const CompactSyncViz: React.FC<CompactSyncVizProps> = ({
             <div className="flex items-center gap-2">
               <span className="text-[#f3f3f4]">Worker {item.workerId}</span>
               {!item.isObserved && (
-                <span className="text-[10px] text-[#73737c]" title="Participating in DTP training data plane">(DTP active)</span>
+                <span className="text-[10px] text-[#73737c]" title="Waiting for authoritative session projection">(Waiting for projection)</span>
               )}
             </div>
             <span className={item.itemClass}>

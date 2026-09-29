@@ -92,8 +92,8 @@ export interface WorkerContribution {
   batchId: string | number;
   sampleCount: number;
   samples?: number; // legacy alias
-  contributionAccepted: boolean;
-  parameterApplied: boolean;
+  contributionAccepted?: boolean | null;
+  parameterApplied?: boolean | null;
   contribution?: string; // legacy alias
   loss?: number | null;
   accuracy?: number | null;
