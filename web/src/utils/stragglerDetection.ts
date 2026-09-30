@@ -65,14 +65,12 @@ export function detectSlowWorkers(
   const ratioThreshold = options?.ratioThreshold ?? SLOW_WORKER_RATIO;
   const minSamples = options?.minSamples ?? MIN_COMPUTE_SAMPLES;
 
-  // 1. Collect valid positive compute_ms samples per worker strictly from committed steps
-  // (or steps with valid completed worker contributions).
+  // 1. Collect valid positive compute_ms samples strictly from committed steps.
   const samplesByWorker = new Map<number, number[]>();
   const latestComputeByWorker = new Map<number, number>();
 
   for (const st of steps) {
-    // Only analyze committed steps or steps that have valid contribution data
-    if (st.state && st.state !== 'COMMITTED') {
+    if (st.state !== 'COMMITTED') {
       continue;
     }
 

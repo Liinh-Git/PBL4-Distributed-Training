@@ -52,6 +52,32 @@ describe('Presentation Heuristic: Worker Compute Straggler Detection (Hotfix #5)
     assert.strictEqual(result.get(2)?.sampleCount, 2);
   });
 
+  test('undefined and non-COMMITTED steps cannot supply compute samples', () => {
+    const contributions = [
+      { workerId: 0, computeMs: 50, uploadMs: 5 },
+      { workerId: 1, computeMs: 50, uploadMs: 5 },
+      { workerId: 2, computeMs: 200, uploadMs: 5000 },
+    ];
+    const steps = [
+      { workerContributions: contributions },
+      ...['COLLECTING_GRADIENTS', 'AGGREGATING', 'UPDATING', 'CHECKPOINTING'].map(state => ({
+        state, workerContributions: contributions,
+      })),
+      { state: 'COMMITTED', workerContributions: contributions },
+      { state: 'COMMITTED', workerContributions: contributions },
+    ];
+    const twoSamples = detectSlowWorkers(steps);
+    assert.equal(twoSamples.get(2)?.sampleCount, 2);
+    assert.equal(twoSamples.get(2)?.isSlow, false);
+
+    const threeSamples = detectSlowWorkers([
+      ...steps,
+      { state: 'COMMITTED', workerContributions: contributions },
+    ]);
+    assert.equal(threeSamples.get(2)?.sampleCount, 3);
+    assert.equal(threeSamples.get(2)?.isSlow, true);
+  });
+
   test('Test 2: Worker with median compute_ms > 1.5x group median (>= 3 samples) IS labeled Slow', () => {
     // 3 committed steps: Worker 0 & 1 around 50ms, Worker 2 around 120ms (2.4x > 1.5x)
     const steps = [
