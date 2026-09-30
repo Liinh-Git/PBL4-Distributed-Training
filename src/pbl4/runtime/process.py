@@ -535,6 +535,7 @@ class _AttemptRunner:
         finally:
             if self._server is not None:
                 self._server.stop()
+                self._final_workers = self._server.worker_snapshots()
             coordinator = self._coordinator
             if coordinator is not None:
                 self._set_state(str(coordinator.snapshot()["state"]))
@@ -621,27 +622,41 @@ class _AttemptRunner:
             coordinator.worker_failed(worker_id, session_id)
 
     def _forward_events(self) -> None:
-        while not self.terminal or (
-            self._events is not None and self._events.snapshot()["queued_event_count"]
+        while not self._process._stopping.is_set() and (
+            not self.terminal
+            or (self._events is not None and self._events.snapshot()["queued_event_count"] > 0)
         ):
             events = self._events
             if events is None or not self._management.backend_connected:
                 time.sleep(0.1)
                 continue
-            for event in events.drain():
-                self._management.send_runtime_event(
-                    {
-                        "attempt_id": event.attempt_id,
-                        "job_id": event.job_id,
-                        "runtime_event_seq": event.runtime_event_seq,
-                        "event_type": event.event_type,
-                        "event_schema_version": event.event_schema_version,
-                        "occurred_at": event.occurred_at,
-                        "source_component": event.source_component,
-                        "severity": event.severity,
-                        "details": event.details,
-                    }
-                )
+            batch = events.peek(limit=64)
+            if not batch:
+                time.sleep(0.05)
+                continue
+            for event in batch:
+                if self._process._stopping.is_set() or not self._management.backend_connected:
+                    break
+                payload = {
+                    "attempt_id": event.attempt_id,
+                    "job_id": event.job_id,
+                    "runtime_event_seq": event.runtime_event_seq,
+                    "event_type": event.event_type,
+                    "event_schema_version": event.event_schema_version,
+                    "occurred_at": event.occurred_at,
+                    "source_component": event.source_component,
+                    "severity": event.severity,
+                    "details": event.details,
+                }
+                if self._management.send_runtime_event(payload):
+                    events.ack(event.runtime_event_seq)
+                else:
+                    logger.warning(
+                        "Failed to send runtime event seq=%s (%s), stopping batch for retry",
+                        event.runtime_event_seq,
+                        event.event_type,
+                    )
+                    break
             time.sleep(0.05)
 
     def snapshot(self, runtime_instance_id: str) -> dict[str, object]:
@@ -678,19 +693,26 @@ class _AttemptRunner:
             last_seq = 0
             gap_count = 0
         server = self._server
-        raw_workers = server.worker_snapshots() if server is not None else self._final_workers
+        if self.terminal and self._final_workers:
+            raw_workers = self._final_workers
+        elif server is not None:
+            raw_workers = server.worker_snapshots()
+        else:
+            raw_workers = self._final_workers
         captured = _now()
         workers = [
             {
                 "worker_id": item["worker_id"],
                 "session_id": str(item["session_id"]),
-                "node_label": item["node_label"],
+                "node_label": item.get("node_label", "node-unknown"),
                 "state": item["state"],
-                "protocol_version": item["protocol_version"],
+                "protocol_version": item.get("protocol_version", 1),
                 "connected_at": item["connected_at"],
-                "last_heartbeat_at": item["last_heartbeat_at"],
-                "shard_id": item["shard_id"],
-                "local_model_version": item["local_model_version"],
+                "last_heartbeat_at": item.get("last_heartbeat_at"),
+                "disconnected_at": item.get("disconnected_at"),
+                "failure_code": item.get("failure_code"),
+                "shard_id": item.get("shard_id"),
+                "local_model_version": item.get("local_model_version"),
                 "node_id": item.get("node_id"),
                 "allocation_id": item.get("allocation_id"),
             }

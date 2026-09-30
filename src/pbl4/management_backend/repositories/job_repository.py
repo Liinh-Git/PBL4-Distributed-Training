@@ -18,15 +18,8 @@ logger = logging.getLogger(__name__)
 # Valid job states
 JOB_STATES = {"DRAFT", "READY", "ARCHIVED"}
 
-# Active attempt states (for counting)
-ACTIVE_ATTEMPT_STATES = {
-    "CREATED",
-    "WAITING_WORKERS",
-    "PROVISIONING",
-    "INITIALIZING",
-    "RUNNING",
-    "COMPLETING",
-}
+# Active attempt states (re-exported from attempt_repository as single source of truth)
+from pbl4.management_backend.repositories.attempt_repository import ACTIVE_ATTEMPT_STATES
 
 
 def _row_to_dict(row: dict) -> dict:

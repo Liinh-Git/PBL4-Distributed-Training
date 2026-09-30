@@ -206,6 +206,10 @@ class StateSnapshot(McpPayload):
         optional_worker = {
             "node_id": ("nullable", "string"),
             "allocation_id": ("nullable", "string"),
+            "connected_at": ("nullable", "string"),
+            "disconnected_at": ("nullable", "string"),
+            "failure_code": ("nullable", "string"),
+            "protocol_version": ("nullable", "positive_int"),
         }
         for worker in data["workers"]:
             if not isinstance(worker, dict) or not set(required_worker) <= set(worker):

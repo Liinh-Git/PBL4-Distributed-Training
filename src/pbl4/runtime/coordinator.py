@@ -443,7 +443,6 @@ class Coordinator:
             try:
                 self._scheduler.assignments(self._cursor)
             except StopIteration:
-                self._transition("COMPLETING")
                 self._policy.cleanup()
                 self._transition("COMPLETED")
             else:

@@ -149,20 +149,70 @@ class RuntimeGateway:
                         "expected_seq": expected,
                         "received_seq": seq,
                         "reason": f"Event gap: expected {expected}, received {seq}",
+                        "snapshot_required": True,
                     },
                 },
             )
         elif seq == expected:
             cursor.highest_contiguous_seq = seq
-            # Drain contiguous cursor through any pre-persisted events in DB
+            # Drain contiguous cursor through any pre-persisted events in DB and project them
+            has_projected_drained = False
             while True:
-                next_ev = event_repository.get_event_by_seq(
-                    conn, attempt_id, cursor.highest_contiguous_seq + 1
-                )
+                next_seq = cursor.highest_contiguous_seq + 1
+                try:
+                    next_ev = event_repository.get_event_by_seq(
+                        conn, attempt_id, next_seq
+                    )
+                except Exception:
+                    next_ev = None
                 if next_ev is not None:
+                    details = next_ev.get("payload_jsonb")
+                    if isinstance(details, str):
+                        try:
+                            details = json.loads(details)
+                        except Exception:
+                            details = {}
+                    elif details is None:
+                        details = {}
+
+                    occurred_at_val = next_ev.get("occurred_at")
+                    if isinstance(occurred_at_val, datetime):
+                        occurred_at_str = occurred_at_val.isoformat()
+                    else:
+                        occurred_at_str = str(occurred_at_val or datetime.now(UTC).isoformat())
+
+                    next_payload = {
+                        "attempt_id": attempt_id,
+                        "runtime_event_seq": next_seq,
+                        "event_type": next_ev.get("event_type"),
+                        "severity": next_ev.get("severity", "INFO"),
+                        "occurred_at": occurred_at_str,
+                        "details": details,
+                    }
+                    try:
+                        self._project_runtime_event(conn, next_payload)
+                        has_projected_drained = True
+                        from pbl4.management_backend.services import event_ingest
+                        event_ingest.broadcast_runtime_event(
+                            attempt_id=attempt_id,
+                            runtime_event_seq=next_seq,
+                            event_type=next_ev.get("event_type"),
+                            severity=next_ev.get("severity", "INFO"),
+                            occurred_at=occurred_at_val if isinstance(occurred_at_val, datetime) else datetime.now(UTC),
+                            source_component=next_ev.get("source_component", "Runtime"),
+                            payload=details,
+                        )
+                    except Exception as proj_err:
+                        logger.warning("Failed to project drained event %s: %s", next_seq, proj_err)
                     cursor.highest_contiguous_seq += 1
                 else:
                     break
+
+            if has_projected_drained and hasattr(conn, "commit"):
+                try:
+                    conn.commit()
+                except Exception:
+                    pass
 
             if cursor.highest_contiguous_seq >= cursor.max_seen_seq:
                 if cursor.gap_fenced:
@@ -208,14 +258,14 @@ class RuntimeGateway:
         """Return the current management-visible runtime snapshot."""
         if attempt_id is None:
             snap = dict(self._cached_snapshot)
-            snap["stale"] = not self.connected
+            snap["stale"] = bool(self._cached_snapshot.get("stale", False) or not self.connected)
             return snap
 
         snap = dict(self._attempt_snapshots.get(attempt_id, self._empty_snapshot()))
         cursor = self.get_cursor(attempt_id)
         snap["attempt_id"] = attempt_id
         snap["active_attempt_id"] = attempt_id
-        snap["stale"] = cursor.stale or not self.connected
+        snap["stale"] = bool(cursor.stale or snap.get("stale", False) or not self.connected)
         snap["observed_at"] = cursor.observed_at
         snap["runtime_event_seq"] = cursor.authoritative_snapshot_seq
         return snap
@@ -232,16 +282,24 @@ class RuntimeGateway:
         return snap
 
     def on_disconnect(self) -> None:
-        """Mark cached snapshot stale and abort active attempts on disconnect."""
+        """Mark cached snapshot and cursors stale on disconnect without mutating DB Attempt."""
         self._cached_snapshot["stale"] = True
         for attempt_id, cursor in self._attempt_cursors.items():
             cursor.stale = True
             if attempt_id in self._attempt_snapshots:
                 self._attempt_snapshots[attempt_id]["stale"] = True
-        logger.info("Runtime disconnected; snapshot marked stale, aborting active attempts.")
-        self._abort_active_attempts_on_runtime_down(
-            failure_code="RUNTIME_DISCONNECTED",
-            failure_message="Runtime MCP connection was lost",
+        for cmd_id, future in list(self._pending_results.items()):
+            if not future.done():
+                future.set_exception(
+                    RuntimeUnavailableError(
+                        f"Runtime MCP connection was lost; command {cmd_id} aborted",
+                        command_id=cmd_id,
+                    )
+                )
+        self._pending_results.clear()
+        logger.info(
+            "Runtime MCP disconnected; snapshot marked stale/degraded. "
+            "DB Attempt state and worker allocations preserved."
         )
 
     def reset_runtime_context(self) -> None:
@@ -259,10 +317,6 @@ class RuntimeGateway:
                 )
         self._pending_results.clear()
         logger.info("Runtime context and cursors reset due to runtime instance change.")
-        self._abort_active_attempts_on_runtime_down(
-            failure_code="RUNTIME_RESTARTED",
-            failure_message="Runtime restarted with new instance ID",
-        )
 
     def _abort_active_attempts_on_runtime_down(
         self,
@@ -384,11 +438,12 @@ class RuntimeGateway:
         """MGMT_HELLO_ACK -> ALWAYS request GET_STATE."""
         logger.info("Received MGMT_HELLO_ACK: %s", payload)
         new_instance_id = payload.get("runtime_instance_id")
-        if (
+        instance_changed = (
             self._runtime_instance_id is not None
             and new_instance_id is not None
             and self._runtime_instance_id != new_instance_id
-        ):
+        )
+        if instance_changed:
             logger.warning(
                 "Runtime instance changed from %s to %s; clearing old attempt contexts",
                 self._runtime_instance_id,
@@ -402,6 +457,11 @@ class RuntimeGateway:
         state = self._port.request_state()
         if state:
             self.handle_state_snapshot(state)
+        elif instance_changed:
+            self._abort_active_attempts_on_runtime_down(
+                failure_code="RUNTIME_RESTARTED",
+                failure_message="Runtime restarted with new instance ID but provided no state snapshot",
+            )
 
     def handle_state_snapshot(self, snapshot: dict[str, Any]) -> None:
         """STATE_SNAPSHOT -> authoritative Runtime projection reconciliation."""
@@ -421,6 +481,24 @@ class RuntimeGateway:
             self._abort_active_attempts_on_runtime_down(
                 failure_code="RUNTIME_INSTANCE_IDLE",
                 failure_message="Runtime reported no active attempt; aborting stale active attempt in DB",
+            )
+            return
+
+        cursor = self.get_cursor(attempt_id)
+        authoritative_cursor_seq = cursor.authoritative_snapshot_seq
+        if authoritative_cursor_seq is None and cursor.highest_contiguous_seq is not None:
+            authoritative_cursor_seq = cursor.highest_contiguous_seq
+
+        if (
+            authoritative_cursor_seq is not None
+            and snap_seq is not None
+            and snap_seq < authoritative_cursor_seq
+        ):
+            logger.warning(
+                "Ignoring stale STATE_SNAPSHOT for attempt '%s': snap_seq %s < authoritative cursor seq %s",
+                attempt_id,
+                snap_seq,
+                authoritative_cursor_seq,
             )
             return
 
@@ -490,12 +568,17 @@ class RuntimeGateway:
                     }
                 )
                 new_state = snapshot.get("attempt_state") or attempt["state"]
-                attempt_repository.update_attempt_state(
+                updated = self._project_attempt_state_transition(
                     conn,
                     attempt_id,
                     new_state,
+                    occurred_at=observed_at,
+                    failure_code=snapshot.get("failure_code"),
+                    failure_message=snapshot.get("failure_message"),
                     runtime_metadata=metadata,
                 )
+                if updated and isinstance(updated, dict) and updated.get("state"):
+                    reconciled["attempt_state"] = updated["state"]
 
                 for worker in workers or []:
                     if not isinstance(worker, dict) or worker.get("worker_id") is None:
@@ -513,6 +596,10 @@ class RuntimeGateway:
                     connected_at = worker.get("connected_at")
                     if isinstance(connected_at, str):
                         connected_at = datetime.fromisoformat(connected_at.replace("Z", "+00:00"))
+                    disconnected_at = worker.get("disconnected_at")
+                    if isinstance(disconnected_at, str):
+                        disconnected_at = datetime.fromisoformat(disconnected_at.replace("Z", "+00:00"))
+                    failure_code = worker.get("failure_code")
                     node_id = worker.get("node_id")
                     node_label = worker.get("node_label") or "node-unknown"
                     if node_id and (node_label == "node-unknown" or not node_label):
@@ -529,6 +616,8 @@ class RuntimeGateway:
                         node_label=node_label,
                         state=worker["state"],
                         last_heartbeat_at=heartbeat,
+                        disconnected_at=disconnected_at,
+                        failure_code=failure_code,
                         node_id=node_id,
                         allocation_id=worker.get("allocation_id"),
                     )
@@ -553,6 +642,8 @@ class RuntimeGateway:
                             state=worker["state"],
                             connected_at=connected_at,
                             last_heartbeat_at=heartbeat,
+                            disconnected_at=disconnected_at,
+                            failure_code=failure_code,
                             node_id=node_id,
                             allocation_id=worker.get("allocation_id"),
                         )
@@ -577,9 +668,10 @@ class RuntimeGateway:
         self._attempt_snapshots[attempt_id] = reconciled
         self._cached_snapshot.update(reconciled)
         cursor = self.get_cursor(attempt_id)
-        cursor.authoritative_snapshot_seq = snap_seq
-        cursor.highest_contiguous_seq = snap_seq
-        cursor.max_seen_seq = max(cursor.max_seen_seq, snap_seq)
+        if snap_seq is not None:
+            cursor.authoritative_snapshot_seq = snap_seq
+            cursor.highest_contiguous_seq = max(cursor.highest_contiguous_seq or 0, snap_seq)
+            cursor.max_seen_seq = max(cursor.max_seen_seq, snap_seq)
         cursor.gap_fenced = False
         cursor.stale = False
         cursor.observed_at = observed_at
@@ -674,6 +766,22 @@ class RuntimeGateway:
                     else occurred_at_raw
                 )
 
+        # Preflight: check sequence continuity BEFORE mutating projection
+        is_contiguous = True
+        if attempt_id is not None and seq is not None:
+            cursor = self.get_cursor(attempt_id)
+            expected = (
+                (cursor.highest_contiguous_seq + 1)
+                if cursor.highest_contiguous_seq is not None
+                else (
+                    cursor.authoritative_snapshot_seq + 1
+                    if cursor.authoritative_snapshot_seq is not None
+                    else 1
+                )
+            )
+            if seq != expected:
+                is_contiguous = False
+
         try:
             from pbl4.management_backend import db
             from pbl4.management_backend.services import event_ingest
@@ -691,22 +799,66 @@ class RuntimeGateway:
                     source_component=source_component,
                     payload=event_payload,
                 )
-                if ingest_result.inserted:
+                if ingest_result.inserted and is_contiguous:
                     self._project_runtime_event(conn, payload)
             if ingest_result.inserted and attempt_id is not None:
                 with db.get_connection() as conn:
                     self.record_event_seq(attempt_id, seq, conn)
-                event_ingest.broadcast_runtime_event(
-                    attempt_id=attempt_id,
-                    runtime_event_seq=seq,
-                    event_type=event_type,
-                    severity=severity,
-                    occurred_at=occurred_at,
-                    source_component=source_component,
-                    payload=event_payload,
-                )
+                if is_contiguous:
+                    event_ingest.broadcast_runtime_event(
+                        attempt_id=attempt_id,
+                        runtime_event_seq=seq,
+                        event_type=event_type,
+                        severity=severity,
+                        occurred_at=occurred_at,
+                        source_component=source_component,
+                        payload=event_payload,
+                    )
+        except event_ingest.ConflictingEventPayloadError:
+            raise
         except Exception as exc:
             logger.exception("Failed to ingest runtime event: %s", exc)
+
+    @staticmethod
+    def _project_attempt_state_transition(
+        conn: Any,
+        attempt_id: str,
+        new_state: str,
+        *,
+        occurred_at: datetime,
+        failure_code: str | None = None,
+        failure_message: str | None = None,
+        runtime_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Unified projection helper for Attempt state transitions across events and snapshots."""
+        from pbl4.management_backend.repositories import attempt_repository
+        from pbl4.management_backend.services import allocation_service
+
+        updated = attempt_repository.update_attempt_state(
+            conn,
+            attempt_id,
+            new_state,
+            started_at=occurred_at if new_state == "RUNNING" else None,
+            ended_at=occurred_at if new_state in attempt_repository.TERMINAL_ATTEMPT_STATES else None,
+            failure_code=failure_code,
+            failure_message=failure_message,
+            runtime_metadata=runtime_metadata,
+        )
+        effective_state = new_state
+        if isinstance(updated, dict) and updated.get("state"):
+            effective_state = updated["state"]
+        if (
+            effective_state in attempt_repository.TERMINAL_ATTEMPT_STATES
+            and new_state in attempt_repository.TERMINAL_ATTEMPT_STATES
+        ):
+            allocation_service.cleanup_allocations_for_attempt(
+                conn,
+                attempt_id,
+                now=occurred_at,
+                failure_code=failure_code or "ATTEMPT_TERMINATED",
+                failure_message=failure_message or f"Attempt transitioned to {effective_state}",
+            )
+        return updated
 
     @staticmethod
     def _project_runtime_event(conn: Any, payload: dict[str, Any]) -> None:
@@ -724,23 +876,14 @@ class RuntimeGateway:
         if event_type == "attempt.state_changed":
             state = details.get("state")
             if isinstance(state, str):
-                attempt_repository.update_attempt_state(
+                RuntimeGateway._project_attempt_state_transition(
                     conn,
                     attempt_id,
                     state,
-                    started_at=occurred_at if state == "RUNNING" else None,
-                    ended_at=occurred_at if state in {"COMPLETED", "FAILED", "ABORTED"} else None,
+                    occurred_at=occurred_at,
+                    failure_code=details.get("failure_code"),
+                    failure_message=details.get("failure_message"),
                 )
-                if state in {"COMPLETED", "FAILED", "ABORTED"}:
-                    from pbl4.management_backend.services import allocation_service
-
-                    allocation_service.cleanup_allocations_for_attempt(
-                        conn,
-                        attempt_id,
-                        now=occurred_at,
-                        failure_code=details.get("failure_code") or "ATTEMPT_TERMINATED",
-                        failure_message=details.get("failure_message") or f"Attempt transitioned to {state}",
-                    )
             return
         if event_type == "step.started":
             step_id = int(details["step_id"])

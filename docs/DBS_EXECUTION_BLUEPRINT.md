@@ -57,7 +57,7 @@
    - *Source*: [AGENTS.md#Rule-3](../AGENTS.md), [docs/DBS_DESIGN.md §10](../docs/DBS_DESIGN.md#L254-L285).
 
 5. **No State Machine Extensions & No DB Schema Changes**:
-   - Coordinator states: `CREATED -> WAITING_WORKERS -> PROVISIONING -> INITIALIZING -> RUNNING -> COMPLETING -> COMPLETED`.
+   - Coordinator states: `CREATED -> WAITING_WORKERS -> PROVISIONING -> INITIALIZING -> RUNNING -> COMPLETED`.
    - WorkerSession states: `CONNECTING -> REGISTERING -> PROVISIONING -> SHARD_READY -> MODEL_SYNCING -> READY`.
    - Step states: `COLLECTING_GRADIENTS -> AGGREGATING -> UPDATING -> WAITING_PARAMETER_APPLIED -> CHECKPOINTING -> COMMITTED`.
    - No DB tables or new DB columns for DBS metrics.

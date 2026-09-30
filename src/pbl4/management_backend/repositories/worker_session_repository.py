@@ -138,6 +138,8 @@ def update_snapshot_projection(
     node_label: str,
     state: str,
     last_heartbeat_at: datetime | None,
+    disconnected_at: datetime | None = None,
+    failure_code: str | None = None,
     node_id: str | None = None,
     allocation_id: str | None = None,
 ) -> dict | None:
@@ -153,6 +155,8 @@ def update_snapshot_projection(
             SET node_label = %s,
                 state = %s,
                 last_heartbeat_at = COALESCE(%s, last_heartbeat_at),
+                disconnected_at = COALESCE(%s, disconnected_at),
+                failure_code = COALESCE(%s, failure_code),
                 node_id = COALESCE(%s, node_id),
                 allocation_id = COALESCE(%s, allocation_id)
             WHERE session_id = %s AND attempt_id = %s AND worker_id = %s
@@ -162,6 +166,8 @@ def update_snapshot_projection(
                 node_label,
                 state,
                 last_heartbeat_at,
+                disconnected_at,
+                failure_code,
                 node_id,
                 allocation_id,
                 session_id,

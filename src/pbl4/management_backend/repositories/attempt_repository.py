@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
@@ -18,7 +18,6 @@ ACTIVE_ATTEMPT_STATES = {
     "PROVISIONING",
     "INITIALIZING",
     "RUNNING",
-    "COMPLETING",
 }
 ABORTABLE_ATTEMPT_STATES = {
     "CREATED",
@@ -28,6 +27,29 @@ ABORTABLE_ATTEMPT_STATES = {
     "RUNNING",
 }
 TERMINAL_ATTEMPT_STATES = {"COMPLETED", "FAILED", "ABORTED"}
+
+ATTEMPT_STATE_PROGRESSION: dict[str, int] = {
+    "CREATED": 0,
+    "WAITING_WORKERS": 1,
+    "PROVISIONING": 2,
+    "INITIALIZING": 3,
+    "RUNNING": 4,
+}
+
+
+def is_valid_attempt_transition(current_state: str, new_state: str) -> bool:
+    """Validate Attempt state machine transitions and enforce terminal state monotonicity."""
+    if current_state == new_state:
+        return True
+    if current_state in TERMINAL_ATTEMPT_STATES:
+        return False
+    if new_state in TERMINAL_ATTEMPT_STATES:
+        return True
+    curr_rank = ATTEMPT_STATE_PROGRESSION.get(current_state)
+    new_rank = ATTEMPT_STATE_PROGRESSION.get(new_state)
+    if curr_rank is not None and new_rank is not None:
+        return new_rank >= curr_rank
+    return False
 
 
 def _row_to_dict(row: dict) -> dict:
@@ -137,15 +159,37 @@ def update_attempt_state(
     failure_message: str | None = None,
     runtime_metadata: dict | None = None,
 ) -> dict | None:
+    current = get_attempt(conn, attempt_id)
+    if current is None:
+        return None
+
+    current_state = current.get("state") if isinstance(current, dict) else getattr(current, "state", None)
+    if current_state and not is_valid_attempt_transition(current_state, new_state):
+        logger.warning(
+            "Attempt %s: ignoring invalid state transition '%s' -> '%s' (terminal monotonicity violated or backward transition)",
+            attempt_id,
+            current_state,
+            new_state,
+        )
+        return current
+
     sets = ["state = %s"]
     params: list[Any] = [new_state]
 
     if started_at is not None:
         sets.append("started_at = %s")
         params.append(started_at)
+    elif new_state == "RUNNING" and current.get("started_at") is None:
+        sets.append("started_at = %s")
+        params.append(datetime.now(UTC))
+
     if ended_at is not None:
         sets.append("ended_at = %s")
         params.append(ended_at)
+    elif new_state in TERMINAL_ATTEMPT_STATES and current.get("ended_at") is None:
+        sets.append("ended_at = %s")
+        params.append(datetime.now(UTC))
+
     if failure_code is not None:
         sets.append("failure_code = %s")
         params.append(failure_code)
@@ -173,7 +217,7 @@ def get_active_attempt(conn: psycopg.Connection) -> dict | None:
             SELECT * FROM attempts
             WHERE state IN (
                 'CREATED', 'WAITING_WORKERS', 'PROVISIONING',
-                'INITIALIZING', 'RUNNING', 'COMPLETING'
+                'INITIALIZING', 'RUNNING'
             )
             LIMIT 1
             """
