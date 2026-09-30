@@ -154,17 +154,22 @@ class RuntimeGateway:
                 },
             )
         elif seq == expected:
-            cursor.highest_contiguous_seq = seq
-            # Drain contiguous cursor through any pre-persisted events in DB and project them
-            has_projected_drained = False
+            # Persisted events are not applied until their projection commits.  The
+            # arriving event and any buffered successors use the same path, so a
+            # duplicate delivery can retry a previously failed projection.
+            from pbl4.management_backend.services import event_ingest
+
             while True:
-                next_seq = cursor.highest_contiguous_seq + 1
+                next_seq = expected
+                if next_seq > cursor.max_seen_seq:
+                    break
                 try:
                     next_ev = event_repository.get_event_by_seq(
                         conn, attempt_id, next_seq
                     )
-                except Exception:
-                    next_ev = None
+                except Exception as read_err:
+                    logger.warning("Failed to read event %s for projection: %s", next_seq, read_err)
+                    break
                 if next_ev is not None:
                     details = next_ev.get("payload_jsonb")
                     if isinstance(details, str):
@@ -191,30 +196,33 @@ class RuntimeGateway:
                     }
                     try:
                         self._project_runtime_event(conn, next_payload)
-                        has_projected_drained = True
-                        from pbl4.management_backend.services import event_ingest
-                        event_ingest.broadcast_runtime_event(
-                            attempt_id=attempt_id,
-                            runtime_event_seq=next_seq,
-                            event_type=next_ev.get("event_type"),
-                            severity=next_ev.get("severity", "INFO"),
-                            occurred_at=occurred_at_val if isinstance(occurred_at_val, datetime) else datetime.now(UTC),
-                            source_component=next_ev.get("source_component", "Runtime"),
-                            payload=details,
-                        )
+                        conn.commit()
                     except Exception as proj_err:
                         logger.warning("Failed to project drained event %s: %s", next_seq, proj_err)
-                    cursor.highest_contiguous_seq += 1
+                        conn.rollback()
+                        break
+                    cursor.highest_contiguous_seq = next_seq
+                    expected = next_seq + 1
+                    event_ingest.broadcast_runtime_event(
+                        attempt_id=attempt_id,
+                        runtime_event_seq=next_seq,
+                        event_type=next_ev.get("event_type"),
+                        severity=next_ev.get("severity", "INFO"),
+                        occurred_at=(
+                            occurred_at_val
+                            if isinstance(occurred_at_val, datetime)
+                            else datetime.now(UTC)
+                        ),
+                        source_component=next_ev.get("source_component", "Runtime"),
+                        payload=details,
+                    )
                 else:
                     break
 
-            if has_projected_drained and hasattr(conn, "commit"):
-                try:
-                    conn.commit()
-                except Exception:
-                    pass
-
-            if cursor.highest_contiguous_seq >= cursor.max_seen_seq:
+            if (
+                cursor.highest_contiguous_seq is not None
+                and cursor.highest_contiguous_seq >= cursor.max_seen_seq
+            ):
                 if cursor.gap_fenced:
                     logger.info(
                         "Event gap closed for attempt %s; contiguous cursor at %s",
@@ -799,19 +807,7 @@ class RuntimeGateway:
                     source_component=source_component,
                     payload=event_payload,
                 )
-                if ingest_result.inserted and is_contiguous:
-                    self._project_runtime_event(conn, payload)
-            if ingest_result.inserted and attempt_id is not None:
-                if is_contiguous:
-                    event_ingest.broadcast_runtime_event(
-                        attempt_id=attempt_id,
-                        runtime_event_seq=seq,
-                        event_type=event_type,
-                        severity=severity,
-                        occurred_at=occurred_at,
-                        source_component=source_component,
-                        payload=event_payload,
-                    )
+            if attempt_id is not None and (ingest_result.inserted or is_contiguous):
                 with db.get_connection() as conn:
                     self.record_event_seq(attempt_id, seq, conn)
         except event_ingest.ConflictingEventPayloadError:

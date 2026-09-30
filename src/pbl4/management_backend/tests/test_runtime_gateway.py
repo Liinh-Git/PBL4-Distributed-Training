@@ -24,15 +24,23 @@ from pbl4.management_protocol.messages import CommandResult, McpEnvelope
 
 def test_runtime_event_cursors_are_scoped_per_attempt() -> None:
     gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
+    conn = MagicMock()
+
+    def event_for_attempt(_conn: Any, attempt_id: str, seq: int) -> dict[str, Any] | None:
+        if (attempt_id, seq) == ("attempt-b", 1):
+            return {"event_type": "attempt.state_changed", "payload_jsonb": {"state": "RUNNING"}}
+        return None
+
     with (
         patch(
             "pbl4.management_backend.repositories.event_repository.get_event_by_seq",
-            return_value=None,
+            side_effect=event_for_attempt,
         ),
+        patch.object(gateway, "_project_runtime_event"),
         patch("pbl4.management_backend.websocket.hub.broadcast_sync"),
     ):
-        gateway.record_event_seq("attempt-a", 125, object())
-        gateway.record_event_seq("attempt-b", 1, object())
+        gateway.record_event_seq("attempt-a", 125, conn)
+        gateway.record_event_seq("attempt-b", 1, conn)
 
     cursor_a = gateway.get_cursor("attempt-a")
     cursor_b = gateway.get_cursor("attempt-b")
@@ -643,10 +651,18 @@ def test_missing_event_arrival_drains_gap_and_reconciles_db_projection() -> None
         "severity": "INFO",
         "occurred_at": datetime.now(UTC),
         "source_component": "runtime",
-        "payload": {"state": "COMPLETED"},
+        "payload_jsonb": {"state": "COMPLETED"},
     }
 
     def fake_get_event_by_seq(_conn: Any, _attempt_id: str, seq: int) -> dict[str, Any] | None:
+        if seq == 101:
+            return {
+                "event_type": event_101_payload["event_type"],
+                "severity": event_101_payload["severity"],
+                "occurred_at": datetime.fromisoformat(event_101_payload["occurred_at"]),
+                "source_component": event_101_payload["source_component"],
+                "payload_jsonb": event_101_payload["details"],
+            }
         if seq == 102:
             return db_event_102
         return None
@@ -684,6 +700,88 @@ def test_missing_event_arrival_drains_gap_and_reconciles_db_projection() -> None
     assert cursor.highest_contiguous_seq == 102
     assert cursor.max_seen_seq == 102
     assert cursor.gap_fenced is False
+
+
+def test_failed_projection_stops_cursor_and_retries_buffered_events() -> None:
+    gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
+    cursor = gateway.get_cursor("attempt-retry")
+    cursor.highest_contiguous_seq = 100
+    cursor.max_seen_seq = 100
+    conn = MagicMock()
+
+    @contextmanager
+    def connection():
+        yield conn
+
+    def event(seq: int) -> dict[str, Any]:
+        return {
+            "attempt_id": "attempt-retry",
+            "job_id": "job-1",
+            "runtime_event_seq": seq,
+            "event_type": "step.started",
+            "event_schema_version": 1,
+            "severity": "INFO",
+            "occurred_at": datetime.now(UTC).isoformat(),
+            "source_component": "runtime",
+            "details": {"step_id": seq},
+        }
+
+    rows = {
+        seq: {
+            "event_type": "step.started",
+            "severity": "INFO",
+            "occurred_at": datetime.now(UTC),
+            "source_component": "runtime",
+            "payload_jsonb": {"step_id": seq},
+        }
+        for seq in (101, 102)
+    }
+    event_101 = event(101)
+    projected: list[int] = []
+    fail_once = True
+
+    def project(_conn: Any, payload: dict[str, Any]) -> None:
+        nonlocal fail_once
+        projected.append(payload["runtime_event_seq"])
+        if fail_once:
+            fail_once = False
+            raise RuntimeError("projection failed")
+
+    with (
+        patch("pbl4.management_backend.db.transaction", connection),
+        patch("pbl4.management_backend.db.get_connection", connection),
+        patch(
+            "pbl4.management_backend.services.event_ingest.ingest_runtime_event",
+            side_effect=[
+                RuntimeEventIngestResult(row=rows[102], inserted=True),
+                RuntimeEventIngestResult(row=rows[101], inserted=True),
+                RuntimeEventIngestResult(row=rows[101], inserted=False),
+            ],
+        ),
+        patch(
+            "pbl4.management_backend.repositories.event_repository.get_event_by_seq",
+            side_effect=lambda _conn, _attempt, seq: rows.get(seq),
+        ),
+        patch.object(gateway, "_project_runtime_event", side_effect=project),
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync"),
+        patch("pbl4.management_backend.services.event_ingest.broadcast_runtime_event") as broadcast,
+    ):
+        gateway.handle_runtime_event(event(102))
+        assert cursor.highest_contiguous_seq == 100
+        broadcast.assert_not_called()
+
+        gateway.handle_runtime_event(event_101)
+        assert cursor.highest_contiguous_seq == 100
+        assert cursor.gap_fenced is True
+        assert projected == [101]
+        broadcast.assert_not_called()
+        conn.rollback.assert_called_once()
+
+        gateway.handle_runtime_event(event_101)
+        assert cursor.highest_contiguous_seq == 102
+        assert cursor.gap_fenced is False
+        assert projected == [101, 101, 102]
+        assert [call.kwargs["runtime_event_seq"] for call in broadcast.call_args_list] == [101, 102]
 
 
 def test_authoritative_snapshot_reconciles_gap_and_unfences_projection() -> None:
@@ -749,7 +847,11 @@ def test_authoritative_snapshot_reconciles_gap_and_unfences_projection() -> None
         ),
         patch(
             "pbl4.management_backend.repositories.event_repository.get_event_by_seq",
-            return_value=None,
+            return_value={
+                "event_type": event_106["event_type"],
+                "occurred_at": datetime.fromisoformat(event_106["occurred_at"]),
+                "payload_jsonb": event_106["details"],
+            },
         ),
         patch.object(
             gateway,
@@ -786,6 +888,7 @@ def test_duplicate_event_idempotency_and_conflict_raises_integrity_error() -> No
         "source_component": "runtime",
         "details": {"state": "RUNNING"},
     }
+    gateway.get_cursor("attempt-dup").highest_contiguous_seq = 1
 
     # Case 1: Identical duplicate (ingest_runtime_event returns inserted=False)
     with (
@@ -994,4 +1097,3 @@ def test_attempt_state_transition_validation() -> None:
     for active in ["CREATED", "WAITING_WORKERS", "PROVISIONING", "INITIALIZING", "RUNNING"]:
         assert is_valid_attempt_transition(active, "FAILED") is True
         assert is_valid_attempt_transition(active, "ABORTED") is True
-
