@@ -669,6 +669,7 @@ def test_missing_event_arrival_drains_gap_and_reconciles_db_projection() -> None
         ),
         patch.object(gateway, "_project_runtime_event", side_effect=fake_project),
         patch("pbl4.management_backend.websocket.hub.broadcast_sync"),
+        patch("pbl4.management_backend.services.event_ingest.broadcast_runtime_event") as broadcast,
     ):
         gateway.handle_runtime_event(event_101_payload)
 
@@ -677,6 +678,7 @@ def test_missing_event_arrival_drains_gap_and_reconciles_db_projection() -> None
     assert len(projected_events) == 2
     assert projected_events[0]["runtime_event_seq"] == 101
     assert projected_events[1]["runtime_event_seq"] == 102
+    assert [call.kwargs["runtime_event_seq"] for call in broadcast.call_args_list] == [101, 102]
     # 2. Cursor continuity reconciled and un-fenced
     cursor = gateway.get_cursor("attempt-gap-2")
     assert cursor.highest_contiguous_seq == 102
@@ -992,5 +994,4 @@ def test_attempt_state_transition_validation() -> None:
     for active in ["CREATED", "WAITING_WORKERS", "PROVISIONING", "INITIALIZING", "RUNNING"]:
         assert is_valid_attempt_transition(active, "FAILED") is True
         assert is_valid_attempt_transition(active, "ABORTED") is True
-
 

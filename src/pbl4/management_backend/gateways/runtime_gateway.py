@@ -802,8 +802,6 @@ class RuntimeGateway:
                 if ingest_result.inserted and is_contiguous:
                     self._project_runtime_event(conn, payload)
             if ingest_result.inserted and attempt_id is not None:
-                with db.get_connection() as conn:
-                    self.record_event_seq(attempt_id, seq, conn)
                 if is_contiguous:
                     event_ingest.broadcast_runtime_event(
                         attempt_id=attempt_id,
@@ -814,6 +812,8 @@ class RuntimeGateway:
                         source_component=source_component,
                         payload=event_payload,
                     )
+                with db.get_connection() as conn:
+                    self.record_event_seq(attempt_id, seq, conn)
         except event_ingest.ConflictingEventPayloadError:
             raise
         except Exception as exc:
