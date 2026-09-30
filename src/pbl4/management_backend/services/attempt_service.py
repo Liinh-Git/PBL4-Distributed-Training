@@ -169,6 +169,7 @@ def _handle_command_outcome(
     effective_key: str,
     success_response_payload: dict[str, Any],
     default_reject_code: str = "COMMAND_REJECTED",
+    cleanup_failed_start: bool = False,
 ) -> None:
     cmd_state = cmd_result["state"]
     if cmd_state in ("REJECTED", "FAILED"):
@@ -178,7 +179,7 @@ def _handle_command_outcome(
             or res.get("reason")
             or f"Command '{command_id}' was {cmd_state.lower()} by Runtime."
         )
-        runtime_code = res.get("code")
+        runtime_code = res.get("result_code") or res.get("code")
         fallback_code = default_reject_code if cmd_state == "REJECTED" else "COMMAND_FAILED"
         err_code = runtime_code if runtime_code in PUBLIC_COMMAND_ERROR_CODES else fallback_code
         details = (
@@ -194,6 +195,30 @@ def _handle_command_outcome(
             }
         }
         with db_module.transaction() as conn:
+            if cleanup_failed_start:
+                now = datetime.now(UTC)
+                attempt_repository.update_attempt_state(
+                    conn,
+                    target_id,
+                    new_state="FAILED",
+                    ended_at=now,
+                    failure_code=err_code,
+                    failure_message=err_msg,
+                )
+                command_repository.update_command_state(
+                    conn,
+                    command_id=command_id,
+                    new_state=cmd_state,
+                    completed_at=now,
+                    result=res,
+                )
+                AllocationService.cleanup_allocations_for_attempt(
+                    conn,
+                    target_id,
+                    now=now,
+                    failure_code=err_code,
+                    failure_message=err_msg,
+                )
             idempotency.complete_record(
                 conn,
                 endpoint_semantic_scope=scope,
@@ -974,16 +999,13 @@ def _cleanup_and_fail_attempt(
                 "attempt_id": attempt_id,
             },
         )
-        try:
-            AllocationService.cleanup_allocations_for_attempt(
-                conn,
-                attempt_id,
-                now=now,
-                failure_code=failure_code,
-                failure_message=failure_message,
-            )
-        except Exception as alloc_exc:
-            logger.error("Failed to cleanup allocations for attempt %s: %s", attempt_id, alloc_exc)
+        AllocationService.cleanup_allocations_for_attempt(
+            conn,
+            attempt_id,
+            now=now,
+            failure_code=failure_code,
+            failure_message=failure_message,
+        )
 
         if is_dispatch_failure:
             idempotency.record_dispatch_failure(
@@ -1010,6 +1032,21 @@ def _cleanup_and_fail_attempt(
                 command_id=command_id,
                 resource_id=attempt_id,
             )
+
+
+def _record_unconfirmed_start(
+    db_module: Any, *, attempt_id: str, command_id: str, effective_key: str, scope: str
+) -> None:
+    # A lost COMMAND_RESULT does not prove Runtime rejected START_ATTEMPT.
+    # Preserve the active Attempt and allocations for snapshot reconciliation.
+    with db_module.transaction() as conn:
+        idempotency.record_dispatch_failure(
+            conn,
+            endpoint_semantic_scope=scope,
+            idempotency_key=effective_key,
+            command_id=command_id,
+            resource_id=attempt_id,
+        )
 
 
 def _dispatch_workers_for_attempt(
@@ -1251,34 +1288,27 @@ def execute_start_job(
             attempt_id,
             exc,
         )
-        _cleanup_and_fail_attempt(
+        _record_unconfirmed_start(
             db_module,
             attempt_id=attempt_id,
             command_id=command_id,
             effective_key=effective_key,
             scope="JOB_START",
-            failure_code="RUNTIME_UNAVAILABLE",
-            failure_message=str(exc),
-            is_dispatch_failure=True,
         )
         raise
     except Exception as exc:
-        err_code = getattr(exc, "code", "RUNTIME_UNAVAILABLE")
         logger.warning(
             "Runtime dispatch failed with exception for start_job cmd=%s attempt=%s: %s",
             command_id,
             attempt_id,
             exc,
         )
-        _cleanup_and_fail_attempt(
+        _record_unconfirmed_start(
             db_module,
             attempt_id=attempt_id,
             command_id=command_id,
             effective_key=effective_key,
             scope="JOB_START",
-            failure_code=err_code,
-            failure_message=str(exc),
-            is_dispatch_failure=True,
         )
         raise
 
@@ -1293,6 +1323,7 @@ def execute_start_job(
             effective_key=effective_key,
             success_response_payload={},
             default_reject_code="ACTIVE_ATTEMPT_EXISTS",
+            cleanup_failed_start=True,
         )
 
     # Runtime ACCEPTED -> Dispatch START_WORKER to selected Nodes
@@ -1429,34 +1460,27 @@ def execute_retry_job(
             attempt_id,
             exc,
         )
-        _cleanup_and_fail_attempt(
+        _record_unconfirmed_start(
             db_module,
             attempt_id=attempt_id,
             command_id=command_id,
             effective_key=effective_key,
             scope="JOB_RETRY",
-            failure_code="RUNTIME_UNAVAILABLE",
-            failure_message=str(exc),
-            is_dispatch_failure=True,
         )
         raise
     except Exception as exc:
-        err_code = getattr(exc, "code", "RUNTIME_UNAVAILABLE")
         logger.warning(
             "Runtime dispatch failed with exception for retry_job cmd=%s attempt=%s: %s",
             command_id,
             attempt_id,
             exc,
         )
-        _cleanup_and_fail_attempt(
+        _record_unconfirmed_start(
             db_module,
             attempt_id=attempt_id,
             command_id=command_id,
             effective_key=effective_key,
             scope="JOB_RETRY",
-            failure_code=err_code,
-            failure_message=str(exc),
-            is_dispatch_failure=True,
         )
         raise
 
@@ -1471,6 +1495,7 @@ def execute_retry_job(
             effective_key=effective_key,
             success_response_payload={},
             default_reject_code="ACTIVE_ATTEMPT_EXISTS",
+            cleanup_failed_start=True,
         )
 
     # Runtime ACCEPTED -> Dispatch START_WORKER to selected Nodes
@@ -1608,34 +1633,27 @@ def execute_resume_job(
             attempt_id,
             exc,
         )
-        _cleanup_and_fail_attempt(
+        _record_unconfirmed_start(
             db_module,
             attempt_id=attempt_id,
             command_id=command_id,
             effective_key=effective_key,
             scope="JOB_RESUME",
-            failure_code="RUNTIME_UNAVAILABLE",
-            failure_message=str(exc),
-            is_dispatch_failure=True,
         )
         raise
     except Exception as exc:
-        err_code = getattr(exc, "code", "RUNTIME_UNAVAILABLE")
         logger.warning(
             "Runtime dispatch failed with exception for resume_job cmd=%s attempt=%s: %s",
             command_id,
             attempt_id,
             exc,
         )
-        _cleanup_and_fail_attempt(
+        _record_unconfirmed_start(
             db_module,
             attempt_id=attempt_id,
             command_id=command_id,
             effective_key=effective_key,
             scope="JOB_RESUME",
-            failure_code=err_code,
-            failure_message=str(exc),
-            is_dispatch_failure=True,
         )
         raise
 
@@ -1650,6 +1668,7 @@ def execute_resume_job(
             effective_key=effective_key,
             success_response_payload={},
             default_reject_code="CHECKPOINT_NOT_COMPLETE",
+            cleanup_failed_start=True,
         )
 
     # Runtime ACCEPTED -> Dispatch START_WORKER to selected Nodes
