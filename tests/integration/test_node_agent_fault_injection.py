@@ -311,12 +311,15 @@ class TestFaultInvariant2BackendRestart(unittest.TestCase):
 
             ack_frame = DTPFrame.read_from(client_sock, recv_exact)
             self.assertEqual(ack_frame.header.message_type, MESSAGE_TYPE_HELLO_ACK)
+            ack = decode_control_message(ack_frame.header.message_type, ack_frame.payload)
             self.assertEqual(len(self.server.worker_ids()), 1)
 
             # Step 2: Simulate Backend down — Management control plane is unavailable
             # Meanwhile, Worker continues to transmit DTP frames to Runtime
             ready = ShardReady.from_dict(_valid_shard_ready_dict(shard_id=0))
-            ready_frame = build_control_frame(ready, session_id=1, worker_id=0)
+            ready_frame = build_control_frame(
+                ready, session_id=int(ack.session_id), worker_id=int(ack.worker_id)
+            )
             ready_frame.write_to(client_sock, send_all)
 
             time.sleep(0.1)
@@ -334,7 +337,9 @@ class TestFaultInvariant2BackendRestart(unittest.TestCase):
                     "monotonic_timestamp_ms": 1000.0,
                 }
             )
-            hb_frame = build_control_frame(hb, session_id=1, worker_id=0)
+            hb_frame = build_control_frame(
+                hb, session_id=int(ack.session_id), worker_id=int(ack.worker_id)
+            )
             hb_frame.write_to(client_sock, send_all)
 
             time.sleep(0.1)
@@ -791,10 +796,13 @@ class TestParameterServerLivenessDuplicateFix(unittest.TestCase):
 
             ack_frame = DTPFrame.read_from(s, recv_exact)
             self.assertEqual(ack_frame.header.message_type, MESSAGE_TYPE_HELLO_ACK)
+            ack = decode_control_message(ack_frame.header.message_type, ack_frame.payload)
 
             # Send ShardReady
             ready = ShardReady.from_dict(_valid_shard_ready_dict(shard_id=0))
-            frame1 = build_control_frame(ready, session_id=1, worker_id=0)
+            frame1 = build_control_frame(
+                ready, session_id=int(ack.session_id), worker_id=int(ack.worker_id)
+            )
             frame1.write_to(s, send_all)
             time.sleep(0.05)
 
@@ -818,7 +826,9 @@ class TestParameterServerLivenessDuplicateFix(unittest.TestCase):
                         "monotonic_timestamp_ms": 100.0,
                     }
                 )
-                frame2 = build_control_frame(hb, session_id=1, worker_id=0)
+                frame2 = build_control_frame(
+                    hb, session_id=int(ack.session_id), worker_id=int(ack.worker_id)
+                )
                 frame2.write_to(s, send_all)
                 time.sleep(0.05)
 
