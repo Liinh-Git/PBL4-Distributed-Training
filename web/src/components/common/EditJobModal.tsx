@@ -56,6 +56,11 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
   const [cloning, setCloning] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
+  const changeWorkloadPolicy = (policy: WorkloadPolicy) => {
+    if (policy !== workloadPolicy) setExistingWups(undefined);
+    setWorkloadPolicy(policy);
+  };
+
   // Initialize or fetch details when modal opens
   useEffect(() => {
     if (!isOpen || !job) return;
@@ -421,7 +426,7 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
                     type="button"
                     role="radio"
                     aria-checked={workloadPolicy === 'equal'}
-                    onClick={() => setWorkloadPolicy('equal')}
+                    onClick={() => changeWorkloadPolicy('equal')}
                     className={`px-3 py-2 rounded border text-left transition-all ${
                       workloadPolicy === 'equal'
                         ? 'bg-[#1e1e24] border-blue-500/70 text-[#f3f3f4]'
@@ -447,7 +452,7 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
                     type="button"
                     role="radio"
                     aria-checked={workloadPolicy === 'dbs'}
-                    onClick={() => setWorkloadPolicy('dbs')}
+                    onClick={() => changeWorkloadPolicy('dbs')}
                     className={`px-3 py-2 rounded border text-left transition-all ${
                       workloadPolicy === 'dbs'
                         ? 'bg-[#1e1e24] border-blue-500/70 text-[#f3f3f4]'

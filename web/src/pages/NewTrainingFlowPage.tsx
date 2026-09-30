@@ -62,6 +62,11 @@ export const NewTrainingFlowPage: React.FC = () => {
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
 
+  const changeWorkloadPolicy = (policy: 'equal' | 'dbs') => {
+    if (policy !== workloadPolicy) setExistingWups(undefined);
+    setWorkloadPolicy(policy);
+  };
+
   useEffect(() => {
     const loadFlowData = async () => {
       try {
@@ -764,11 +769,11 @@ export const NewTrainingFlowPage: React.FC = () => {
                 role="radio"
                 aria-checked={workloadPolicy === 'equal'}
                 tabIndex={0}
-                onClick={() => setWorkloadPolicy('equal')}
+                onClick={() => changeWorkloadPolicy('equal')}
                 onKeyDown={e => {
                   if (e.key === ' ' || e.key === 'Enter') {
                     e.preventDefault();
-                    setWorkloadPolicy('equal');
+                    changeWorkloadPolicy('equal');
                   }
                 }}
                 className={`p-3.5 rounded border cursor-pointer transition-all ${
@@ -796,11 +801,11 @@ export const NewTrainingFlowPage: React.FC = () => {
                 role="radio"
                 aria-checked={workloadPolicy === 'dbs'}
                 tabIndex={0}
-                onClick={() => setWorkloadPolicy('dbs')}
+                onClick={() => changeWorkloadPolicy('dbs')}
                 onKeyDown={e => {
                   if (e.key === ' ' || e.key === 'Enter') {
                     e.preventDefault();
-                    setWorkloadPolicy('dbs');
+                    changeWorkloadPolicy('dbs');
                   }
                 }}
                 className={`p-3.5 rounded border cursor-pointer transition-all ${

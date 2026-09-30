@@ -233,8 +233,9 @@ describe('WebUI Workload Policy Contract & Integration Tests (Bug #3)', () => {
     // 3. Must expose UI options for Equal and DBS Adaptive
     assert.match(content, /Equal/);
     assert.match(content, /DBS Adaptive/);
-    assert.match(content, /setWorkloadPolicy\('equal'\)/);
-    assert.match(content, /setWorkloadPolicy\('dbs'\)/);
+    assert.match(content, /changeWorkloadPolicy\('equal'\)/);
+    assert.match(content, /changeWorkloadPolicy\('dbs'\)/);
+    assert.match(content, /if \(policy !== workloadPolicy\) setExistingWups\(undefined\)/);
 
     // 4. Must send workload_policy in patch payload
     assert.match(content, /workload_policy:\s*workloadPolicy/);
@@ -253,8 +254,9 @@ describe('WebUI Workload Policy Contract & Integration Tests (Bug #3)', () => {
     // 2. Must expose UI options for Equal and DBS Adaptive
     assert.match(content, /Equal/);
     assert.match(content, /DBS Adaptive/);
-    assert.match(content, /setWorkloadPolicy\('equal'\)/);
-    assert.match(content, /setWorkloadPolicy\('dbs'\)/);
+    assert.match(content, /changeWorkloadPolicy\('equal'\)/);
+    assert.match(content, /changeWorkloadPolicy\('dbs'\)/);
+    assert.match(content, /if \(policy !== workloadPolicy\) setExistingWups\(undefined\)/);
 
     // 3. Must lock training strategy to strict_bsp
     assert.match(content, /training_strategy:\s*'strict_bsp'/);

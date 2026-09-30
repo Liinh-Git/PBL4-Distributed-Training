@@ -309,6 +309,49 @@ def test_dbs_invalid_k_cannot_validate_or_freeze(k):
         freeze.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("old_policy", "old_k", "patch_contract", "expected_k"),
+    [
+        ("dbs", 8, {"workload_policy": "equal"}, None),
+        ("equal", 4, {"workload_policy": "dbs"}, None),
+        ("dbs", 8, {"epochs": 20}, 8),
+        ("equal", 4, {"workload_policy": "dbs", "work_units_per_step": 6}, 6),
+        ("dbs", 8, {"work_units_per_step": None}, None),
+    ],
+)
+def test_draft_policy_change_does_not_carry_stale_k(old_policy, old_k, patch_contract, expected_k):
+    requested = {
+        "dataset_build_id": "build",
+        "model_id": "resnet18_groupnorm",
+        "training_strategy": "strict_bsp",
+        "epochs": 10,
+        "learning_rate": 0.01,
+        "training_seed": 42,
+        "workload_policy": old_policy,
+        "work_units_per_step": old_k,
+    }
+    draft = {"job_id": "job-switch", "state": "DRAFT", "requested_contract": requested}
+
+    def save(_conn, _job_id, **fields):
+        return {**draft, "requested_contract": fields["requested_contract"]}
+
+    with (
+        patch("pbl4.management_backend.services.job_service.job_repository.get_job", return_value=draft),
+        patch("pbl4.management_backend.services.job_service.job_repository.update_job", side_effect=save),
+    ):
+        updated = job_service.update_job(MagicMock(), "job-switch", requested_contract=patch_contract)
+    merged = updated["requested_contract"]
+    assert merged["workload_policy"] == patch_contract.get("workload_policy", old_policy)
+    assert merged.get("work_units_per_step") == expected_k
+
+
+def test_ready_job_policy_and_k_remain_frozen():
+    ready = {"job_id": "job-frozen", "state": "READY", "requested_contract": {"workload_policy": "dbs", "work_units_per_step": 8}}
+    with patch("pbl4.management_backend.services.job_service.job_repository.get_job", return_value=ready):
+        with pytest.raises(job_service.JobFrozenError):
+            job_service.update_job(MagicMock(), "job-frozen", requested_contract={"workload_policy": "equal"})
+
+
 def test_contract_resolver_rejects_non_positive_batch_size():
     conn = MagicMock()
     mock_build = {
