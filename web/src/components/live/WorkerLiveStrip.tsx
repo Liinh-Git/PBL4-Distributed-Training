@@ -49,8 +49,11 @@ export const WorkerLiveStrip: React.FC<WorkerLiveStripProps> = ({
   const acceptedCount = contributions.filter(c => c.contributionAccepted === true).length;
   const waitingCount = contributions.filter(c => c.contributionAccepted === false).length;
   const unknownCount = contributions.filter(c => c.contributionAccepted == null).length;
-  const hasUnknown = unknownCount > 0 || contributions.length === 0;
-  const isCommitted = currentStep?.state === 'COMMITTED' && !hasUnknown;
+  const hasUnknown = unknownCount > 0 || contributions.length < expectedWorkers;
+  const allAccepted = expectedWorkers > 0 && acceptedCount === expectedWorkers;
+  const allApplied = expectedWorkers > 0 &&
+    contributions.filter(c => c.parameterApplied === true).length === expectedWorkers;
+  const isCommitted = currentStep?.state === 'COMMITTED';
   const isDBS = workloadPolicy === 'dbs';
 
   // Presentation heuristic: Analyze recent steps for compute stragglers
@@ -66,9 +69,11 @@ export const WorkerLiveStrip: React.FC<WorkerLiveStripProps> = ({
 
   // Determine current sync status text
   let syncStatusText = '';
-  if (isCommitted) {
+  if (isCommitted && allAccepted && allApplied) {
     syncStatusText = 'All contributions synchronized · Parameters applied';
-  } else if (acceptedCount === expectedWorkers && expectedWorkers > 0) {
+  } else if (isCommitted) {
+    syncStatusText = 'Step committed · Waiting for worker telemetry projection';
+  } else if (allAccepted) {
     syncStatusText = 'All contributions received · Updating global model';
   } else if (contributions.length === 0 || (hasUnknown && acceptedCount === 0 && waitingCount === 0)) {
     syncStatusText = 'Waiting for step telemetry · Status unknown';
@@ -84,7 +89,7 @@ export const WorkerLiveStrip: React.FC<WorkerLiveStripProps> = ({
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2.5 border-b border-white/[0.07]">
         <div className="flex items-center gap-2">
           <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-            isCommitted || (acceptedCount === expectedWorkers && expectedWorkers > 0)
+            (isCommitted && allAccepted && allApplied) || allAccepted
               ? 'bg-emerald-400'
               : hasUnknown && acceptedCount === 0
               ? 'bg-zinc-500'
@@ -110,7 +115,7 @@ export const WorkerLiveStrip: React.FC<WorkerLiveStripProps> = ({
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
         {workers.map((worker) => {
           const contrib = contributions.find(c => c.workerId === worker.workerId);
-          const isReceived = contrib?.contributionAccepted === true || (isCommitted && contrib?.contributionAccepted !== false);
+          const isReceived = contrib?.contributionAccepted === true;
           const isWaiting = contrib?.contributionAccepted === false;
           const isUnknown = !isReceived && !isWaiting;
           const visual = getWorkerVisual(worker.state);
@@ -186,6 +191,14 @@ export const WorkerLiveStrip: React.FC<WorkerLiveStripProps> = ({
             </button>
           );
         })}
+        {Array.from({ length: Math.max(0, expectedWorkers) }, (_, workerId) => workerId)
+          .filter(workerId => !workers.some(worker => worker.workerId === workerId))
+          .map(workerId => (
+            <div key={workerId} className="p-2.5 rounded bg-[#171719] flex items-center justify-between text-xs">
+              <span className="text-[#a1a1a8]">Worker {workerId} · Waiting for projection</span>
+              <span className="text-zinc-500">Unknown</span>
+            </div>
+          ))}
       </div>
     </div>
   );

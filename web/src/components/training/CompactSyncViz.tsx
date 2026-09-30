@@ -23,22 +23,20 @@ export const CompactSyncViz: React.FC<CompactSyncVizProps> = ({
   // Derive synchronization metrics strictly from authoritative strategy_state when available
   const hasStrategyState = Boolean(strategyState);
 
-  const acceptedCount = hasStrategyState
-    ? (strategyState?.accepted_contribution_count ?? null)
-    : (contributions.length > 0
-        ? contributions.filter(c => c.contributionAccepted).length
-        : null);
+  const acceptedCount = strategyState?.accepted_contribution_count ??
+    (contributions.length > 0
+      ? contributions.filter(c => c.contributionAccepted === true).length
+      : null);
 
   const expectedCount = hasStrategyState
     ? (strategyState?.expected_contribution_count ?? expectedWorkers ?? null)
     : (expectedWorkers ?? null);
 
-  const isSyncComplete = hasStrategyState
-    ? Boolean(strategyState?.synchronization_complete)
-    : (currentStep?.state === 'COMMITTED');
+  const isSyncComplete = strategyState?.synchronization_complete ??
+    (currentStep?.state === 'COMMITTED');
 
   // Honest display: If neither strategyState nor contribution data is available, do not fake 3/3
-  const isTelemetryAvailable = hasStrategyState || currentStep != null;
+  const isTelemetryAvailable = hasStrategyState || contributions.length > 0 || currentStep?.state === 'COMMITTED';
 
   let statusText: string;
   let badgeColor: string;
@@ -51,9 +49,9 @@ export const CompactSyncViz: React.FC<CompactSyncVizProps> = ({
   } else if (isSyncComplete) {
     statusText = 'Synchronization complete';
     badgeColor = 'bg-emerald-400';
-    countText = expectedCount != null
-      ? `${expectedCount} of ${expectedCount} contributions applied`
-      : 'All contributions applied';
+    countText = acceptedCount != null && expectedCount != null
+      ? `${acceptedCount} of ${expectedCount} contributions received`
+      : 'Worker details awaiting projection';
   } else {
     statusText = 'Waiting for worker contributions';
     badgeColor = 'bg-amber-400';
@@ -68,7 +66,6 @@ export const CompactSyncViz: React.FC<CompactSyncVizProps> = ({
 
   // Merge observed worker sessions with expected worker slots so the display is never missing workers
   const displayWorkers = useMemo(() => {
-    const total = expectedCount ?? (workers.length > 0 ? workers.length : 3);
     const observedMap = new Map<number, any>();
     workers.forEach((w: any) => {
       const id = w.workerId ?? w.worker_id;
@@ -77,32 +74,23 @@ export const CompactSyncViz: React.FC<CompactSyncVizProps> = ({
       }
     });
 
+    const workerIds = expectedCount != null
+      ? Array.from({ length: expectedCount }, (_, id) => id)
+      : [...observedMap.keys()].sort((a, b) => a - b);
     const items = [];
-    for (let id = 0; id < total; id++) {
+    for (const id of workerIds) {
       const observed = observedMap.get(id);
       const contrib = contributions.find(c => c.workerId === id);
 
-      let itemStatus = 'Waiting';
-      let itemClass = 'text-amber-400 font-mono';
+      let itemStatus = 'Unknown';
+      let itemClass = 'text-zinc-500 font-mono';
 
-      if (isSyncComplete) {
-        itemStatus = 'Received';
-        itemClass = 'text-emerald-400 font-mono';
-      } else if (contrib?.contributionAccepted === true) {
+      if (contrib?.contributionAccepted === true) {
         itemStatus = 'Received';
         itemClass = 'text-emerald-400 font-mono';
       } else if (contrib?.contributionAccepted === false) {
         itemStatus = 'Pending';
         itemClass = 'text-amber-400 font-mono';
-      } else if (acceptedCount != null && expectedCount != null) {
-        // If strategyState tells us how many have been accepted (e.g. 2 of 3)
-        if (id < acceptedCount) {
-          itemStatus = 'Received';
-          itemClass = 'text-emerald-400 font-mono';
-        } else {
-          itemStatus = 'Waiting';
-          itemClass = 'text-amber-400 font-mono';
-        }
       }
 
       items.push({
@@ -113,7 +101,7 @@ export const CompactSyncViz: React.FC<CompactSyncVizProps> = ({
       });
     }
     return items;
-  }, [expectedCount, workers, contributions, isSyncComplete, acceptedCount]);
+  }, [expectedCount, workers, contributions]);
 
   return (
     <div className="bg-[#121214] border border-white/[0.07] rounded p-4 space-y-3 font-sans select-none">
