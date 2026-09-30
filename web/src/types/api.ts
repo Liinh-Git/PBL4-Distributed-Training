@@ -339,6 +339,8 @@ export interface DatasetBuildDeprecateResponseData {
 
 // ─── 13.0 - 19.0 Job Management ──────────────────────────────────────────────
 
+export type WorkloadPolicy = 'equal' | 'dbs';
+
 export interface RequestedContractV1 {
   dataset_build_id: string;
   model_id: string;
@@ -346,6 +348,8 @@ export interface RequestedContractV1 {
   learning_rate: number;
   training_seed: number;
   training_strategy: 'strict_bsp';
+  workload_policy?: WorkloadPolicy;
+  work_units_per_step?: number;
 }
 
 export interface RequestedContractPatchV1 {
@@ -355,6 +359,8 @@ export interface RequestedContractPatchV1 {
   learning_rate?: number;
   training_seed?: number;
   training_strategy?: 'strict_bsp';
+  workload_policy?: WorkloadPolicy;
+  work_units_per_step?: number;
 }
 
 export interface ResolvedDatasetData {
@@ -381,6 +387,11 @@ export interface ResolvedTrainingData {
   training_seed: number;
 }
 
+export interface ResolvedWorkloadData {
+  policy: 'equal' | 'dbs' | string;
+  work_units_per_step: number;
+}
+
 export interface ResolvedSynchronizationData {
   training_strategy: 'strict_bsp' | string;
   expected_workers: number;
@@ -404,6 +415,7 @@ export interface ResolvedContractV1 {
   dataset: ResolvedDatasetData;
   model: ResolvedModelData;
   training: ResolvedTrainingData;
+  workload?: ResolvedWorkloadData;
   synchronization: ResolvedSynchronizationData;
   update_policy: ResolvedUpdatePolicyData;
   checkpoint_policy: ResolvedCheckpointPolicyData;

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import {
   Save,
@@ -35,6 +35,7 @@ import { WorkerDetailDrawer } from '../components/drawers/WorkerDetailDrawer';
 import { StepInspectorDrawer } from '../components/drawers/StepInspectorDrawer';
 import { CopyableId } from '../components/common/CopyableId';
 import { AttemptStateBadge } from '../components/common/Badge';
+import { detectSlowWorkers } from '../utils/stragglerDetection';
 
 export const LiveTrainingPage: React.FC = () => {
   const [searchParams] = useSearchParams();
@@ -334,8 +335,8 @@ export const LiveTrainingPage: React.FC = () => {
             batchId: ws.batch_id,
             sampleCount: ws.sample_count,
             samples: ws.sample_count,
-            contributionAccepted: ws.contribution_accepted ?? true,
-            parameterApplied: ws.parameter_applied ?? true,
+            contributionAccepted: typeof ws.contribution_accepted === 'boolean' ? ws.contribution_accepted : undefined,
+            parameterApplied: typeof ws.parameter_applied === 'boolean' ? ws.parameter_applied : undefined,
             loss: ws.loss,
             accuracy: ws.accuracy,
             computeMs: ws.compute_ms,
@@ -349,10 +350,10 @@ export const LiveTrainingPage: React.FC = () => {
             sessionId: w.session_id,
             shardId: w.shard_id,
             batchId: st.batch_ordinal,
-            sampleCount: Math.round((st.total_sample_count || 192) / (workers.length || 1)),
-            samples: Math.round((st.total_sample_count || 192) / (workers.length || 1)),
-            contributionAccepted: true,
-            parameterApplied: true,
+            sampleCount: st.total_sample_count && workers.length ? Math.round(st.total_sample_count / workers.length) : 0,
+            samples: st.total_sample_count && workers.length ? Math.round(st.total_sample_count / workers.length) : 0,
+            contributionAccepted: undefined,
+            parameterApplied: undefined,
           }));
 
     const timing = detail?.timing;
@@ -384,6 +385,11 @@ export const LiveTrainingPage: React.FC = () => {
       workerContributions,
     };
   });
+
+  const slowWorkersMap = useMemo(
+    () => detectSlowWorkers(legacyStepsAdapter),
+    [legacyStepsAdapter]
+  );
 
   return (
     <div className="space-y-4 w-full pb-10 font-sans select-none">
@@ -724,6 +730,10 @@ export const LiveTrainingPage: React.FC = () => {
                           ? 'text-emerald-400'
                           : 'text-amber-400';
 
+                        const telemetry = slowWorkersMap.get(id);
+                        const computeTime = telemetry?.currentComputeMs ?? telemetry?.medianComputeMs;
+                        const isSlow = Boolean(telemetry?.isSlow);
+
                         rows.push(
                           <div
                             key={id}
@@ -741,9 +751,23 @@ export const LiveTrainingPage: React.FC = () => {
                             })}
                             className="py-2 flex items-center justify-between hover:text-[#f3f3f4] cursor-pointer transition-colors"
                           >
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-2 flex-wrap">
                               <span className="text-[#f3f3f4]">Worker {id}</span>
                               <span className="text-[11px] text-[#73737c]">{w.node_label || `node-${id}`}</span>
+                              {computeTime != null && (
+                                <span className="text-[10px] text-[#a1a1a8] font-mono">
+                                  · {Math.round(computeTime)}ms
+                                </span>
+                              )}
+                              {isSlow && (
+                                <span
+                                  data-testid={`slow-badge-worker-${id}`}
+                                  className="px-1.5 py-0.2 rounded text-[10px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40 inline-flex items-center"
+                                  title={`Compute straggler detected: median compute time (${Math.round(telemetry?.medianComputeMs || computeTime)}ms) > 1.5x group median`}
+                                >
+                                  Slow
+                                </span>
+                              )}
                             </div>
                             <span className={`text-[11px] font-mono ${stateColor}`}>
                               {w.state}
@@ -754,14 +778,14 @@ export const LiveTrainingPage: React.FC = () => {
                         rows.push(
                           <div
                             key={id}
-                            className="py-2 flex items-center justify-between opacity-80"
+                            className="py-2 flex items-center justify-between opacity-60"
                           >
                             <div className="flex items-center gap-2">
                               <span className="text-[#f3f3f4]">Worker {id}</span>
-                              <span className="text-[10px] text-[#73737c]">node-{id} (DTP active)</span>
+                              <span className="text-[11px] text-[#73737c]">Waiting for projection</span>
                             </div>
-                            <span className="text-[11px] font-mono text-emerald-400/80">
-                              ACTIVE (DTP)
+                            <span className="text-[11px] font-mono text-zinc-500">
+                              Not observed
                             </span>
                           </div>
                         );

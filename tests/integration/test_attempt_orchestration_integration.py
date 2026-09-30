@@ -29,7 +29,7 @@ import os
 import uuid
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import psycopg
 import pytest
@@ -42,9 +42,15 @@ from pbl4.management_backend.gateways.runtime_gateway import RuntimeGateway
 from pbl4.management_backend.repositories import (
     allocation_repository,
     attempt_repository,
+    command_repository,
     worker_session_repository,
 )
 from pbl4.management_backend.services import attempt_service
+from pbl4.management_backend.services.attempt_service import (
+    AttemptConflictError,
+    JobNotReadyError,
+    RuntimeUnavailableError,
+)
 from pbl4.management_backend.services.allocation_service import AllocationService
 from pbl4.management_backend.services.cluster_scheduler import NodeCapacityUnavailableError
 from pbl4.management_protocol.messages import StateSnapshot
@@ -323,21 +329,20 @@ def test_start_attempt_insufficient_nodes_rollback(pg_conn):
     mock_node_gw.send_start_worker.assert_not_called()
 
 
-def test_start_attempt_runtime_rejection_no_worker_dispatch(pg_conn):
-    """Verify that when Runtime REJECTS START_ATTEMPT, NO START_WORKER commands
-    are dispatched to nodes, and command error is raised.
-    """
+@pytest.mark.parametrize("runtime_state", ["REJECTED", "FAILED"])
+def test_start_attempt_runtime_rejection_no_worker_dispatch(pg_conn, runtime_state):
+    """Explicit terminal Runtime results clean up Attempt, command and allocations."""
     job_id = _create_test_job(pg_conn, expected_workers=1)
     node_0 = f"node-rej-0-{uuid.uuid4().hex[:6]}"
     _enroll_test_nodes(pg_conn, [node_0])
 
     mock_rt_gw = MagicMock()
     mock_rt_gw.send_command_and_wait_result.return_value = {
-        "state": "REJECTED",
+        "state": runtime_state,
         "command_id": "cmd-test-rej",
         "command_type": "START_ATTEMPT",
         "result": {
-            "code": "COMMAND_REJECTED",
+            "result_code": "COMMAND_REJECTED" if runtime_state == "REJECTED" else "COMMAND_FAILED",
             "message": "Parameter server out of memory",
         },
     }
@@ -353,13 +358,18 @@ def test_start_attempt_runtime_rejection_no_worker_dispatch(pg_conn):
             return_value=mock_node_gw,
         ),
     ):
-        with pytest.raises(attempt_service.CommandRejectedError) as exc_info:
+        error_type = (
+            attempt_service.CommandRejectedError
+            if runtime_state == "REJECTED"
+            else attempt_service.CommandFailedError
+        )
+        with pytest.raises(error_type) as exc_info:
             attempt_service.execute_start_job(
                 db,
                 job_id,
                 idempotency_key=f"ik-{uuid.uuid4().hex}",
             )
-        assert exc_info.value.code == "COMMAND_REJECTED"
+        assert exc_info.value.code == ("COMMAND_REJECTED" if runtime_state == "REJECTED" else "COMMAND_FAILED")
 
     # Runtime was called
     mock_rt_gw.send_command_and_wait_result.assert_called_once()
@@ -367,13 +377,30 @@ def test_start_attempt_runtime_rejection_no_worker_dispatch(pg_conn):
     # NodeControlGateway send_start_worker was NEVER called
     mock_node_gw.send_start_worker.assert_not_called()
 
-    # DB allocations remain in REQUESTED state (never dispatched)
     attempts = attempt_repository.list_attempts(pg_conn, job_id=job_id)
     assert len(attempts) == 1
     attempt_id = attempts[0]["attempt_id"]
     allocs = allocation_repository.list_for_attempt(pg_conn, attempt_id)
     assert len(allocs) == 1
-    assert allocs[0]["actual_state"] == allocation_repository.ACTUAL_STATE_REQUESTED
+    assert attempts[0]["state"] == "FAILED"
+    assert attempts[0]["failure_code"] == ("COMMAND_REJECTED" if runtime_state == "REJECTED" else "COMMAND_FAILED")
+    assert attempts[0]["failure_message"] == "Parameter server out of memory"
+    assert allocs[0]["actual_state"] == allocation_repository.ACTUAL_STATE_FAILED
+    assert not [a for a in allocation_repository.list_active(pg_conn) if a["attempt_id"] == attempt_id]
+    commands = command_repository.list_commands(pg_conn, command_type="START_ATTEMPT", target_id=attempt_id)
+    assert len(commands) == 1
+    assert commands[0]["state"] == runtime_state
+
+    mock_rt_gw.send_command_and_wait_result.return_value = {"state": "ACCEPTED"}
+    mock_node_gw.send_start_worker.return_value = True
+    with (
+        patch("pbl4.management_backend.services.attempt_service.get_gateway", return_value=mock_rt_gw),
+        patch("pbl4.management_backend.gateways.node_control_gateway.get_node_control_gateway", return_value=mock_node_gw),
+    ):
+        retry_attempt, _ = attempt_service.execute_start_job(
+            db, job_id, idempotency_key=f"ik-retry-{uuid.uuid4().hex}"
+        )
+    assert retry_attempt["attempt_id"] != attempt_id
 
 
 def test_start_attempt_partial_worker_dispatch_failure(pg_conn):
@@ -443,14 +470,172 @@ def test_start_attempt_partial_worker_dispatch_failure(pg_conn):
     # Verify allocations state in DB
     attempts = attempt_repository.list_attempts(pg_conn, job_id=job_id)
     attempt_id = attempts[0]["attempt_id"]
+    assert attempts[0]["state"] == "FAILED"
+    assert attempts[0]["failure_code"] == "WORKER_SPAWN_FAILED"
+
     allocs = allocation_repository.list_for_attempt(pg_conn, attempt_id)
     alloc_map = {a["node_id"]: a for a in allocs}
 
-    # succ_node had desired_state set to STOPPED
+    # succ_node had desired_state set to STOPPED and actual_state set to FAILED
     assert alloc_map[succ_node]["desired_state"] == allocation_repository.DESIRED_STATE_STOPPED
+    assert alloc_map[succ_node]["actual_state"] == allocation_repository.ACTUAL_STATE_FAILED
     # fail_node was marked FAILED
     assert alloc_map[fail_node]["actual_state"] == allocation_repository.ACTUAL_STATE_FAILED
     assert alloc_map[fail_node]["failure_code"] == "NODE_DISPATCH_FAILED"
+
+    # Verify no active allocations remain dangling for this attempt
+    active_allocs = [
+        a for a in allocation_repository.list_active(pg_conn) if a["attempt_id"] == attempt_id
+    ]
+    assert len(active_allocs) == 0
+
+    # Verify that a subsequent start attempt is NOT blocked by ACTIVE_ATTEMPT_EXISTS
+    mock_node_gw_retry = MagicMock()
+    mock_node_gw_retry.send_start_worker.return_value = True
+    mock_node_gw_retry.send_stop_worker.return_value = True
+    mock_rt_gw_retry = MagicMock()
+    mock_rt_gw_retry.send_command_and_wait_result.return_value = {
+        "state": "ACCEPTED",
+        "command_id": "cmd-test-retry",
+        "command_type": "START_ATTEMPT",
+    }
+    with (
+        patch(
+            "pbl4.management_backend.services.attempt_service.get_gateway",
+            return_value=mock_rt_gw_retry,
+        ),
+        patch(
+            "pbl4.management_backend.gateways.node_control_gateway.get_node_control_gateway",
+            return_value=mock_node_gw_retry,
+        ),
+    ):
+        retry_attempt, retry_cmd = attempt_service.execute_start_job(
+            db,
+            job_id,
+            idempotency_key=f"ik-retry-{uuid.uuid4().hex}",
+        )
+    assert retry_attempt["state"] == "CREATED"
+
+
+def test_start_attempt_invalid_job_preflight_no_attempt_created(pg_conn):
+    """Test 1: Verify deterministic preflight validation fails BEFORE create_attempt.
+    No Attempt row, no allocations, and no START_ATTEMPT command are created.
+    """
+    job_id = _create_test_job(pg_conn, expected_workers=2)
+    # Manually transition job to ARCHIVED so it cannot be started
+    with pg_conn.cursor() as cur:
+        cur.execute("UPDATE jobs SET state = 'ARCHIVED' WHERE job_id = %s", (job_id,))
+    pg_conn.commit()
+
+    with pytest.raises(JobNotReadyError) as exc_info:
+        attempt_service.execute_start_job(
+            db,
+            job_id,
+            idempotency_key=f"ik-preflight-{uuid.uuid4().hex}",
+        )
+    assert exc_info.value.code == "JOB_NOT_READY"
+
+    # Assert directly on DB state
+    attempts = attempt_repository.list_attempts(pg_conn, job_id=job_id)
+    assert len(attempts) == 0
+
+    active_allocs = [
+        a for a in allocation_repository.list_active(pg_conn) if a.get("job_id") == job_id
+    ]
+    assert len(active_allocs) == 0
+
+    commands = command_repository.list_commands(
+        pg_conn, command_type="START_ATTEMPT", target_type="ATTEMPT", target_id=job_id
+    )
+    assert len(commands) == 0
+
+
+def test_start_attempt_lost_result_reconciles_running_snapshot(pg_conn):
+    """A lost START result must leave the Attempt recoverable by Runtime snapshot."""
+    job_id = _create_test_job(pg_conn, expected_workers=2)
+    node_0 = f"node-rtu-0-{uuid.uuid4().hex[:6]}"
+    node_1 = f"node-rtu-1-{uuid.uuid4().hex[:6]}"
+    _enroll_test_nodes(pg_conn, [node_0, node_1])
+
+    mock_rt_gw = MagicMock()
+    mock_rt_gw.send_command_and_wait_result.side_effect = RuntimeUnavailableError(
+        "MCP disconnected after Runtime accepted START_ATTEMPT"
+    )
+
+    mock_node_gw = MagicMock()
+    mock_node_gw.send_start_worker.return_value = True
+
+    with (
+        patch(
+            "pbl4.management_backend.services.attempt_service.get_gateway",
+            return_value=mock_rt_gw,
+        ),
+        patch(
+            "pbl4.management_backend.gateways.node_control_gateway.get_node_control_gateway",
+            return_value=mock_node_gw,
+        ),
+    ):
+        with pytest.raises(RuntimeUnavailableError):
+            attempt_service.execute_start_job(
+                db,
+                job_id,
+                idempotency_key=f"ik-rtu-{uuid.uuid4().hex}",
+            )
+
+    attempts = attempt_repository.list_attempts(pg_conn, job_id=job_id)
+    assert len(attempts) == 1
+    attempt_id = attempts[0]["attempt_id"]
+    assert attempts[0]["state"] == "CREATED"
+    assert attempts[0]["failure_code"] is None
+
+    cmds = command_repository.list_commands(
+        pg_conn,
+        command_type="START_ATTEMPT",
+        target_type="ATTEMPT",
+        target_id=attempt_id,
+    )
+    assert len(cmds) == 1
+    assert cmds[0]["state"] == "PENDING"
+
+    allocs = allocation_repository.list_for_attempt(pg_conn, attempt_id)
+    assert len(allocs) == 2
+    assert all(a["actual_state"] == allocation_repository.ACTUAL_STATE_REQUESTED for a in allocs)
+
+    active_allocs = [
+        a for a in allocation_repository.list_active(pg_conn) if a["attempt_id"] == attempt_id
+    ]
+    assert len(active_allocs) == 2
+
+    with pytest.raises(AttemptConflictError):
+        attempt_service.execute_start_job(
+            db, job_id, idempotency_key=f"ik-conflict-{uuid.uuid4().hex}"
+        )
+
+    gateway = RuntimeGateway()
+    gateway.handle_state_snapshot({
+        "runtime_instance_id": "rt-reconnected",
+        "active_job_id": job_id,
+        "active_attempt_id": attempt_id,
+        "attempt_state": "RUNNING",
+        "training_strategy": "strict_bsp",
+        "checkpoint_policy": "every_step",
+        "epoch": 0,
+        "current_operation_id": 1,
+        "current_batch_ordinal": 0,
+        "model_version": 0,
+        "workers": [],
+        "strategy_state": {},
+        "checkpoint_state": "IDLE",
+        "latest_checkpoint_id": None,
+        "recovery_cursor": {},
+        "dataset_build_id": "bld-1",
+        "dataset_manifest_hash": f"hash-{job_id}",
+        "last_runtime_event_seq": 1,
+        "management_event_gap_count": 0,
+        "captured_at": datetime.now(UTC).isoformat(),
+    })
+    assert attempt_repository.get_attempt(pg_conn, attempt_id)["state"] == "RUNNING"
+
 
 
 def test_retry_creates_fresh_allocations_and_tokens(pg_conn):

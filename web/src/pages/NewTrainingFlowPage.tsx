@@ -49,6 +49,9 @@ export const NewTrainingFlowPage: React.FC = () => {
   const [epochs, setEpochs] = useState<number>(20);
   const [learningRate, setLearningRate] = useState<number>(0.01);
   const [seed, setSeed] = useState<number>(42);
+  const [workloadPolicy, setWorkloadPolicy] = useState<'equal' | 'dbs'>('equal');
+  const [initialPolicy, setInitialPolicy] = useState<'equal' | 'dbs'>('equal');
+  const [existingWups, setExistingWups] = useState<number | undefined>(undefined);
   const [jobName, setJobName] = useState<string>('');
   const [jobDescription, setJobDescription] = useState<string>('');
 
@@ -58,6 +61,11 @@ export const NewTrainingFlowPage: React.FC = () => {
   const [validating, setValidating] = useState<boolean>(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+
+  const changeWorkloadPolicy = (policy: 'equal' | 'dbs') => {
+    if (policy !== workloadPolicy) setExistingWups(undefined);
+    setWorkloadPolicy(policy);
+  };
 
   useEffect(() => {
     const loadFlowData = async () => {
@@ -104,6 +112,17 @@ export const NewTrainingFlowPage: React.FC = () => {
             setEpochs(req.epochs);
             setLearningRate(req.learning_rate);
             setSeed(req.training_seed);
+            const pol =
+              req.workload_policy ||
+              (job as any).workload_policy ||
+              (job as any).resolved_contract?.workload?.policy;
+            if (pol === 'dbs' || pol === 'equal') {
+              setWorkloadPolicy(pol);
+              setInitialPolicy(pol);
+            }
+            if (req.work_units_per_step !== undefined) {
+              setExistingWups(req.work_units_per_step);
+            }
 
             const matchingBuild = loadedBuilds.find(b => b.dataset_build_id === req.dataset_build_id);
             if (matchingBuild) {
@@ -202,6 +221,10 @@ export const NewTrainingFlowPage: React.FC = () => {
   const handleProceedToReview = async () => {
     try {
       setFormError(null);
+      if (workloadPolicy === 'dbs' && (!Number.isInteger(existingWups) || (existingWups ?? 0) <= 0)) {
+        setFormError('Enter a positive whole number of work units per step for DBS. It must exceed the expected worker count.');
+        return;
+      }
       setValidating(true);
 
       const finalName = jobName.trim() || `${selectedModel} on ${currentDataset?.name || 'Dataset'}`;
@@ -221,6 +244,10 @@ export const NewTrainingFlowPage: React.FC = () => {
             learning_rate: learningRate,
             training_seed: seed,
             training_strategy: 'strict_bsp',
+            workload_policy: workloadPolicy,
+            ...((workloadPolicy === 'dbs' || workloadPolicy === initialPolicy) && existingWups !== undefined
+              ? { work_units_per_step: existingWups }
+              : {}),
           },
         });
         currentDraft = patchRes.data;
@@ -237,6 +264,10 @@ export const NewTrainingFlowPage: React.FC = () => {
             learning_rate: learningRate,
             training_seed: seed,
             training_strategy: 'strict_bsp',
+            workload_policy: workloadPolicy,
+            ...((workloadPolicy === 'dbs' || workloadPolicy === initialPolicy) && existingWups !== undefined
+              ? { work_units_per_step: existingWups }
+              : {}),
           },
         });
         currentDraft = createRes.data;
@@ -722,6 +753,103 @@ export const NewTrainingFlowPage: React.FC = () => {
             </div>
           </div>
 
+          {/* Workload Policy */}
+          <div className="p-4 bg-[#121214] border border-white/[0.07] rounded space-y-3">
+            <div>
+              <span className="text-xs font-semibold text-[#f3f3f4]">
+                Workload allocation policy
+              </span>
+              <p className="text-[11px] text-[#73737c] mt-0.5">
+                Controls how work units are distributed across workers in each synchronized step under Strict BSP.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+              <div
+                role="radio"
+                aria-checked={workloadPolicy === 'equal'}
+                tabIndex={0}
+                onClick={() => changeWorkloadPolicy('equal')}
+                onKeyDown={e => {
+                  if (e.key === ' ' || e.key === 'Enter') {
+                    e.preventDefault();
+                    changeWorkloadPolicy('equal');
+                  }
+                }}
+                className={`p-3.5 rounded border cursor-pointer transition-all ${
+                  workloadPolicy === 'equal'
+                    ? 'bg-[#171719] border-blue-500/70 shadow-xs'
+                    : 'bg-[#141416] border-white/[0.07] hover:border-white/[0.15]'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center ${
+                      workloadPolicy === 'equal' ? 'border-blue-500 bg-blue-600' : 'border-white/20'
+                    }`}
+                  >
+                    {workloadPolicy === 'equal' && <span className="w-1.5 h-1.5 rounded-full bg-white" />}
+                  </span>
+                  <span className="text-xs font-semibold text-[#f3f3f4]">Equal</span>
+                </div>
+                <p className="text-[11px] text-[#a1a1a8] mt-2 leading-relaxed">
+                  Distributes an identical workload across all workers in each step. Standard baseline under Strict BSP.
+                </p>
+              </div>
+
+              <div
+                role="radio"
+                aria-checked={workloadPolicy === 'dbs'}
+                tabIndex={0}
+                onClick={() => changeWorkloadPolicy('dbs')}
+                onKeyDown={e => {
+                  if (e.key === ' ' || e.key === 'Enter') {
+                    e.preventDefault();
+                    changeWorkloadPolicy('dbs');
+                  }
+                }}
+                className={`p-3.5 rounded border cursor-pointer transition-all ${
+                  workloadPolicy === 'dbs'
+                    ? 'bg-[#171719] border-blue-500/70 shadow-xs'
+                    : 'bg-[#141416] border-white/[0.07] hover:border-white/[0.15]'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center ${
+                      workloadPolicy === 'dbs' ? 'border-blue-500 bg-blue-600' : 'border-white/20'
+                    }`}
+                  >
+                    {workloadPolicy === 'dbs' && <span className="w-1.5 h-1.5 rounded-full bg-white" />}
+                  </span>
+                  <span className="text-xs font-semibold text-[#f3f3f4]">DBS Adaptive</span>
+                </div>
+                <p className="text-[11px] text-[#a1a1a8] mt-2 leading-relaxed">
+                  Dynamically balances work units based on worker compute speeds to prevent stragglers under Strict BSP.
+                </p>
+              </div>
+            </div>
+            {workloadPolicy === 'dbs' && (
+              <div>
+                <label htmlFor="work-units-per-step" className="block text-xs text-[#a1a1a8] mb-1">
+                  Work units per step (K)
+                </label>
+                <input
+                  id="work-units-per-step"
+                  name="work_units_per_step"
+                  type="number"
+                  min={1}
+                  step={1}
+                  required
+                  value={existingWups ?? ''}
+                  onChange={e => setExistingWups(e.target.value === '' ? undefined : Number(e.target.value))}
+                  className="w-full px-3 py-1.5 bg-[#171719] border border-white/[0.07] rounded text-xs text-[#f3f3f4] focus:border-blue-500 focus:outline-hidden"
+                />
+                <p className="text-[11px] text-[#73737c] mt-1">K must exceed the expected worker count.</p>
+              </div>
+            )}
+          </div>
+
           {/* Navigation */}
           <div className="flex items-center justify-between pt-2">
             <button
@@ -839,13 +967,14 @@ export const NewTrainingFlowPage: React.FC = () => {
             {/* Distributed Training Section */}
             <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
-                <div className="text-xs text-[#73737c]">Distributed Synchronization</div>
+                <div className="text-xs text-[#73737c]">Distributed Strategy & Workload</div>
                 <div className="text-sm font-medium text-[#f3f3f4] mt-0.5">
-                  Strict BSP
+                  Strict BSP · {workloadPolicy === 'dbs' ? 'DBS Adaptive' : 'Equal'} Workload
                 </div>
               </div>
               <div className="text-xs text-[#a1a1a8] sm:text-right">
-                {preview?.synchronization?.expected_workers || 3} expected workers · DTP v{preview?.protocols?.dtp_version ?? 1} / MCP v{preview?.protocols?.mcp_version ?? 1}
+                {preview?.synchronization?.expected_workers || 3} expected workers
+                {preview?.workload?.work_units_per_step ? ` · ${preview.workload.work_units_per_step} work units/step` : ''} · DTP v{preview?.protocols?.dtp_version ?? 1} / MCP v{preview?.protocols?.mcp_version ?? 1}
               </div>
             </div>
           </div>

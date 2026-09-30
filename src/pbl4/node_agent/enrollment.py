@@ -21,6 +21,37 @@ from pbl4.node_agent.identity import NodeIdentity
 logger = logging.getLogger(__name__)
 
 
+class EnrollmentError(RuntimeError):
+    """Raised when node enrollment fails."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        status_code: int | None = None,
+        details: Any = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.code = code
+        self.status_code = status_code
+        self.details = details
+
+    def __str__(self) -> str:
+        if self.code and self.message:
+            return f"code={self.code}\nmessage={self.message}"
+        if self.code:
+            return f"code={self.code}"
+        return self.message
+
+
+class EnrollmentConnectionError(EnrollmentError):
+    """Raised when connection to backend fails (network / timeout)."""
+
+    pass
+
+
 def enroll(
     backend_url: str,
     enrollment_code: str,
@@ -41,7 +72,8 @@ def enroll(
 
     Raises:
         ValueError: On invalid arguments or response structure.
-        RuntimeError: On HTTP error or connection failure.
+        EnrollmentError: On HTTP rejection or server error.
+        EnrollmentConnectionError: On network or connection failure.
     """
     if not isinstance(backend_url, str) or not backend_url.strip():
         raise ValueError("backend_url must be a non-empty string")
@@ -55,11 +87,12 @@ def enroll(
     }
     body_bytes = json.dumps(payload).encode("utf-8")
 
+    # Canonical transport: enrollment_code is sent strictly in JSON body.
+    # No redundant or leaky Authorization header.
     req = urllib.request.Request(
         endpoint,
         data=body_bytes,
         headers={
-            "Authorization": f"Bearer {enrollment_code}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         },
@@ -73,16 +106,75 @@ def enroll(
             status_code = response.getcode()
             response_body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
-        err_msg = f"Enrollment HTTP request failed with status {exc.code}"
-        logger.error("%s", err_msg)
-        raise RuntimeError(err_msg) from exc
+        status_code = exc.code
+        raw_body = ""
+        try:
+            raw_body = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+
+        err_code: str | None = None
+        err_msg: str | None = None
+        details: Any = None
+
+        if raw_body:
+            try:
+                body_data = json.loads(raw_body)
+                if isinstance(body_data, dict):
+                    if isinstance(body_data.get("error"), dict):
+                        err_obj = body_data["error"]
+                        err_code = err_obj.get("code")
+                        err_msg = err_obj.get("message")
+                        details = err_obj.get("details")
+                    elif "detail" in body_data:
+                        detail_obj = body_data["detail"]
+                        if isinstance(detail_obj, dict):
+                            err_code = detail_obj.get("code")
+                            err_msg = detail_obj.get("message")
+                            details = detail_obj.get("details")
+                        elif isinstance(detail_obj, str):
+                            err_msg = detail_obj
+                    elif "code" in body_data or "message" in body_data:
+                        err_code = body_data.get("code")
+                        err_msg = body_data.get("message")
+            except Exception:
+                pass
+
+        if err_code or err_msg:
+            logger.error(
+                "Enrollment failed with HTTP %d: code=%s message=%s",
+                status_code,
+                err_code,
+                err_msg,
+            )
+            raise EnrollmentError(
+                err_msg or f"HTTP request failed with status {status_code}",
+                code=err_code,
+                status_code=status_code,
+                details=details,
+            ) from exc
+
+        fallback_msg = f"HTTP request failed with status {status_code}"
+        if raw_body:
+            cleaned = raw_body.strip()
+            if len(cleaned) > 200:
+                cleaned = cleaned[:200] + "..."
+            fallback_msg = f"{fallback_msg}: {cleaned}"
+        logger.error("%s", fallback_msg)
+        raise EnrollmentError(
+            fallback_msg,
+            code=None,
+            status_code=status_code,
+        ) from exc
     except urllib.error.URLError as exc:
         err_msg = f"Failed to connect to backend for enrollment: {exc.reason}"
         logger.error("%s", err_msg)
-        raise RuntimeError(err_msg) from exc
+        raise EnrollmentConnectionError(err_msg) from exc
     except Exception as exc:
+        if isinstance(exc, EnrollmentError):
+            raise
         logger.error("Unexpected error during node enrollment: %s", exc)
-        raise RuntimeError(f"Unexpected enrollment error: {exc}") from exc
+        raise EnrollmentError(f"Unexpected enrollment error: {exc}") from exc
 
     if status_code not in (200, 201):
         raise RuntimeError(f"Unexpected status code {status_code} during node enrollment")

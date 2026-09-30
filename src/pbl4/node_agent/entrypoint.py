@@ -26,7 +26,7 @@ from collections.abc import Sequence
 from pbl4 import PACKAGE_VERSION
 from pbl4.node_agent.client import NodeAgentClient
 from pbl4.node_agent.config import NodeAgentConfig
-from pbl4.node_agent.enrollment import enroll
+from pbl4.node_agent.enrollment import EnrollmentError, enroll
 from pbl4.node_agent.identity import load_identity, save_identity
 from pbl4.node_agent.supervisor import (
     LOCAL_STATE_RUNNING,
@@ -75,7 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     enroll_parser.add_argument(
         "--force",
         action="store_true",
-        help="Force re-enrollment even if identity file already exists locally",
+        help="Re-enrollment flag (disabled to prevent duplicate/ghost nodes)",
     )
 
     # ─── start ────────────────────────────────────────────────────────────────
@@ -132,19 +132,29 @@ def cmd_enroll(args: argparse.Namespace) -> int:
     backend_url = args.backend_url or os.getenv("PBL4_BACKEND_URL", "http://127.0.0.1:8000")
     code = args.code or os.getenv("PBL4_ENROLLMENT_CODE")
 
-    if not code or not code.strip():
+    existing_identity = load_identity(var_dir)
+    if existing_identity is not None:
+        if args.force:
+            print(
+                f"Error: Node is already enrolled with node_id='{existing_identity.node_id}'. "
+                "Automatic re-enrollment with --force is disabled to prevent duplicate/ghost nodes in the cluster. "
+                "To re-enroll this host, first revoke the existing node via Management Backend "
+                "and manually delete the local identity file.",
+                file=sys.stderr,
+            )
+            return 1
         print(
-            "Error: Enrollment code is required. Provide --code <one-time-code> "
-            "or set $PBL4_ENROLLMENT_CODE.",
+            f"Node is already enrolled with node_id='{existing_identity.node_id}'. "
+            "Reusing existing identity. To re-enroll, first revoke the existing node via "
+            "Management Backend and manually delete the local identity file.",
             file=sys.stderr,
         )
         return 1
 
-    existing_identity = load_identity(var_dir)
-    if existing_identity is not None and not args.force:
+    if not code or not code.strip():
         print(
-            f"Node is already enrolled with node_id='{existing_identity.node_id}'. "
-            "To overwrite existing identity, re-run with --force.",
+            "Error: Enrollment code is required. Provide --code <one-time-code> "
+            "or set $PBL4_ENROLLMENT_CODE.",
             file=sys.stderr,
         )
         return 1
@@ -159,6 +169,15 @@ def cmd_enroll(args: argparse.Namespace) -> int:
             enrollment_code=code.strip(),
             static_capabilities=caps,
         )
+    except EnrollmentError as exc:
+        print("Enrollment failed:", file=sys.stderr)
+        if exc.code:
+            print(f"code={exc.code}", file=sys.stderr)
+        if exc.message:
+            print(f"message={exc.message}", file=sys.stderr)
+        elif not exc.code:
+            print(f"{exc}", file=sys.stderr)
+        return 1
     except Exception as exc:
         print(f"Enrollment failed: {exc}", file=sys.stderr)
         return 1

@@ -232,8 +232,16 @@ def update_job(
         rc = current["requested_contract"]
         if isinstance(rc, str):
             rc = json.loads(rc)
-        # Shallow merge update
+        old_policy = rc.get("workload_policy", "equal")
+        new_policy = requested_contract.get("workload_policy", old_policy)
+        # K belongs to the selected workload policy. A policy switch without an
+        # explicit replacement K must not inherit the previous policy's value.
         merged_rc = {**rc, **requested_contract}
+        if (new_policy != old_policy and "work_units_per_step" not in requested_contract) or (
+            "work_units_per_step" in requested_contract
+            and requested_contract["work_units_per_step"] is None
+        ):
+            merged_rc.pop("work_units_per_step", None)
         errors = _validate_contract(merged_rc)
         if errors:
             raise JobValidationError("Contract validation failed", errors)
