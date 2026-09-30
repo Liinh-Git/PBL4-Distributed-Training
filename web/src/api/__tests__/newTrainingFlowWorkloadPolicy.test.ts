@@ -56,7 +56,7 @@ describe('WebUI Workload Policy Contract & Integration Tests (Bug #3)', () => {
     globalThis.fetch = originalFetch;
   });
 
-  test('Create Job payload includes workload_policy="dbs" and strict_bsp without work_units_per_step input', async () => {
+  test('Create Job payload includes explicit DBS work units under strict_bsp', async () => {
     let capturedBody: any = null;
 
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -90,6 +90,7 @@ describe('WebUI Workload Policy Contract & Integration Tests (Bug #3)', () => {
         training_seed: 42,
         training_strategy: 'strict_bsp',
         workload_policy: 'dbs',
+        work_units_per_step: 6,
       },
     };
 
@@ -98,7 +99,7 @@ describe('WebUI Workload Policy Contract & Integration Tests (Bug #3)', () => {
     assert.strictEqual(res.data.job_id, 'job_dbs_002');
     assert.strictEqual(capturedBody.requested_contract.training_strategy, 'strict_bsp');
     assert.strictEqual(capturedBody.requested_contract.workload_policy, 'dbs');
-    assert.strictEqual(capturedBody.requested_contract.work_units_per_step, undefined);
+    assert.strictEqual(capturedBody.requested_contract.work_units_per_step, 6);
 
     globalThis.fetch = originalFetch;
   });
@@ -219,7 +220,7 @@ describe('WebUI Workload Policy Contract & Integration Tests (Bug #3)', () => {
     globalThis.fetch = originalFetch;
   });
 
-  test('Bug #4: Static AST/Source inspection of EditJobModal: loads/saves workload_policy without user K input', () => {
+  test('EditJobModal exposes required DBS work units input', () => {
     const modalPath = path.resolve(process.cwd(), 'src/components/common/EditJobModal.tsx');
     const content = fs.readFileSync(modalPath, 'utf-8');
 
@@ -238,13 +239,11 @@ describe('WebUI Workload Policy Contract & Integration Tests (Bug #3)', () => {
     // 4. Must send workload_policy in patch payload
     assert.match(content, /workload_policy:\s*workloadPolicy/);
 
-    // 5. Must NOT render any input field for work_units_per_step (K)
-    assert.doesNotMatch(content, /<input[^>]*name=["']work_units_per_step["']/i);
-    assert.doesNotMatch(content, /<input[^>]*value=\{workUnitsPerStep\}/i);
-    assert.doesNotMatch(content, /setWorkUnitsPerStep/);
+    assert.match(content, /name="work_units_per_step"/);
+    assert.match(content, /workloadPolicy === 'dbs' && \(!Number\.isInteger\(existingWups\)/);
   });
 
-  test('Static AST/Source inspection: NewTrainingFlowPage exposes Equal & DBS without user K input', () => {
+  test('NewTrainingFlowPage exposes required DBS work units input', () => {
     const pagePath = path.resolve(process.cwd(), 'src/pages/NewTrainingFlowPage.tsx');
     const content = fs.readFileSync(pagePath, 'utf-8');
 
@@ -265,9 +264,7 @@ describe('WebUI Workload Policy Contract & Integration Tests (Bug #3)', () => {
     // 4. Must send workload_policy in requested_contract
     assert.match(content, /workload_policy:\s*workloadPolicy/);
 
-    // 5. Must NOT render any input field for work_units_per_step (K)
-    assert.doesNotMatch(content, /<input[^>]*name=["']work_units_per_step["']/i);
-    assert.doesNotMatch(content, /<input[^>]*value=\{workUnitsPerStep\}/i);
-    assert.doesNotMatch(content, /setWorkUnitsPerStep/);
+    assert.match(content, /name="work_units_per_step"/);
+    assert.match(content, /workloadPolicy === 'dbs' && \(!Number\.isInteger\(existingWups\)/);
   });
 });

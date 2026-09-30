@@ -158,6 +158,11 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
           setSaving(false);
           return;
         }
+        if (workloadPolicy === 'dbs' && (!Number.isInteger(existingWups) || (existingWups ?? 0) <= 0)) {
+          setError('Enter a positive whole number of work units per step for DBS. It must exceed the expected worker count.');
+          setSaving(false);
+          return;
+        }
 
         const patchContract: RequestedContractPatchV1 = {
           dataset_build_id: selectedBuildId,
@@ -167,7 +172,7 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
           training_seed: Number(seed),
           training_strategy: 'strict_bsp',
           workload_policy: workloadPolicy,
-          ...(workloadPolicy === initialPolicy && existingWups !== undefined
+          ...((workloadPolicy === 'dbs' || workloadPolicy === initialPolicy) && existingWups !== undefined
             ? { work_units_per_step: existingWups }
             : {}),
         };
@@ -464,6 +469,25 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
                     </p>
                   </button>
                 </div>
+                {workloadPolicy === 'dbs' && (
+                  <div className="space-y-1.5">
+                    <label htmlFor="edit-work-units-per-step" className="block text-[11px] font-medium text-[#a1a1a8]">
+                      Work units per step (K)
+                    </label>
+                    <input
+                      id="edit-work-units-per-step"
+                      name="work_units_per_step"
+                      type="number"
+                      min={1}
+                      step={1}
+                      required
+                      value={existingWups ?? ''}
+                      onChange={e => setExistingWups(e.target.value === '' ? undefined : Number(e.target.value))}
+                      className="w-full px-2.5 py-1.5 rounded bg-[#171719] border border-white/[0.08] text-[#f3f3f4] text-xs focus:outline-hidden focus:border-blue-500"
+                    />
+                    <p className="text-[10px] text-[#73737c]">K must exceed the expected worker count.</p>
+                  </div>
+                )}
               </div>
             </div>
           )}

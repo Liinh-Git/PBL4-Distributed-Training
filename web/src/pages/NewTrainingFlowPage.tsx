@@ -216,6 +216,10 @@ export const NewTrainingFlowPage: React.FC = () => {
   const handleProceedToReview = async () => {
     try {
       setFormError(null);
+      if (workloadPolicy === 'dbs' && (!Number.isInteger(existingWups) || (existingWups ?? 0) <= 0)) {
+        setFormError('Enter a positive whole number of work units per step for DBS. It must exceed the expected worker count.');
+        return;
+      }
       setValidating(true);
 
       const finalName = jobName.trim() || `${selectedModel} on ${currentDataset?.name || 'Dataset'}`;
@@ -236,7 +240,7 @@ export const NewTrainingFlowPage: React.FC = () => {
             training_seed: seed,
             training_strategy: 'strict_bsp',
             workload_policy: workloadPolicy,
-            ...(workloadPolicy === initialPolicy && existingWups !== undefined
+            ...((workloadPolicy === 'dbs' || workloadPolicy === initialPolicy) && existingWups !== undefined
               ? { work_units_per_step: existingWups }
               : {}),
           },
@@ -256,7 +260,7 @@ export const NewTrainingFlowPage: React.FC = () => {
             training_seed: seed,
             training_strategy: 'strict_bsp',
             workload_policy: workloadPolicy,
-            ...(workloadPolicy === initialPolicy && existingWups !== undefined
+            ...((workloadPolicy === 'dbs' || workloadPolicy === initialPolicy) && existingWups !== undefined
               ? { work_units_per_step: existingWups }
               : {}),
           },
@@ -820,6 +824,25 @@ export const NewTrainingFlowPage: React.FC = () => {
                 </p>
               </div>
             </div>
+            {workloadPolicy === 'dbs' && (
+              <div>
+                <label htmlFor="work-units-per-step" className="block text-xs text-[#a1a1a8] mb-1">
+                  Work units per step (K)
+                </label>
+                <input
+                  id="work-units-per-step"
+                  name="work_units_per_step"
+                  type="number"
+                  min={1}
+                  step={1}
+                  required
+                  value={existingWups ?? ''}
+                  onChange={e => setExistingWups(e.target.value === '' ? undefined : Number(e.target.value))}
+                  className="w-full px-3 py-1.5 bg-[#171719] border border-white/[0.07] rounded text-xs text-[#f3f3f4] focus:border-blue-500 focus:outline-hidden"
+                />
+                <p className="text-[11px] text-[#73737c] mt-1">K must exceed the expected worker count.</p>
+              </div>
+            )}
           </div>
 
           {/* Navigation */}

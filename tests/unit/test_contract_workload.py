@@ -18,6 +18,7 @@ from pbl4.management_backend.services.contract_resolver import (
     hash_contract,
     resolve,
 )
+from pbl4.management_backend.services import job_service
 from pbl4.management_backend.services.model_catalog import (
     FakeModelMetadataProvider,
     get_model_metadata_provider,
@@ -239,6 +240,73 @@ def test_contract_resolver_dbs_policy_requires_k_greater_than_expected_workers()
         )
         assert resolved["workload"]["policy"] == "dbs"
         assert resolved["workload"]["work_units_per_step"] == 12
+
+
+@pytest.mark.parametrize(
+    ("policy", "k", "expected_k"),
+    [("equal", None, 3), ("dbs", 6, 6)],
+)
+def test_job_create_validate_freeze_workload_contract(policy, k, expected_k):
+    conn = MagicMock()
+    requested = {
+        "dataset_build_id": "cifar10-v1-build",
+        "model_id": "resnet18_groupnorm",
+        "training_strategy": "strict_bsp",
+        "epochs": 10,
+        "learning_rate": 0.01,
+        "training_seed": 42,
+        "workload_policy": policy,
+    }
+    if k is not None:
+        requested["work_units_per_step"] = k
+    draft = {"job_id": "job-workload", "state": "DRAFT", "requested_contract": requested}
+    build = {
+        "dataset_build_id": "cifar10-v1-build",
+        "dataset_id": "ds-cifar10",
+        "state": "READY",
+        "dataset_manifest_hash": "abc123hash",
+        "batch_size": 128,
+        "shard_count": 3,
+    }
+    with (
+        patch("pbl4.management_backend.services.job_service.job_repository.create_job", return_value=draft),
+        patch("pbl4.management_backend.services.job_service.job_repository.get_job", return_value=draft),
+        patch("pbl4.management_backend.services.job_service.job_repository.freeze_job", return_value={"state": "READY"}) as freeze,
+        patch("pbl4.management_backend.services.contract_resolver.dataset_build_repository.get_build", return_value=build),
+        patch("pbl4.management_backend.services.contract_resolver._get_task_type", return_value="image_classification"),
+    ):
+        assert job_service.create_job(conn, display_name="Workload", description="", requested_contract=requested) == draft
+        validation = job_service.validate_job(conn, "job-workload")
+        assert validation["errors"] == []
+        assert validation["resolved_preview"]["workload"]["work_units_per_step"] == expected_k
+        assert job_service.freeze_job(conn, "job-workload")["state"] == "READY"
+        assert freeze.call_args.kwargs["resolved_contract"]["workload"]["policy"] == policy
+
+
+@pytest.mark.parametrize("k", [None, 3, 0])
+def test_dbs_invalid_k_cannot_validate_or_freeze(k):
+    requested = {
+        "dataset_build_id": "cifar10-v1-build",
+        "model_id": "resnet18_groupnorm",
+        "training_strategy": "strict_bsp",
+        "epochs": 10,
+        "learning_rate": 0.01,
+        "training_seed": 42,
+        "workload_policy": "dbs",
+    }
+    if k is not None:
+        requested["work_units_per_step"] = k
+    draft = {"job_id": "job-invalid", "state": "DRAFT", "requested_contract": requested}
+    with (
+        patch("pbl4.management_backend.services.job_service.job_repository.get_job", return_value=draft),
+        patch("pbl4.management_backend.services.job_service.job_repository.freeze_job") as freeze,
+        patch("pbl4.management_backend.services.contract_resolver.dataset_build_repository.get_build", return_value={"dataset_build_id": "cifar10-v1-build", "dataset_id": "ds-cifar10", "state": "READY", "dataset_manifest_hash": "abc123hash", "batch_size": 128, "shard_count": 3}),
+        patch("pbl4.management_backend.services.contract_resolver._get_task_type", return_value="image_classification"),
+    ):
+        assert job_service.validate_job(MagicMock(), "job-invalid")["errors"]
+        with pytest.raises(job_service.JobValidationError):
+            job_service.freeze_job(MagicMock(), "job-invalid")
+        freeze.assert_not_called()
 
 
 def test_contract_resolver_rejects_non_positive_batch_size():
