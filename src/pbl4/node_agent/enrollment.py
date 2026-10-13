@@ -1,9 +1,8 @@
-"""One-time enrollment client for Node Agent.
+"""Enrollment client for Node Agent.
 
-Contacts Management Backend at POST /api/v1/nodes/enroll using an operator-provided
-one-time enrollment code to obtain the persistent NodeIdentity (node_id and node_secret).
+Contacts Management Backend at POST /api/v1/nodes/enroll to register dynamically
+and obtain persistent NodeIdentity (node_id and node_secret).
 Guarantees:
-- Enrollment code is never persisted to disk.
 - Node secret is never logged in plaintext.
 - Never re-enrolls if identity already exists.
 """
@@ -54,17 +53,17 @@ class EnrollmentConnectionError(EnrollmentError):
 
 def enroll(
     backend_url: str,
-    enrollment_code: str,
     static_capabilities: dict[str, Any] | None = None,
     *,
+    display_name: str | None = None,
     timeout: float = 10.0,
 ) -> NodeIdentity:
     """Enroll this host with the Management Backend to obtain a permanent NodeIdentity.
 
     Args:
         backend_url: Base URL of the Management Backend (e.g. 'http://127.0.0.1:8000').
-        enrollment_code: One-time token provided by the operator.
         static_capabilities: Optional hardware/system capabilities discovered locally.
+        display_name: Optional human-readable node label.
         timeout: HTTP request timeout in seconds.
 
     Returns:
@@ -77,17 +76,17 @@ def enroll(
     """
     if not isinstance(backend_url, str) or not backend_url.strip():
         raise ValueError("backend_url must be a non-empty string")
-    if not isinstance(enrollment_code, str) or not enrollment_code.strip():
-        raise ValueError("enrollment_code must be a non-empty string")
 
     endpoint = f"{backend_url.rstrip('/')}/api/v1/nodes/enroll"
-    payload = {
-        "enrollment_code": enrollment_code,
+    payload: dict[str, Any] = {
         "capabilities": static_capabilities or {},
     }
+    if display_name:
+        payload["display_name"] = display_name
     body_bytes = json.dumps(payload).encode("utf-8")
 
-    # Canonical transport: enrollment_code is sent strictly in JSON body.
+
+    # Canonical transport: enrollment payload sent in JSON body.
     # No redundant or leaky Authorization header.
     req = urllib.request.Request(
         endpoint,

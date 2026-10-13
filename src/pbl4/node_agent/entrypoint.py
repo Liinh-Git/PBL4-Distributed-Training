@@ -3,13 +3,12 @@
 Reference: NODE_AGENT_IMPLEMENTATION_PLAN.md & User Request Phase 7.
 
 Commands:
-- `pbl4-agent enroll`: One-time host enrollment with Management Backend.
-- `pbl4-agent start`: Start the Node Agent daemon (requires prior enrollment).
+- `pbl4-agent start`: Start the Node Agent daemon (auto-enrolls if not already enrolled).
 - `pbl4-agent status`: Inspect local node enrollment status and supervised allocations.
 
 Security Guarantees:
-- Never prints or logs node_secret, enrollment_code, or worker_join_token.
-- Never falls back to static secrets or auto-enrolls during `start`.
+- Never prints or logs node_secret or worker_join_token.
+- Auto-enrolls dynamically with Management Backend during `start`.
 - Status command is completely local: never connects to PostgreSQL or Backend.
 """
 
@@ -52,36 +51,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
-    # ─── enroll ───────────────────────────────────────────────────────────────
-    enroll_parser = subparsers.add_parser(
-        "enroll",
-        help="Enroll this host with Management Backend using a one-time code",
-    )
-    enroll_parser.add_argument(
-        "--backend-url",
-        default=None,
-        help="Management Backend base URL (default: $PBL4_BACKEND_URL or http://127.0.0.1:8000)",
-    )
-    enroll_parser.add_argument(
-        "--code",
-        default=None,
-        help="One-time enrollment code issued by Management Backend (or $PBL4_ENROLLMENT_CODE)",
-    )
-    enroll_parser.add_argument(
-        "--var-dir",
-        default=None,
-        help="Node agent state directory (default: $PBL4_VAR_DIR or var/agent)",
-    )
-    enroll_parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Re-enrollment flag (disabled to prevent duplicate/ghost nodes)",
-    )
-
     # ─── start ────────────────────────────────────────────────────────────────
     start_parser = subparsers.add_parser(
         "start",
-        help="Start the Node Agent control daemon (requires prior enrollment)",
+        help="Start the Node Agent control daemon (auto-enrolls if not already enrolled)",
     )
     start_parser.add_argument(
         "--backend-url",
@@ -126,85 +99,40 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def cmd_enroll(args: argparse.Namespace) -> int:
-    """Execute host enrollment."""
+def cmd_start(args: argparse.Namespace) -> int:
+    """Execute daemon startup with automatic enrollment if not yet enrolled."""
     var_dir = args.var_dir or os.getenv("PBL4_VAR_DIR", "var/agent")
     backend_url = args.backend_url or os.getenv("PBL4_BACKEND_URL", "http://127.0.0.1:8000")
-    code = args.code or os.getenv("PBL4_ENROLLMENT_CODE")
-
-    existing_identity = load_identity(var_dir)
-    if existing_identity is not None:
-        if args.force:
-            print(
-                f"Error: Node is already enrolled with node_id='{existing_identity.node_id}'. "
-                "Automatic re-enrollment with --force is disabled to prevent duplicate/ghost nodes in the cluster. "
-                "To re-enroll this host, first revoke the existing node via Management Backend "
-                "and manually delete the local identity file.",
-                file=sys.stderr,
-            )
-            return 1
-        print(
-            f"Node is already enrolled with node_id='{existing_identity.node_id}'. "
-            "Reusing existing identity. To re-enroll, first revoke the existing node via "
-            "Management Backend and manually delete the local identity file.",
-            file=sys.stderr,
-        )
-        return 1
-
-    if not code or not code.strip():
-        print(
-            "Error: Enrollment code is required. Provide --code <one-time-code> "
-            "or set $PBL4_ENROLLMENT_CODE.",
-            file=sys.stderr,
-        )
-        return 1
-
-    print("Collecting static hardware capabilities...")
-    caps = collect_static_capabilities()
-
-    print(f"Enrolling with Management Backend at {backend_url}...")
-    try:
-        identity = enroll(
-            backend_url=backend_url,
-            enrollment_code=code.strip(),
-            static_capabilities=caps,
-        )
-    except EnrollmentError as exc:
-        print("Enrollment failed:", file=sys.stderr)
-        if exc.code:
-            print(f"code={exc.code}", file=sys.stderr)
-        if exc.message:
-            print(f"message={exc.message}", file=sys.stderr)
-        elif not exc.code:
-            print(f"{exc}", file=sys.stderr)
-        return 1
-    except Exception as exc:
-        print(f"Enrollment failed: {exc}", file=sys.stderr)
-        return 1
-
-    save_identity(var_dir, identity)
-    print(f"Host successfully enrolled! Assigned node_id: {identity.node_id}")
-    print(f"Identity saved to {var_dir}/node_identity.json")
-    return 0
-
-
-def cmd_start(args: argparse.Namespace) -> int:
-    """Execute daemon startup."""
-    var_dir = args.var_dir or os.getenv("PBL4_VAR_DIR", "var/agent")
 
     identity = load_identity(var_dir)
     if identity is None:
-        print(
-            f"Error: Node identity not found in '{var_dir}'.\n"
-            "This node must be enrolled before starting the agent daemon.\n"
-            "Run: pbl4-agent enroll --backend-url <url> --code <one-time-code>",
-            file=sys.stderr,
+        logger.info(
+            "Node identity not found in '%s'. Auto-enrolling with Management Backend at %s...",
+            var_dir,
+            backend_url,
         )
-        return 1
+        caps = collect_static_capabilities()
+        try:
+            identity = enroll(
+                backend_url=backend_url,
+                static_capabilities=caps,
+            )
+            save_identity(var_dir, identity)
+            logger.info("Auto-enrollment successful! Assigned node_id: %s", identity.node_id)
+        except EnrollmentError as exc:
+            print("Auto-enrollment failed:", file=sys.stderr)
+            if exc.code:
+                print(f"code={exc.code}", file=sys.stderr)
+            if exc.message:
+                print(f"message={exc.message}", file=sys.stderr)
+            elif not exc.code:
+                print(f"{exc}", file=sys.stderr)
+            return 1
+        except Exception as exc:
+            print(f"Error: Auto-enrollment failed: {exc}", file=sys.stderr)
+            return 1
 
-    overrides: dict[str, object] = {"var_dir": var_dir}
-    if args.backend_url:
-        overrides["backend_url"] = args.backend_url
+    overrides: dict[str, object] = {"var_dir": var_dir, "backend_url": backend_url}
     if args.heartbeat_interval:
         overrides["heartbeat_interval_seconds"] = args.heartbeat_interval
     if args.telemetry_interval:
@@ -272,7 +200,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     if identity is None:
         print("Enrollment Status:  NOT ENROLLED")
-        print("Hint: Enroll this host using 'pbl4-agent enroll --backend-url <url> --code <code>'")
+        print("Hint: Host will auto-enroll automatically upon running 'pbl4-agent start'")
         return 0
 
     print("Enrollment Status:  ENROLLED")
@@ -300,9 +228,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.subcommand == "enroll":
-        return cmd_enroll(args)
-    elif args.subcommand == "start":
+    if args.subcommand == "start":
         return cmd_start(args)
     elif args.subcommand == "status":
         return cmd_status(args)
@@ -313,3 +239,4 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

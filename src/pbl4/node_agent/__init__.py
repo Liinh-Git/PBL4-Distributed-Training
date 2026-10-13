@@ -25,7 +25,7 @@ from pbl4.node_agent.supervisor import (
 )
 from pbl4.node_agent.telemetry import (
     collect_static_capabilities,
-    sample_resources,
+    # sample_resources,
 )
 
 __all__ = [
@@ -43,6 +43,6 @@ __all__ = [
     "enroll",
     "identity_path",
     "load_identity",
-    "sample_resources",
+    # "sample_resources",
     "save_identity",
 ]
