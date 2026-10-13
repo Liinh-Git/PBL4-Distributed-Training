@@ -3,6 +3,11 @@
 Ngày kiểm chứng: 2026-10-13. Branch: `fix/system-completion-network-e2e`, kế thừa
 Phase 1 `1097edfc5965e57edb57431b4d101a44d75bd090`.
 
+**Cập nhật sau báo cáo Phase 2:** theo yêu cầu xử lý dữ liệu riêng, đã tạo Build
+SmallCNN trên Hugging Face, đăng ký READY vào Aiven và kiểm tra cache local thật.
+Xem [DATASET_READINESS_REPORT.md](DATASET_READINESS_REPORT.md). Các giới hạn HF
+dưới đây mô tả thời điểm kết thúc Phase 2; training E2E trên Aiven vẫn chưa chạy.
+
 ## Kết luận và phạm vi
 
 **Hoàn thành:** workflow Dataset Manager → READY Build → Job/Attempt → Node
