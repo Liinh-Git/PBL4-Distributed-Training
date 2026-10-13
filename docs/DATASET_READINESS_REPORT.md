@@ -20,6 +20,27 @@ loại khỏi lựa chọn Job mới; không sửa URL/hash của một Build đ
 contract. Job cũ giữ references; RETRY/RESUME dùng Build đã DEPRECATED sẽ bị gate
 READY hiện có từ chối. Không xóa checkpoint, Job, Node identity hay cache cũ.
 
+### Kiểm tra sâu hai Build CIFAR-10
+
+Sau câu hỏi về DBS, đã tải và xác minh hash cả 6 shard manifest. Cùng nguồn,
+normalization, partition seed 2026 và root batch_size256 không có nghĩa là cùng
+cách đóng batch: Build Render chứa 104 batch253 và 94 batch252; Build HF chứa
+195 batch256, hai batch27 và một batch26. Mọi batch entry giữa hai Build đều khác.
+Chưa tải toàn bộ tensor của cả hai để chứng minh tập ảnh/nhãn giống nhau tuyệt đối.
+
+Runtime hiện chỉ chọn Work Unit có sample_count đúng U=batch_size. Gọi trực tiếp
+`_AttemptRunner._extract_work_units` và `BatchScheduler` trên manifest thật xác
+nhận Build Render có **0** unit hợp lệ, bị từ chối; Build HF có **195** unit hợp lệ,
+K6 tạo **32 step/epoch**. Đây là kiểm tra eligibility/scheduler, không phải một
+lượt training CIFAR-10 E2E. Với K6, 192 unit được dùng/epoch, ba full unit còn lại
+và các partial batch không thuộc một complete step của epoch đó.
+
+Vì vậy Render build hợp lệ về hash nhưng không tương thích Work Unit scheduler
+hiện tại; deprecation còn ngăn chọn nhầm một Build không chạy được DBS. DBS không
+hardcode Build ID hoặc HF URL; yêu cầu đủ unit đúng kích thước và K>N. SmallCNN
+Build mới có 12 unit đủ16, nên K6 có hai step/epoch. Bằng chứng:
+`artifacts/e2e/data-audit/cifar-build-comparison.json`.
+
 ## Dataset riêng cho demo SmallCNN
 
 - Dataset ID: `ds_3023aa52`.
