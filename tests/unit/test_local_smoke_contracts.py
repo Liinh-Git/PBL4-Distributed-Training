@@ -125,15 +125,15 @@ def test_model_rejects_incompatible_dataset(model_id, monkeypatch):
     with (
         patch.object(contract_resolver.dataset_build_repository, "get_build", return_value=build),
         patch.object(contract_resolver, "_get_task_type", return_value="image_classification"),
+        pytest.raises(contract_resolver.ContractResolutionError, match="incompatible"),
     ):
-        with pytest.raises(contract_resolver.ContractResolutionError, match="incompatible"):
-            contract_resolver.resolve(
-                MagicMock(),
-                {
-                    "dataset_build_id": "build",
-                    "model_id": model_id,
-                    "epochs": 1,
-                    "learning_rate": 0.01,
-                    "training_seed": 42,
-                },
-            )
+        contract_resolver.resolve(
+            MagicMock(),
+            {
+                "dataset_build_id": "build",
+                "model_id": model_id,
+                "epochs": 1,
+                "learning_rate": 0.01,
+                "training_seed": 42,
+            },
+        )
