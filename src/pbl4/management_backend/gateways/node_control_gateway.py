@@ -345,6 +345,9 @@ class NodeControlGateway(NodeControlGatewayProtocol):
         node_id: str,
         envelope: AgentEnvelope,
     ) -> None:
+        await asyncio.to_thread(self._record_command_ack, node_id, envelope)
+
+    def _record_command_ack(self, node_id: str, envelope: AgentEnvelope) -> None:
         """Process COMMAND_ACK:
 
         - ACCEPTED: allocation remains DISPATCHED (no-op).
@@ -407,6 +410,9 @@ class NodeControlGateway(NodeControlGatewayProtocol):
         node_id: str,
         envelope: AgentEnvelope,
     ) -> None:
+        await asyncio.to_thread(self._record_worker_status, node_id, envelope)
+
+    def _record_worker_status(self, node_id: str, envelope: AgentEnvelope) -> None:
         """Process WORKER_STATUS:
 
         - STARTED -> allocation actual_state = STARTED

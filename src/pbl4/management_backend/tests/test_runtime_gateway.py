@@ -1097,3 +1097,28 @@ def test_attempt_state_transition_validation() -> None:
     for active in ["CREATED", "WAITING_WORKERS", "PROVISIONING", "INITIALIZING", "RUNNING"]:
         assert is_valid_attempt_transition(active, "FAILED") is True
         assert is_valid_attempt_transition(active, "ABORTED") is True
+
+
+def test_live_snapshot_does_not_skip_buffered_step_events():
+    gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
+    cursor = gateway.get_cursor("attempt-buffered")
+    cursor.authoritative_snapshot_seq = 0
+    cursor.highest_contiguous_seq = 0
+
+    @contextmanager
+    def transaction():
+        yield MagicMock()
+
+    snapshot = _valid_snapshot_dict(active_attempt_id="attempt-buffered", last_runtime_event_seq=12)
+    with (
+        patch("pbl4.management_backend.db.transaction", transaction),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.get_attempt",
+            return_value={"state": "RUNNING", "runtime_metadata": {}},
+        ),
+        patch("pbl4.management_backend.repositories.attempt_repository.update_attempt_state"),
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync"),
+    ):
+        gateway.handle_state_snapshot(snapshot)
+    assert cursor.authoritative_snapshot_seq == 12
+    assert cursor.highest_contiguous_seq == 0

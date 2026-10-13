@@ -189,7 +189,10 @@ class ParameterServer:
                     live_conn.last_heartbeat_at if is_live else meta.get("last_heartbeat_at")
                 )
                 disconnected_at = meta.get("disconnected_at")
-                if session.state in (SessionState.DISCONNECTED, SessionState.FAILED) and not disconnected_at:
+                if (
+                    session.state in (SessionState.DISCONNECTED, SessionState.FAILED)
+                    and not disconnected_at
+                ):
                     disconnected_at = datetime.now(UTC).isoformat()
 
                 snapshots.append(
@@ -581,6 +584,7 @@ class ParameterServer:
             parameter_manifest_hash=str(meta["parameter_manifest_hash"]),
             tensor_id=identity.tensor_id,
             compute_ms=compute_ms,
+            loss=meta.get("loss"),
         )
 
     @staticmethod

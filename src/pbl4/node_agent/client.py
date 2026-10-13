@@ -516,6 +516,24 @@ class NodeAgentClient:
                 records = self.supervisor.poll()
                 for r in records:
                     if (
+                        r.local_state == LOCAL_STATE_STOPPED
+                        and r.allocation_id not in self._reported_failures
+                    ):
+                        self._reported_failures.add(r.allocation_id)
+                        await self._send_envelope(
+                            ws,
+                            AgentEnvelope(
+                                message_type=MESSAGE_TYPE_WORKER_STATUS,
+                                node_id=self.identity.node_id,
+                                payload=WorkerStatusPayload(
+                                    allocation_id=r.allocation_id,
+                                    attempt_id=r.attempt_id,
+                                    actual_state=WORKER_ACTUAL_STATE_ENDED,
+                                    exit_code=r.exit_code,
+                                ),
+                            ),
+                        )
+                    if (
                         r.local_state == LOCAL_STATE_FAILED
                         and r.allocation_id not in self._reported_failures
                     ):

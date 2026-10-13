@@ -21,6 +21,7 @@ class Contribution:
     tensor_id: int
     _gradient_bytes: bytes = field(repr=False)
     compute_ms: float = 0.0
+    loss: float | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_gradient_bytes", bytes(self._gradient_bytes))
@@ -34,6 +35,8 @@ class Contribution:
             or not np.isfinite(self.compute_ms)
         ):
             raise ValueError("compute_ms must be non-negative and finite")
+        if self.loss is not None and not np.isfinite(self.loss):
+            raise ValueError("loss must be finite when supplied")
 
     @classmethod
     def from_gradient(cls, gradient: np.ndarray, **identity: object) -> "Contribution":

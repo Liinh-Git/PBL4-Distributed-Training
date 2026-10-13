@@ -26,6 +26,7 @@ def main() -> None:
     parser.add_argument("--host", type=str, default=None, help="Host interface to bind")
     parser.add_argument("--port", type=int, default=None, help="Port to listen on")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload (dev only)")
+    parser.add_argument("--http", choices=["auto", "h11", "httptools"], default="auto")
     parser.add_argument("--log-level", type=str, default=None, help="Log level (INFO, DEBUG, ...)")
 
     args = parser.parse_args()
@@ -48,6 +49,7 @@ def main() -> None:
         port=port,
         log_level=log_level,
         reload=args.reload,
+        http=args.http,
     )
 
 

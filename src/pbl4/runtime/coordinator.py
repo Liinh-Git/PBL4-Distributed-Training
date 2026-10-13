@@ -223,6 +223,8 @@ class Coordinator:
                                 "sample_count": item.sample_count,
                                 "tensor_id": item.tensor_id,
                                 "parameter_manifest_hash": item.parameter_manifest_hash,
+                                "loss": item.loss,
+                                "compute_ms": item.compute_ms,
                             }
                             for item in plan.contributions
                         ],

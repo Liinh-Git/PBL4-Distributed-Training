@@ -273,6 +273,9 @@ class RealMcpClientPort(McpClientPort):
         self._waiters: dict[str, concurrent.futures.Future[McpEnvelope]] = {}
         self._reader: threading.Thread | None = None
         self._reconnector: threading.Thread | None = None
+        self._dispatch_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="pbl4-mcp-projection"
+        )
 
     def set_message_handler(self, handler: McpMessageHandler | None) -> None:
         self._handler = handler
@@ -469,11 +472,9 @@ class RealMcpClientPort(McpClientPort):
         handler = self._handler
         if handler is None:
             return
-        threading.Thread(
-            target=handler,
-            args=(envelope.message_type, envelope.payload.to_dict()),
-            daemon=True,
-        ).start()
+        # Keep semantic delivery in TCP receive order. Reader/correlation and
+        # dataset resolution stay independent so handlers may request state.
+        self._dispatch_executor.submit(handler, envelope.message_type, envelope.payload.to_dict())
 
     def _serve_dataset_resolution(self, request: McpEnvelope) -> None:
         try:

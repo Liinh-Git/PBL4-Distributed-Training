@@ -17,6 +17,7 @@ import concurrent.futures
 import contextlib
 import json
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -76,6 +77,7 @@ class RuntimeGateway:
         self._attempt_snapshots: dict[str, dict[str, Any]] = {}
         self._attempt_cursors: dict[str, AttemptRuntimeCursor] = {}
         self._pending_results: dict[str, concurrent.futures.Future[dict[str, Any]]] = {}
+        self._projection_lock = threading.RLock()
 
         self._port.set_message_handler(self._handle_inbound_message)
         self._port.set_dataset_resolver(self.resolve_dataset_build)
@@ -164,9 +166,7 @@ class RuntimeGateway:
                 if next_seq > cursor.max_seen_seq:
                     break
                 try:
-                    next_ev = event_repository.get_event_by_seq(
-                        conn, attempt_id, next_seq
-                    )
+                    next_ev = event_repository.get_event_by_seq(conn, attempt_id, next_seq)
                 except Exception as read_err:
                     logger.warning("Failed to read event %s for projection: %s", next_seq, read_err)
                     break
@@ -407,13 +407,14 @@ class RuntimeGateway:
                         },
                     )
                 except Exception as exc:
-                    logger.debug("Failed to broadcast abort event for %s: %s", aborted_attempt_id, exc)
+                    logger.debug(
+                        "Failed to broadcast abort event for %s: %s", aborted_attempt_id, exc
+                    )
 
         except (RuntimeError, psycopg.OperationalError, psycopg_pool.PoolTimeout) as exc:
             logger.warning("Database unavailable during attempt abort on runtime down: %s", exc)
         except Exception as exc:
             logger.error("Error aborting active attempts on runtime down: %s", exc, exc_info=True)
-
 
     # ─── Inbound Management Message Dispatcher ────────────────────────────────
 
@@ -472,6 +473,10 @@ class RuntimeGateway:
             )
 
     def handle_state_snapshot(self, snapshot: dict[str, Any]) -> None:
+        with self._projection_lock:
+            self._handle_state_snapshot(snapshot)
+
+    def _handle_state_snapshot(self, snapshot: dict[str, Any]) -> None:
         """STATE_SNAPSHOT -> authoritative Runtime projection reconciliation."""
         try:
             if isinstance(snapshot, StateSnapshot):
@@ -606,7 +611,9 @@ class RuntimeGateway:
                         connected_at = datetime.fromisoformat(connected_at.replace("Z", "+00:00"))
                     disconnected_at = worker.get("disconnected_at")
                     if isinstance(disconnected_at, str):
-                        disconnected_at = datetime.fromisoformat(disconnected_at.replace("Z", "+00:00"))
+                        disconnected_at = datetime.fromisoformat(
+                            disconnected_at.replace("Z", "+00:00")
+                        )
                     failure_code = worker.get("failure_code")
                     node_id = worker.get("node_id")
                     node_label = worker.get("node_label") or "node-unknown"
@@ -678,7 +685,11 @@ class RuntimeGateway:
         cursor = self.get_cursor(attempt_id)
         if snap_seq is not None:
             cursor.authoritative_snapshot_seq = snap_seq
-            cursor.highest_contiguous_seq = max(cursor.highest_contiguous_seq or 0, snap_seq)
+            # A live snapshot can be newer than telemetry still buffered at the
+            # Runtime. Only establish a baseline or recover an actual event gap;
+            # routine polling must not skip unprojected Step/checkpoint history.
+            if cursor.highest_contiguous_seq is None or cursor.gap_fenced:
+                cursor.highest_contiguous_seq = max(cursor.highest_contiguous_seq or 0, snap_seq)
             cursor.max_seen_seq = max(cursor.max_seen_seq, snap_seq)
         cursor.gap_fenced = False
         cursor.stale = False
@@ -754,6 +765,10 @@ class RuntimeGateway:
             )
 
     def handle_runtime_event(self, payload: dict[str, Any]) -> None:
+        with self._projection_lock:
+            self._handle_runtime_event(payload)
+
+    def _handle_runtime_event(self, payload: dict[str, Any]) -> None:
         """RUNTIME_EVENT -> event ingestion / dedup / gap handling / projection / WS publish."""
         try:
             payload = RuntimeEvent.from_dict(payload).to_dict()
@@ -835,7 +850,9 @@ class RuntimeGateway:
             attempt_id,
             new_state,
             started_at=occurred_at if new_state == "RUNNING" else None,
-            ended_at=occurred_at if new_state in attempt_repository.TERMINAL_ATTEMPT_STATES else None,
+            ended_at=occurred_at
+            if new_state in attempt_repository.TERMINAL_ATTEMPT_STATES
+            else None,
             failure_code=failure_code,
             failure_message=failure_message,
             runtime_metadata=runtime_metadata,
@@ -908,6 +925,8 @@ class RuntimeGateway:
                     shard_id=int(item["shard_id"]),
                     batch_id=int(item["batch_id"]),
                     sample_count=int(item["sample_count"]),
+                    loss=item.get("loss"),
+                    compute_ms=float(item.get("compute_ms", 0.0)),
                 )
             step_repository.update_step(
                 conn,
