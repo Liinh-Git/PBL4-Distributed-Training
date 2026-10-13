@@ -105,9 +105,12 @@ class ShardDownloader:
                 batch_url = f"{self._base_url}/shards/{key.shard_id}/batches/{entry['batch_id']}"
             else:
                 batch_url = resolve_artifact_url(self._base_url, relative_filename)
-            content = self._fetch(batch_url, entry["sha256"], entry["byte_size"])
+            try:
+                content = self._cache.read_batch(key, entry)
+            except (OSError, ValueError):
+                content = self._fetch(batch_url, entry["sha256"], entry["byte_size"])
+                downloaded += len(content)
             batch_bytes[entry["relative_filename"]] = content
-            downloaded += len(content)
         cached = self._cache.publish(key, root_bytes, shard_bytes, batch_bytes)
         return ShardDownloadResult(cached, False, downloaded)
 

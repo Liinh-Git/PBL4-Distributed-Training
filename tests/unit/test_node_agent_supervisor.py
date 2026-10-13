@@ -112,11 +112,31 @@ class TestWorkerProcessSupervisor(unittest.TestCase):
             self.assertIn("-m", cmd_list)
             self.assertIn("pbl4.worker.entrypoint", cmd_list)
             self.assertEqual(cmd_list[cmd_list.index("--model-id") + 1], "resnet18_groupnorm")
-            self.assertIn(str(self.supervisor.var_dir / "worker-cache" / "alloc-1"), cmd_list)
+            self.assertIn(str(self.supervisor.var_dir / "worker-cache"), cmd_list)
             self.assertNotIn("secret-token-xyz", cmd_list)
 
             env = called_kwargs["env"]
             self.assertEqual(env.get("PBL4_WORKER_JOIN_TOKEN"), "secret-token-xyz")
+
+    @patch("psutil.Process")
+    @patch("subprocess.Popen")
+    def test_new_allocations_keep_cache_across_supervisor_restart(self, mock_popen, mock_psutil):
+        mock_popen.return_value.pid = 12345
+        mock_popen.return_value.poll.return_value = 0
+        mock_psutil.return_value.create_time.return_value = 1000.0
+        self.supervisor.spawn_worker(_make_start_command("first", "attempt-first"))
+        first_command = mock_popen.call_args[0][0]
+        cache_root = Path(first_command[first_command.index("--cache-dir") + 1])
+        cache_root.mkdir(parents=True)
+        marker = cache_root / "retained-data"
+        marker.write_bytes(b"physical cache")
+        self.supervisor.poll()
+        restarted = WorkerProcessSupervisor(self.var_dir, node_id="node-test-1")
+        restarted.spawn_worker(_make_start_command("second", "attempt-second"))
+        second_command = mock_popen.call_args[0][0]
+        self.assertEqual(second_command[second_command.index("--cache-dir") + 1], str(cache_root))
+        restarted.stop_worker("second")
+        self.assertEqual(marker.read_bytes(), b"physical cache")
 
     @patch("psutil.Process")
     @patch("subprocess.Popen")

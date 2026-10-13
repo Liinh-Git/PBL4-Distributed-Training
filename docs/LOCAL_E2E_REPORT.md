@@ -120,7 +120,8 @@ khác để làm sạch baseline.
    thay runner, ngoài Runtime state lock.
 8. RESUME đọc dataset ID sai cấp. Validate theo
    `resolved_contract.dataset.dataset_build_id`.
-9. Worker cache mặc định dùng chung. Tách cache theo Agent state/allocation.
+9. Worker cache đặt dưới Agent state; bổ sung cache reuse bên dưới sửa tiếp
+   allocation-specific root thành root ổn định theo Agent.
 10. Hệ môi trường có httptools lỗi khi auto-select. Thêm lựa chọn `--http h11`
     cho Backend/Dataset Manager; harness dùng parser h11 có sẵn.
 11. System UI có Node/IP/latency tự đặt; form model có lựa chọn và parameter
@@ -141,3 +142,42 @@ khác để làm sạch baseline.
   smoke. Không còn blocker đã biết cho chế độ local được mô tả.
 
 Lệnh chạy lại và hướng dẫn cleanup: [LOCAL_E2E_SMOKE.md](LOCAL_E2E_SMOKE.md).
+
+## Bổ sung Dataset Build & Cache Reuse
+
+Các lượt dưới chạy với phần sửa cache trong working tree, trên nền `982c447`;
+Dataset Manager không sửa thêm. Tất cả dùng Build
+`4cdf29ea-48c0-41d6-bfc3-468c4d82873c`, manifest hash
+`21f80f5c6cf956ccbbb54cb65630a652711ae9760c3f5ad966fb98fa4b6ce598`.
+Mỗi lượt khởi động/dừng toàn bộ process; ba lượt sau dùng lại catalog local,
+Node identity, physical artifact và cache của lượt đầu.
+
+| Evidence tại `artifacts/e2e/` | Model | Cache reuse | HTTP GET batch | Worker download bytes |
+|---|---|---|---|---|
+| `cache-cold-1/result.json` | SmallCNN | 0/9, tải lần đầu | 36 | 7,132,059 |
+| `cache-warm-2/result.json` | SmallCNN | 9/9 | 0 | 0 |
+| `cache-model-resnet-3/result.json` | ResNet-18 GroupNorm | 9/9 | 0 | 0 |
+| `cache-repair-4/result.json` | SmallCNN | 6/9; sửa đúng 3 entry hỏng | 2 | 401,293 |
+
+Mỗi lượt COMPLETED, 4 Step, 3/3 contribution mỗi Step, 4 checkpoint được xác minh,
+cleanup PASS. Chín entry = ba shard trên mỗi Worker; `all_shards` được giữ nguyên.
+Warm/model-switch không POST tạo Dataset/Build; contract đóng băng đúng Build ID/hash.
+Runtime/Backend vẫn đọc manifest phục vụ xác minh, không có Worker artifact download
+trong hai lượt warm. Repair sửa một batch thiếu, một batch sai hash và một root
+manifest hỏng; các batch tốt không tải lại, các shard tốt không bị thay thế.
+
+Sau model-switch và repair, 70 file artifact/cache vẫn còn và fingerprint cả cây
+trùng nhau: `79aa49923dce7273c943249eec2915374419f184c9b109de36074595d104a289`.
+Cleanup mặc định không xóa Build, cache, artifact local hay HF.
+
+Sửa production giới hạn ở cache root của supervisor, salvage batch đúng hash,
+thay entry hỏng bằng publication đã xác minh có khóa OS và log từng shard.
+Không đổi wire/domain/schema/scheduler hoặc xây hệ thống cache mới.
+Harness bổ sung reuse persisted state, chọn model/storage và thu thập evidence.
+
+Regression sau sửa: 696 PASS, 150 subtest PASS, 1 SKIP, exit 0.
+Thêm test URL HF giả lập: lượt regression mở cross-repo đạt 697 PASS nhưng có
+1 lỗi setup của cross-repo vì subprocess không tìm thấy package `dataset_manager`;
+không coi lượt này PASS. Pipeline thật đã được xác minh qua bốn lượt Agent smoke.
+Architecture/scaffold và Ruff scoped PASS. Chưa chạy training trên Aiven hoặc
+upload/download HF thật; cấu hình dự án Aiven trong `.env` được giữ nguyên.

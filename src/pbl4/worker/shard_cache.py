@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -152,24 +153,35 @@ class ShardCache:
             self._write(workspace / "shard-manifest.json", shard_bytes)
             for relative, content in batch_bytes.items():
                 self._write(_safe(workspace, relative), bytes(content))
-            if final.exists():
-                existing = self.load(key)
-                if existing.root_manifest != root or existing.shard_manifest != shard:
-                    raise ValueError("Immutable cache entry conflict")
-                return existing
-            for attempt in range(5):
-                try:
-                    os.rename(workspace, final)
-                    break
-                except OSError as exc:
-                    if final.exists():
+            # Serialize publication/repair only; the OS releases the lock even
+            # if a provisioning process dies. Valid entries remain immutable.
+            with self._publication_lock(key):
+                if final.exists() or final.is_symlink():
+                    try:
                         existing = self.load(key)
+                    except (OSError, ValueError):
+                        retired = self._parts / (uuid4().hex + ".invalid")
+                        os.rename(final, retired)
+                        if retired.is_symlink() or not retired.is_dir():
+                            retired.unlink()
+                        else:
+                            if retired.resolve().parent != self._parts.resolve():
+                                raise ValueError(
+                                    "Invalid cache entry escaped partial workspace"
+                                ) from None
+                            shutil.rmtree(retired)
+                    else:
                         if existing.root_manifest != root or existing.shard_manifest != shard:
-                            raise ValueError("Immutable cache entry conflict") from exc
+                            raise ValueError("Immutable cache entry conflict")
                         return existing
-                    if attempt == 4:
-                        raise
-                    time.sleep(0.01 * (2**attempt))
+                for attempt in range(5):
+                    try:
+                        os.rename(workspace, final)
+                        break
+                    except OSError:
+                        if attempt == 4:
+                            raise
+                        time.sleep(0.01 * (2**attempt))
             cached = CachedShard(key, final, root, shard)
             self.verify(cached)
             return cached
@@ -179,6 +191,43 @@ class ShardCache:
                 raise ValueError("Refusing to remove an unowned partial cache entry")
             if workspace.exists():
                 shutil.rmtree(workspace, ignore_errors=True)
+
+    @contextmanager
+    def _publication_lock(self, key: ShardCacheKey):
+        locks = self._root / ".locks"
+        locks.mkdir(exist_ok=True)
+        with (locks / key.directory_key).open("a+b") as stream:
+            if stream.tell() == 0:
+                stream.write(b"\0")
+                stream.flush()
+            stream.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                stream.seek(0)
+                if os.name == "nt":
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+    def read_batch(self, key: ShardCacheKey, entry: dict) -> bytes:
+        """Salvage only bytes matching an already verified remote manifest."""
+        directory = self._root / key.directory_key
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError("Cache entry is unavailable")
+        path = _safe(directory, entry["relative_filename"])
+        content = path.read_bytes()
+        if len(content) != entry["byte_size"] or sha256_bytes(content) != entry["sha256"]:
+            raise ValueError("Cached batch integrity mismatch")
+        return content
 
     def load(self, key: ShardCacheKey) -> CachedShard:
         directory = self._root / key.directory_key

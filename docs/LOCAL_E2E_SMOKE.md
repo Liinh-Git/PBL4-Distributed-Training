@@ -69,9 +69,46 @@ Job/Attempt, model version, Step metrics thật, checkpoint verification và cle
 Log Worker nằm trong `.var/e2e/<run-id>/agent-*/worker-*.log`.
 Có thể đặt `--run-id ten-rieng`; thư mục trùng bị từ chối.
 
-State, cache và database còn trên đĩa để kiểm tra; process đều được dừng.
-Xóa thủ công **đúng thư mục lượt chạy** khi không cần giữ evidence. Thư mục
+State, cache, artifact và database còn trên đĩa; cleanup mặc định chỉ dừng process.
+Chỉ xóa **đúng thư mục dữ liệu thử nghiệm** khi người dùng yêu cầu reset/purge. Thư mục
 Agent chứa identity bí mật; không commit hoặc chia sẻ nguyên `.var`.
+
+## Dataset Build và cache reuse
+
+```powershell
+.venv\Scripts\python.exe scripts\e2e_agents.py --dataset-manager-repo .var\dataset-manager-local --scenario cache-reuse --run-id cache-first
+.venv\Scripts\python.exe scripts\e2e_agents.py --dataset-manager-repo .var\dataset-manager-local --scenario cache-reuse --reuse-runtime-data .var\e2e\cache-first --run-id cache-second
+.venv\Scripts\python.exe scripts\e2e_agents.py --dataset-manager-repo .var\dataset-manager-local --scenario cache-reuse --reuse-runtime-data .var\e2e\cache-first --model-id resnet18_groupnorm --training-timeout 300 --run-id cache-model-switch
+.venv\Scripts\python.exe scripts\e2e_agents.py --dataset-manager-repo .var\dataset-manager-local --scenario cache-repair --reuse-runtime-data .var\e2e\cache-first --run-id cache-repair
+```
+
+Lượt đầu tạo Build synthetic 192 mẫu qua Dataset Manager. Các lượt sau đọc
+`smoke-state.json`, dùng lại database/Node identity và chính Build ID/hash đã lưu;
+không gọi API tạo Dataset hoặc Build. Build phải READY và Job phải qua validate.
+Model không nằm trong khóa cache. Mỗi Worker giữ `all_shards`.
+
+Cache ổn định tại `<agent-state>/worker-cache/<hash(Build ID, manifest hash, shard ID)>`.
+Worker xác minh dữ liệu vật lý trước HTTP; cache đúng trả `cache_reused=True`,
+`bytes=0` cho từng shard. Cache thiếu/sai được sửa trước SHARD_READY, giữ batch
+đúng hash và chỉ tải batch thiếu/sai. Publication có khóa filesystem do OS quản lý.
+Lượt repair cố ý làm hỏng ba entry thử nghiệm: thiếu một batch, sai hash một batch,
+sai hash một root manifest; yêu cầu chỉ có hai HTTP GET batch.
+
+`result.json` ghi identity Build, từng shard/Worker, byte tải thực tế, HTTP artifact
+paths, số HTTP GET batch và fingerprint artifact/cache trước/sau cleanup.
+Runtime/Backend vẫn được đọc manifest để xác minh contract; warm Worker không
+download manifest hoặc batch. `cache-reuse` fail nếu một shard không reuse.
+Port Dataset Manager được giữ khi restart vì catalog local chứa URL cố định.
+
+`--storage-backend local|huggingface` lấy mặc định từ `DATASET_STORAGE_BACKEND`
+trong environment/`.env`. HF mode dùng cấu hình `HF_REPO_ID`, `HF_TOKEN`,
+`HF_BRANCH` của Dataset Manager và cần dependency HF trong interpreter chạy nó.
+Không purge HF khi cleanup. Bằng chứng hiện tại dùng LocalArtifactStore;
+test URL HF dùng HTTP opener giả lập, chưa kiểm chứng upload/download HF thật.
+
+Harness cũ `e2e_local.py` cũng giữ runtime data mặc định; chỉ flag
+`--purge-runtime-data` mới xóa local state sau thành công. Agent harness luôn giữ
+state để dùng lại; reset được thực hiện riêng theo yêu cầu người dùng.
 
 Dataset Manager được sửa trên clone local riêng, không push. Bản bundle để
 chuyển sang máy khác nằm ở `artifacts/e2e/dataset-manager-smoke.bundle`:

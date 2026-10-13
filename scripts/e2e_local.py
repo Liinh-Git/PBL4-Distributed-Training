@@ -890,7 +890,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-timeout", type=float, default=1800.0)
     parser.add_argument("--training-timeout", type=float, default=36000.0)
     parser.add_argument("--smoke-steps", type=int, default=0)
-    parser.add_argument("--preserve-runtime-data", action="store_true")
+    parser.add_argument("--preserve-runtime-data", action="store_true", default=True)
+    parser.add_argument(
+        "--purge-runtime-data",
+        dest="preserve_runtime_data",
+        action="store_false",
+        help="Explicitly delete this harness's local runtime data after success",
+    )
     return parser
 
 

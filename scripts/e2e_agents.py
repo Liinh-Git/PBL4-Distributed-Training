@@ -10,6 +10,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -52,7 +53,27 @@ def stop_tree(proc):
 
 class AgentHarness(Harness):
     def __init__(self, args: argparse.Namespace):
+        self.reused_state = None
+        if args.reuse_runtime_data:
+            state_path = Path(args.reuse_runtime_data) / "smoke-state.json"
+            self.reused_state = json.loads(state_path.read_text())
+            for option, field in [
+                ("reuse_build_id", "dataset_build_id"),
+                ("reuse_dataset_id", "dataset_id"),
+            ]:
+                supplied = getattr(args, option)
+                if supplied and supplied != self.reused_state[field]:
+                    raise ValueError(f"{option} differs from persisted smoke state")
+                setattr(args, option, self.reused_state[field])
+            if args.dataset_port and args.dataset_port != self.reused_state["dataset_port"]:
+                raise ValueError(
+                    "Reused local artifact URLs require the original Dataset Manager port"
+                )
+            args.dataset_port = self.reused_state["dataset_port"]
+            if args.storage_backend != self.reused_state["storage"]:
+                raise ValueError("Storage backend differs from persisted smoke state")
         super().__init__(args)
+        self.result["runtime_data"] = str(self.runtime_data)
         self.result["case"] = "LOCAL-THREE-AGENTS"
         self.result["source_commit"] = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=self.repo, text=True
@@ -149,7 +170,7 @@ class AgentHarness(Harness):
                 sys.executable,
                 "scripts/derive_parameter_manifest.py",
                 "--model-id",
-                "small_cnn",
+                self.args.model_id,
                 "--seed",
                 str(self.args.training_seed),
                 "--output",
@@ -160,7 +181,7 @@ class AgentHarness(Harness):
         manifest = json.loads(manifest_path.read_text())
         parameter_hash = manifest["parameter_manifest_hash"]
         self.result["model"] = {
-            "model_id": "small_cnn",
+            "model_id": self.args.model_id,
             "numel": manifest["total_numel"],
             "parameter_manifest_hash": parameter_hash,
             "training_seed": self.args.training_seed,
@@ -168,7 +189,7 @@ class AgentHarness(Harness):
         self.result["dataset_manager_commit"] = subprocess.check_output(
             ["git", "-C", str(dm_repo), "rev-parse", "HEAD"], text=True
         ).strip()
-        env["PARAMETER_MANIFEST_HASH_SMALL_CNN"] = parameter_hash
+        env[f"PARAMETER_MANIFEST_HASH_{self.args.model_id.upper()}"] = parameter_hash
         checkpoint_dir = self.artifacts / "checkpoints"
         self.start_child(
             "dataset-manager",
@@ -187,7 +208,7 @@ class AgentHarness(Harness):
                 "--public-base-url",
                 self.dataset_manager_url,
                 "--storage-backend",
-                "local",
+                self.args.storage_backend,
                 "--http",
                 "h11",
             ],
@@ -217,7 +238,7 @@ class AgentHarness(Harness):
             ],
             env,
         )
-        if self.args.scenario != "happy":
+        if self.args.scenario not in {"happy", "cache-reuse", "cache-repair"}:
             self.proxy = SlowPeerProxy(self.dtp_port)
         worker_port = self.proxy.port if self.proxy else self.dtp_port
         self.start_child(
@@ -255,21 +276,24 @@ class AgentHarness(Harness):
         for index in range(3):
             agent_dir = self.runtime_data / f"agent-{index}"
             self.agent_dirs.append(agent_dir)
-            code = self.request("POST", "/api/v1/nodes/enrollment-codes")["data"]["enrollment_code"]
-            self.checked(
-                f"enroll-{index}",
-                [
-                    sys.executable,
-                    "-m",
-                    "pbl4.node_agent.entrypoint",
-                    "enroll",
-                    "--backend-url",
-                    self.base_url,
-                    "--var-dir",
-                    str(agent_dir),
-                ],
-                env={**env, "PBL4_ENROLLMENT_CODE": code},
-            )
+            if not self.reused_state:
+                code = self.request("POST", "/api/v1/nodes/enrollment-codes")["data"][
+                    "enrollment_code"
+                ]
+                self.checked(
+                    f"enroll-{index}",
+                    [
+                        sys.executable,
+                        "-m",
+                        "pbl4.node_agent.entrypoint",
+                        "enroll",
+                        "--backend-url",
+                        self.base_url,
+                        "--var-dir",
+                        str(agent_dir),
+                    ],
+                    env={**env, "PBL4_ENROLLMENT_CODE": code},
+                )
             self.start_child(
                 f"agent-{index}",
                 [
@@ -298,6 +322,103 @@ class AgentHarness(Harness):
         self.result["agent_pids"] = [
             c.process.pid for c in self.children if c.name.startswith("agent-")
         ]
+        if self.reused_state:
+            ds = {"dataset_id": self.args.reuse_dataset_id}
+            build = self.request("GET", f"/api/v1/dataset-builds/{self.args.reuse_build_id}")[
+                "data"
+            ]
+        else:
+            ds, build = self.create_dataset_build()
+        build_id = build["dataset_build_id"]
+        build = self.wait_value(
+            lambda: self.request("GET", f"/api/v1/dataset-builds/{build_id}")["data"],
+            lambda v: v["state"] in {"READY", "FAILED"},
+            60,
+            "Dataset Build READY",
+        )
+        if build["state"] != "READY":
+            raise AssertionError(f"Build failed: {build}")
+        summary = build["manifest_summary"]
+        if (
+            self.reused_state
+            and summary["dataset_manifest_hash"] != self.reused_state["dataset_manifest_hash"]
+        ):
+            raise AssertionError("Reused Build manifest hash changed")
+        import urllib.request
+
+        with urllib.request.urlopen(summary["manifest_uri"], timeout=10) as res:
+            raw = res.read()
+        root = json.loads(raw)
+        if _canonical(root) != raw or _sha256(raw) != summary["dataset_manifest_hash"]:
+            raise AssertionError("Dataset manifest hash mismatch")
+        if (
+            root["dataset_id"] != "synthetic_smoke_v1"
+            or root["sample_count"] != 192
+            or root["shard_count"] != 3
+        ):
+            raise AssertionError("Unexpected smoke dataset provenance/size")
+        total_steps = root["batch_count_per_shard"]
+        if total_steps < 3:
+            raise AssertionError("Smoke must complete at least 3 steps")
+        self.result["dataset"] = {
+            "dataset_id": ds["dataset_id"],
+            "dataset_build_id": build_id,
+            "dataset_manifest_hash": summary["dataset_manifest_hash"],
+            "sample_count": root["sample_count"],
+            "batch_size": 16,
+            "source": "synthetic_smoke_v1",
+            "storage": self.args.storage_backend,
+            "build_reused": bool(self.reused_state),
+        }
+        (self.runtime_data / "smoke-state.json").write_text(
+            json.dumps(
+                {
+                    **self.result["dataset"],
+                    "dataset_port": self.dataset_port,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        if self.args.scenario == "cache-repair":
+            self.inject_cache_faults()
+        job = self.request(
+            "POST",
+            "/api/v1/jobs",
+            {
+                "display_name": "Three Agent local smoke",
+                "requested_contract": {
+                    "dataset_build_id": build_id,
+                    "model_id": self.args.model_id,
+                    "epochs": 1,
+                    "learning_rate": 0.01,
+                    "training_seed": self.args.training_seed,
+                    "training_strategy": "strict_bsp",
+                },
+            },
+            idempotency_key=self.run_id + "-job",
+        )["data"]
+        job_id = job["job_id"]
+        validation = self.request("POST", f"/api/v1/jobs/{job_id}/validate")["data"]
+        if validation["errors"]:
+            raise AssertionError(f"Job validation failed: {validation}")
+        started = self.request(
+            "POST", f"/api/v1/jobs/{job_id}/start", {}, idempotency_key=self.run_id + "-start"
+        )["data"]
+        frozen = self.request("GET", f"/api/v1/jobs/{job_id}")["data"]
+        resolved = frozen["resolved_contract"]["dataset"]
+        if (
+            resolved["dataset_build_id"] != build_id
+            or resolved["dataset_manifest_hash"] != summary["dataset_manifest_hash"]
+        ):
+            raise AssertionError("Job did not freeze the selected Build identity")
+        attempt_id = started["attempt_id"]
+        self.result["job"] = {"job_id": job_id, "attempt_id": attempt_id, "execution_mode": "FRESH"}
+        return self.run_attempt(
+            env, nodes, job_id, attempt_id, total_steps, parameter_hash, checkpoint_dir
+        )
+
+    def create_dataset_build(self):
         ds = self.request(
             "POST",
             "/api/v1/datasets",
@@ -320,69 +441,11 @@ class AgentHarness(Harness):
             },
             idempotency_key=self.run_id + "-build",
         )["data"]
-        build_id = build["dataset_build_id"]
-        build = self.wait_value(
-            lambda: self.request("GET", f"/api/v1/dataset-builds/{build_id}")["data"],
-            lambda v: v["state"] in {"READY", "FAILED"},
-            60,
-            "Dataset Build READY",
-        )
-        if build["state"] != "READY":
-            raise AssertionError(f"Build failed: {build}")
-        import urllib.request
+        return ds, build
 
-        with urllib.request.urlopen(
-            build["manifest_summary"]["artifact_base_url"] + "/manifest.json", timeout=10
-        ) as res:
-            raw = res.read()
-        root = json.loads(raw)
-        if (
-            _canonical(root) != raw
-            or _sha256(raw) != build["manifest_summary"]["dataset_manifest_hash"]
-        ):
-            raise AssertionError("Dataset manifest hash mismatch")
-        if (
-            root["dataset_id"] != "synthetic_smoke_v1"
-            or root["sample_count"] != 192
-            or root["shard_count"] != 3
-        ):
-            raise AssertionError("Unexpected smoke dataset provenance/size")
-        total_steps = root["batch_count_per_shard"]
-        if total_steps < 3:
-            raise AssertionError("Smoke must complete at least 3 steps")
-        self.result["dataset"] = {
-            "dataset_id": ds["dataset_id"],
-            "dataset_build_id": build_id,
-            "sample_count": root["sample_count"],
-            "batch_size": 16,
-            "source": "synthetic_smoke_v1",
-            "storage": "local",
-        }
-        job = self.request(
-            "POST",
-            "/api/v1/jobs",
-            {
-                "display_name": "Three Agent local smoke",
-                "requested_contract": {
-                    "dataset_build_id": build_id,
-                    "model_id": "small_cnn",
-                    "epochs": 1,
-                    "learning_rate": 0.01,
-                    "training_seed": self.args.training_seed,
-                    "training_strategy": "strict_bsp",
-                },
-            },
-            idempotency_key=self.run_id + "-job",
-        )["data"]
-        job_id = job["job_id"]
-        validation = self.request("POST", f"/api/v1/jobs/{job_id}/validate")["data"]
-        if validation["errors"]:
-            raise AssertionError(f"Job validation failed: {validation}")
-        started = self.request(
-            "POST", f"/api/v1/jobs/{job_id}/start", {}, idempotency_key=self.run_id + "-start"
-        )["data"]
-        attempt_id = started["attempt_id"]
-        self.result["job"] = {"job_id": job_id, "attempt_id": attempt_id, "execution_mode": "FRESH"}
+    def run_attempt(
+        self, env, nodes, job_id, attempt_id, total_steps, parameter_hash, checkpoint_dir
+    ):
         if self.args.scenario == "agent-restart":
             self.wait_value(
                 lambda: self._poll_smoke(attempt_id),
@@ -525,6 +588,7 @@ class AgentHarness(Harness):
         if {w["node_id"] for w in self.result["workers"]} != {n["node_id"] for n in nodes}:
             raise AssertionError("Runtime membership does not match enrolled Nodes")
         self.result["worker_processes"] = records
+        self.verify_cache_evidence(records)
         self.result["allocations"] = self.wait_value(
             lambda: self.allocations(attempt_id),
             lambda v: len(v) == 3 and all(n["actual_state"] in {"ENDED", "FAILED"} for n in v),
@@ -547,6 +611,99 @@ class AgentHarness(Harness):
             )
             time.sleep(self.args.hold_seconds)
         return self.result
+
+    def verify_cache_evidence(self, records):
+        pattern = re.compile(
+            r"Dataset cache build_id=(\S+) manifest_hash=(\S+) shard_id=(\d+) "
+            r"cache_reused=(True|False) bytes=(\d+)"
+        )
+        evidence = []
+        for record in records:
+            agent_dir = next(
+                d
+                for d in self.agent_dirs
+                if record["allocation_id"] in json.loads((d / "allocations.json").read_text())
+            )
+            log = (agent_dir / f"worker-{record['allocation_id']}.log").read_text(errors="replace")
+            matches = pattern.findall(log)
+            if {int(m[2]) for m in matches} != {0, 1, 2} or len(matches) != 3:
+                raise AssertionError("Worker did not report verification for all_shards")
+            for build_id, manifest_hash, shard_id, reused, size in matches:
+                if (
+                    build_id != self.result["dataset"]["dataset_build_id"]
+                    or manifest_hash != self.result["dataset"]["dataset_manifest_hash"]
+                ):
+                    raise AssertionError("Worker cache identity differs from frozen Build")
+                evidence.append(
+                    {
+                        "allocation_id": record["allocation_id"],
+                        "shard_id": int(shard_id),
+                        "cache_reused": reused == "True",
+                        "bytes_downloaded": int(size),
+                    }
+                )
+        dm_log = (self.logs / "dataset-manager.log").read_text(errors="replace")
+        paths = re.findall(r'"GET ([^ ]+) HTTP/1\.[01]" 200', dm_log)
+        batch_requests = [p for p in paths if "/batches/" in p or p.endswith(".npz")]
+        self.result["cache"] = {
+            "shards": evidence,
+            "worker_bytes_downloaded": sum(e["bytes_downloaded"] for e in evidence),
+            "artifact_batch_http_requests": len(batch_requests),
+            "artifact_http_paths": [p for p in paths if "/artifacts/" in p],
+        }
+        if (
+            self.reused_state
+            and self.args.scenario == "cache-reuse"
+            and (
+                any(not e["cache_reused"] or e["bytes_downloaded"] for e in evidence)
+                or batch_requests
+            )
+        ):
+            raise AssertionError("Warm run downloaded data instead of reusing all cached shards")
+        if self.args.scenario == "cache-repair":
+            misses = {
+                (e["allocation_id"], e["shard_id"]) for e in evidence if not e["cache_reused"]
+            }
+            if len(misses) != 3 or len(batch_requests) != 2:
+                raise AssertionError("Cache repair did not fetch exactly the two damaged batches")
+
+    def inject_cache_faults(self):
+        if not self.reused_state:
+            raise ValueError("cache-repair requires --reuse-runtime-data")
+        build = self.result["dataset"]
+        faults = []
+        for shard_id, agent_dir in enumerate(self.agent_dirs):
+            key = _sha256(
+                _canonical([build["dataset_build_id"], build["dataset_manifest_hash"], shard_id])
+            )
+            directory = agent_dir / "worker-cache" / key
+            shard = json.loads((directory / "shard-manifest.json").read_text())
+            batch = directory / shard["batches"][0]["relative_filename"]
+            if shard_id == 0:
+                batch.unlink()
+                fault = "missing_batch"
+            elif shard_id == 1:
+                original = batch.read_bytes()
+                batch.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+                fault = "wrong_batch_hash"
+            else:
+                (directory / "dataset-manifest.json").write_bytes(b"{}")
+                fault = "wrong_manifest_hash"
+            faults.append({"agent": agent_dir.name, "shard_id": shard_id, "fault": fault})
+        self.result["cache_faults"] = faults
+
+    def data_fingerprints(self):
+        roots = [self.runtime_data / "datasets", *(d / "worker-cache" for d in self.agent_dirs)]
+        return {
+            str(path.relative_to(self.runtime_data)): _sha256(path.read_bytes())
+            for root in roots
+            for path in root.rglob("*")
+            if path.is_file()
+            and (
+                path.suffix == ".npz"
+                or path.name in {"dataset-manifest.json", "shard-manifest.json"}
+            )
+        }
 
     def check_recovery(self, job_id, fresh_attempt, checkpoint_dir, parameter_hash):
         import numpy as np
@@ -675,6 +832,7 @@ class AgentHarness(Harness):
 
     def finish(self, error):
         failures = []
+        before_cleanup = self.data_fingerprints()
         if self.proxy:
             try:
                 self.proxy.close()
@@ -701,6 +859,12 @@ class AgentHarness(Harness):
                 child.stop()
             except Exception as exc:
                 failures.append(f"{child.name}: {exc}")
+        after_cleanup = self.data_fingerprints()
+        self.result["data_preserved_after_cleanup"] = before_cleanup == after_cleanup
+        self.result["retained_artifact_files"] = len(after_cleanup)
+        self.result["retained_artifact_tree_hash"] = _sha256(_canonical(after_cleanup))
+        if before_cleanup != after_cleanup:
+            failures.append("Process cleanup altered dataset/cache artifacts")
         self.result["cleanup"] = failures if failures else "PASS"
         self.result["finished_at"] = _now()
         self.result["duration_seconds"] = round(time.monotonic() - self.started_at, 3)
@@ -715,14 +879,33 @@ class AgentHarness(Harness):
 
 
 def main():
+    from dotenv import load_dotenv
+
+    load_dotenv()
     parser = _parser()
     parser.description = __doc__
     parser.add_argument("--dataset-manager-repo", required=True)
     parser.add_argument("--hold-seconds", type=int, default=0)
     parser.add_argument(
         "--scenario",
-        choices=["happy", "slow", "disconnect", "recovery", "agent-restart"],
+        choices=[
+            "happy",
+            "slow",
+            "disconnect",
+            "recovery",
+            "agent-restart",
+            "cache-reuse",
+            "cache-repair",
+        ],
         default="happy",
+    )
+    parser.add_argument(
+        "--model-id", choices=["small_cnn", "resnet18_groupnorm"], default="small_cnn"
+    )
+    parser.add_argument(
+        "--storage-backend",
+        choices=["local", "huggingface"],
+        default=os.environ.get("DATASET_STORAGE_BACKEND", "local"),
     )
     parser.set_defaults(
         batch_size=16, poll_interval=0.25, heartbeat_timeout=15, training_timeout=120
@@ -730,9 +913,15 @@ def main():
     args = parser.parse_args()
     if not 0 <= args.hold_seconds <= 600:
         parser.error("--hold-seconds must be between 0 and 600")
-    if args.database_url or args.reuse_runtime_data or args.dataset_manager_url:
+    if args.database_url or args.dataset_manager_url:
         parser.error(
-            "Agent smoke uses a fresh private PostgreSQL cluster and local Dataset Manager"
+            "Agent smoke uses its private PostgreSQL cluster and subprocess Dataset Manager"
+        )
+    if args.scenario == "recovery" and args.model_id != "small_cnn":
+        parser.error("Recovery numerical oracle uses SmallCNN; model-switch smoke uses cache-reuse")
+    if not args.preserve_runtime_data:
+        parser.error(
+            "Agent smoke preserves reusable state; reset its local data explicitly after inspection"
         )
     harness = AgentHarness(args)
     error = None

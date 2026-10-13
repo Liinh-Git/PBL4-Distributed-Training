@@ -285,7 +285,7 @@ class WorkerProcessSupervisor:
                 "--model-id",
                 command.model_id,
                 "--cache-dir",
-                str(self.var_dir / "worker-cache" / command.allocation_id),
+                str(self.var_dir / "worker-cache"),
             ]
 
             env = os.environ.copy()

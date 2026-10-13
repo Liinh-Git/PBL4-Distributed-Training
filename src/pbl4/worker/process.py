@@ -193,6 +193,7 @@ class WorkerProcess:
             **downloader_kwargs,
         )
         result = downloader.provision(key)
+        provisioned = {key.shard_id: result}
         dataset_cache: DatasetCache | None = None
         if assignment.cache_scope == "all_shards":
             cached_shards = {key.shard_id: result.shard}
@@ -210,6 +211,7 @@ class WorkerProcess:
                         s_id,
                     )
                     s_result = downloader.provision(s_key)
+                    provisioned[s_id] = s_result
                     cached_shards[s_id] = s_result.shard
             dataset_cache = DatasetCache(
                 str(assignment.dataset_build_id),
@@ -218,6 +220,16 @@ class WorkerProcess:
                 root_manifest=result.shard.root_manifest,
             )
             dataset_cache.verify_all()
+
+        for s_id, provision in sorted(provisioned.items()):
+            logger.info(
+                "Dataset cache build_id=%s manifest_hash=%s shard_id=%s cache_reused=%s bytes=%s",
+                assignment.dataset_build_id,
+                assignment.dataset_manifest_hash,
+                s_id,
+                provision.cache_reused,
+                provision.bytes_downloaded,
+            )
 
         with self._lock:
             self._loop = TrainingLoop(
