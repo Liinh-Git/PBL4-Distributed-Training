@@ -1058,9 +1058,7 @@ def test_failed_attempt_ignores_stale_snapshot_running() -> None:
     assert authoritative["attempt_state"] == "FAILED"
 
 
-def test_snapshot_seq_lower_than_authoritative_does_not_rollback_state_or_cursor_or_model_version() -> (
-    None
-):
+def test_older_snapshot_preserves_state_cursor_and_model_version() -> None:
     """An older snapshot must not roll back state, model version, or cursor."""
     gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
     cursor = gateway.get_cursor("attempt-rollback-guard")
