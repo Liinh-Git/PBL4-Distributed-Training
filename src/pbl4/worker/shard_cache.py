@@ -158,7 +158,7 @@ class ShardCache:
             with self._publication_lock(key):
                 if final.exists() or final.is_symlink():
                     try:
-                        existing = self.load(key)
+                        existing = self._load_unlocked(key)
                     except (OSError, ValueError):
                         retired = self._parts / (uuid4().hex + ".invalid")
                         os.rename(final, retired)
@@ -223,13 +223,20 @@ class ShardCache:
         directory = self._root / key.directory_key
         if directory.is_symlink() or not directory.is_dir():
             raise ValueError("Cache entry is unavailable")
-        path = _safe(directory, entry["relative_filename"])
-        content = path.read_bytes()
-        if len(content) != entry["byte_size"] or sha256_bytes(content) != entry["sha256"]:
-            raise ValueError("Cached batch integrity mismatch")
-        return content
+        with self._publication_lock(key):
+            path = _safe(directory, entry["relative_filename"])
+            content = path.read_bytes()
+            if len(content) != entry["byte_size"] or sha256_bytes(content) != entry["sha256"]:
+                raise ValueError("Cached batch integrity mismatch")
+            return content
 
     def load(self, key: ShardCacheKey) -> CachedShard:
+        if not self._root.is_dir():
+            raise ValueError("Verified shard cache entry is unavailable")
+        with self._publication_lock(key):
+            return self._load_unlocked(key)
+
+    def _load_unlocked(self, key: ShardCacheKey) -> CachedShard:
         directory = self._root / key.directory_key
         if directory.is_symlink() or not directory.is_dir():
             raise ValueError("Verified shard cache entry is unavailable")

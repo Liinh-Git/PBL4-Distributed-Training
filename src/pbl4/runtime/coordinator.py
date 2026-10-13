@@ -170,6 +170,7 @@ class Coordinator:
                             "batch_id": item.batch_id,
                             "batch_ordinal": item.batch_ordinal,
                             "sample_count": item.sample_count,
+                            "work_units": [u.to_dict() for u in item.work_units],
                         }
                         for item in assignments
                     ],

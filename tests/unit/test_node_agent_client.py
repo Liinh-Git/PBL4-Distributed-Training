@@ -147,6 +147,7 @@ def test_handle_start_worker_success(
         mock_supervisor.spawn_worker.return_value = (COMMAND_STATUS_ACCEPTED, None)
 
         cmd = StartWorkerPayload(
+            model_id="resnet18_groupnorm",
             command_id="cmd-start-1",
             allocation_id="alloc-new",
             attempt_id="att-1",
@@ -201,6 +202,7 @@ def test_handle_duplicate_start_worker_noop(
         mock_supervisor.spawn_worker.return_value = (COMMAND_STATUS_ACCEPTED, None)
 
         cmd = StartWorkerPayload(
+            model_id="resnet18_groupnorm",
             command_id="cmd-start-dup",
             allocation_id="alloc-dup",
             attempt_id="att-1",
@@ -248,6 +250,7 @@ def test_handle_start_worker_terminal_rejected(
         )
 
         cmd = StartWorkerPayload(
+            model_id="resnet18_groupnorm",
             command_id="cmd-start-dead",
             allocation_id="alloc-dead",
             attempt_id="att-1",

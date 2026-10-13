@@ -36,9 +36,6 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 from pbl4.management_backend.services.node_enrollment_service import (
-    NodeEnrollmentCodeExpiredError,
-    NodeEnrollmentCodeInvalidError,
-    create_enrollment_code,
     enroll_node,
     hash_secret,
 )
@@ -58,142 +55,25 @@ class TestNodeEnrollmentService(unittest.TestCase):
         self.mock_conn = MagicMock()
         self.now = datetime.now(UTC)
 
-    @patch("pbl4.management_backend.repositories.node_enrollment_repository.create_enrollment_code")
-    def test_01_create_enrollment_code(self, mock_repo_create: MagicMock) -> None:
-        mock_repo_create.return_value = {
-            "code_hash": "hash123",
-            "created_at": self.now,
-            "expires_at": self.now + timedelta(seconds=3600),
-            "used_at": None,
-        }
-        res = create_enrollment_code(self.mock_conn, ttl_seconds=3600, now=self.now)
-        self.assertIn("enrollment_code", res)
-        self.assertIn("code_hash", res)
-        self.assertTrue(len(res["enrollment_code"]) >= 32)
-        mock_repo_create.assert_called_once()
-
-    @patch("pbl4.management_backend.repositories.node_enrollment_repository.create_enrollment_code")
-    def test_02_code_hashed_before_persistence(self, mock_repo_create: MagicMock) -> None:
-        mock_repo_create.return_value = {
-            "code_hash": "dummy",
-            "created_at": self.now,
-            "expires_at": self.now + timedelta(seconds=3600),
-        }
-        res = create_enrollment_code(self.mock_conn, ttl_seconds=1800, now=self.now)
-        raw_code = res["enrollment_code"]
-        expected_hash = hashlib.sha256(raw_code.encode("utf-8")).hexdigest()
-
-        # Check repository was called with code_hash, NOT plaintext raw_code
-        mock_repo_create.assert_called_once()
-        kwargs = mock_repo_create.call_args.kwargs
-        self.assertEqual(kwargs["code_hash"], expected_hash)
-        self.assertNotIn(raw_code, str(mock_repo_create.call_args))
-
-    @patch("pbl4.management_backend.repositories.node_enrollment_repository.consume_code_if_valid")
     @patch("pbl4.management_backend.repositories.node_repository.create_node")
-    def test_03_consume_via_repository(
-        self,
-        mock_create_node: MagicMock,
-        mock_consume: MagicMock,
-    ) -> None:
-        mock_consume.return_value = {"code_hash": "hash_val", "used_at": self.now}
-        mock_create_node.return_value = {
-            "node_id": "node-123",
-            "state": "OFFLINE",
-            "display_name": "Test Node",
-        }
-
-        res = enroll_node(
-            self.mock_conn,
-            enrollment_code="valid-secret-code",
-            capabilities={"hostname": "host-01"},
-            now=self.now,
-        )
-
-        expected_hash = hashlib.sha256(b"valid-secret-code").hexdigest()
-        mock_consume.assert_called_once_with(
-            self.mock_conn,
-            code_hash=expected_hash,
-            now=self.now,
-        )
-        self.assertEqual(res["node_id"], "node-123")
-        self.assertIn("node_secret", res)
-
-    @patch("pbl4.management_backend.repositories.node_enrollment_repository.get_enrollment_code")
-    @patch("pbl4.management_backend.repositories.node_enrollment_repository.consume_code_if_valid")
-    def test_04_code_invalid_or_expired_handled(
-        self,
-        mock_consume: MagicMock,
-        mock_get: MagicMock,
-    ) -> None:
-        mock_consume.return_value = None
-
-        # Case 1: Code does not exist in DB
-        mock_get.return_value = None
-        with self.assertRaises(NodeEnrollmentCodeInvalidError) as ctx:
-            enroll_node(self.mock_conn, enrollment_code="non-existent-code", now=self.now)
-        self.assertEqual(ctx.exception.code, "NODE_ENROLLMENT_CODE_INVALID")
-
-        # Case 2: Code already used
-        mock_get.return_value = {
-            "code_hash": "hash",
-            "used_at": self.now - timedelta(seconds=60),
-            "expires_at": self.now + timedelta(seconds=3000),
-        }
-        with self.assertRaises(NodeEnrollmentCodeInvalidError) as ctx2:
-            enroll_node(self.mock_conn, enrollment_code="used-code", now=self.now)
-        self.assertEqual(ctx2.exception.code, "NODE_ENROLLMENT_CODE_INVALID")
-
-        # Case 3: Code expired
-        mock_get.return_value = {
-            "code_hash": "hash",
-            "used_at": None,
-            "expires_at": self.now - timedelta(seconds=10),
-        }
-        with self.assertRaises(NodeEnrollmentCodeExpiredError) as ctx3:
-            enroll_node(self.mock_conn, enrollment_code="expired-code", now=self.now)
-        self.assertEqual(ctx3.exception.code, "NODE_ENROLLMENT_CODE_EXPIRED")
-
-    @patch("pbl4.management_backend.repositories.node_enrollment_repository.consume_code_if_valid")
-    @patch("pbl4.management_backend.repositories.node_repository.create_node")
-    def test_05_creates_node_id(
-        self,
-        mock_create_node: MagicMock,
-        mock_consume: MagicMock,
-    ) -> None:
-        mock_consume.return_value = {"code_hash": "hash"}
+    def test_01_creates_node_id(self, mock_create_node: MagicMock) -> None:
         mock_create_node.side_effect = lambda conn, **kwargs: dict(kwargs)
-
-        res = enroll_node(self.mock_conn, enrollment_code="code-123", now=self.now)
+        res = enroll_node(self.mock_conn, now=self.now)
         self.assertTrue(res["node_id"].startswith("node-"))
         self.assertTrue(len(res["node_id"]) >= 10)
 
-    @patch("pbl4.management_backend.repositories.node_enrollment_repository.consume_code_if_valid")
     @patch("pbl4.management_backend.repositories.node_repository.create_node")
-    def test_06_creates_node_secret(
-        self,
-        mock_create_node: MagicMock,
-        mock_consume: MagicMock,
-    ) -> None:
-        mock_consume.return_value = {"code_hash": "hash"}
+    def test_02_creates_node_secret(self, mock_create_node: MagicMock) -> None:
         mock_create_node.side_effect = lambda conn, **kwargs: dict(kwargs)
-
-        res = enroll_node(self.mock_conn, enrollment_code="code-123", now=self.now)
+        res = enroll_node(self.mock_conn, now=self.now)
         secret = res["node_secret"]
         self.assertIsInstance(secret, str)
         self.assertTrue(len(secret) >= 32)
 
-    @patch("pbl4.management_backend.repositories.node_enrollment_repository.consume_code_if_valid")
     @patch("pbl4.management_backend.repositories.node_repository.create_node")
-    def test_07_stores_credential_hash(
-        self,
-        mock_create_node: MagicMock,
-        mock_consume: MagicMock,
-    ) -> None:
-        mock_consume.return_value = {"code_hash": "hash"}
+    def test_03_stores_credential_hash(self, mock_create_node: MagicMock) -> None:
         mock_create_node.side_effect = lambda conn, **kwargs: dict(kwargs)
-
-        res = enroll_node(self.mock_conn, enrollment_code="code-123", now=self.now)
+        res = enroll_node(self.mock_conn, now=self.now)
         secret = res["node_secret"]
         expected_hash = hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
@@ -202,41 +82,40 @@ class TestNodeEnrollmentService(unittest.TestCase):
         # Plaintext secret must never be passed to repository
         self.assertNotIn(secret, str(mock_create_node.call_args))
 
-    @patch("pbl4.management_backend.repositories.node_enrollment_repository.consume_code_if_valid")
     @patch("pbl4.management_backend.repositories.node_repository.create_node")
-    def test_08_plaintext_secret_returned_once(
-        self,
-        mock_create_node: MagicMock,
-        mock_consume: MagicMock,
-    ) -> None:
-        mock_consume.return_value = {"code_hash": "hash"}
+    def test_04_plaintext_secret_returned_once(self, mock_create_node: MagicMock) -> None:
         mock_create_node.return_value = {"node_id": "node-1", "state": "OFFLINE"}
-
-        res = enroll_node(self.mock_conn, enrollment_code="code-123", now=self.now)
+        res = enroll_node(self.mock_conn, now=self.now)
         self.assertIn("node_secret", res)
-        # Second consume fails because code is one-time
-        mock_consume.return_value = None
-        with patch(
-            "pbl4.management_backend.repositories.node_enrollment_repository.get_enrollment_code"
-        ) as mock_get:
-            mock_get.return_value = {"code_hash": "hash", "used_at": self.now}
-            with self.assertRaises(NodeEnrollmentCodeInvalidError):
-                enroll_node(self.mock_conn, enrollment_code="code-123", now=self.now)
+        self.assertEqual(res["node_id"], "node-1")
 
-    @patch("pbl4.management_backend.repositories.node_enrollment_repository.consume_code_if_valid")
     @patch("pbl4.management_backend.repositories.node_repository.create_node")
-    def test_09_new_node_state_is_offline(
-        self,
-        mock_create_node: MagicMock,
-        mock_consume: MagicMock,
-    ) -> None:
-        mock_consume.return_value = {"code_hash": "hash"}
+    def test_05_new_node_state_is_offline(self, mock_create_node: MagicMock) -> None:
         mock_create_node.side_effect = lambda conn, **kwargs: dict(kwargs)
-
-        res = enroll_node(self.mock_conn, enrollment_code="code-123", now=self.now)
+        res = enroll_node(self.mock_conn, now=self.now)
         kwargs = mock_create_node.call_args.kwargs
         self.assertEqual(kwargs["state"], "OFFLINE")
         self.assertEqual(res["node"]["state"], "OFFLINE")
+
+    @patch("pbl4.management_backend.repositories.node_repository.create_node")
+    def test_06_custom_node_id_and_display_name(self, mock_create_node: MagicMock) -> None:
+        mock_create_node.side_effect = lambda conn, **kwargs: dict(kwargs)
+        res = enroll_node(
+            self.mock_conn,
+            node_id="custom-worker-01",
+            display_name="GPU Worker 1",
+            capabilities={"gpu": "A100"},
+            agent_version="1.0.0",
+            platform="Linux",
+            now=self.now,
+        )
+        self.assertEqual(res["node_id"], "custom-worker-01")
+        kwargs = mock_create_node.call_args.kwargs
+        self.assertEqual(kwargs["display_name"], "GPU Worker 1")
+        self.assertEqual(kwargs["capabilities_jsonb"], {"gpu": "A100"})
+        self.assertEqual(kwargs["agent_version"], "1.0.0")
+        self.assertEqual(kwargs["platform"], "Linux")
+
 
 
 class TestNodeService(unittest.TestCase):

@@ -1,7 +1,6 @@
 """Configuration for PBL4 Node Agent.
 
 Enforces constraints from NODE_AGENT_IMPLEMENTATION_PLAN.md:
-- No persistent storage of one-time enrollment codes.
 - Only non-secret connection and polling parameters.
 """
 

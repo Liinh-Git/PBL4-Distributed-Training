@@ -10,6 +10,7 @@ import {
   CapabilitiesData,
   HealthData,
   RuntimeSnapshotData,
+  NodeItemData,
 } from '../types/api';
 
 export class SystemService {
@@ -20,6 +21,10 @@ export class SystemService {
    */
   async getHealth(): Promise<ApiResponse<HealthData>> {
     return this.client.get<HealthData>('/api/v1/health');
+  }
+
+  async getNodes(): Promise<ApiResponse<NodeItemData[]>> {
+    return this.client.get<NodeItemData[]>('/api/v1/nodes?limit=200');
   }
 
   /**

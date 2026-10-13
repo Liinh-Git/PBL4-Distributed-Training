@@ -42,7 +42,7 @@ def main() -> None:
     parser.add_argument("--cache-dir", default="var/worker-cache")
     parser.add_argument("--initialization-seed", type=int, required=True)
     parser.add_argument("--device", default="cpu")
-    parser.add_argument("--model-id", default="resnet18_groupnorm")
+    parser.add_argument("--model-id", default=None)
     parser.add_argument("--heartbeat-interval", type=float, default=5.0)
     parser.add_argument("--attempt-id", default=None, help="Managed execution attempt ID.")
     parser.add_argument("--allocation-id", default=None, help="Managed worker allocation ID.")
@@ -55,6 +55,8 @@ def main() -> None:
     import os
 
     join_token = os.getenv("PBL4_WORKER_JOIN_TOKEN")
+    if join_token and not args.model_id:
+        parser.error("--model-id is required for managed Workers")
     managed_items = (args.attempt_id, args.allocation_id, args.node_id, join_token)
     if any(item is not None for item in managed_items) and not all(
         isinstance(item, str) and item for item in managed_items

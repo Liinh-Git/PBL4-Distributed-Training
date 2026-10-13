@@ -10,7 +10,7 @@ Responsibilities:
 - Handshake: send AGENT_HELLO, receive HELLO_ACK.
 - Report only active (STARTING / RUNNING) allocations in AGENT_HELLO.
 - Heartbeat loop: periodic HEARTBEAT with active_allocations_count.
-- Telemetry loop: periodic RESOURCE_SNAPSHOT with CPU, RAM, and GPU metrics.
+- Static capabilities at enrollment/hello; no periodic hardware telemetry.
 - Worker monitoring reports unexpected process exits as WORKER_STATUS FAILED.
 - Command receive loop:
   * START_WORKER -> idempotent spawn, COMMAND_ACK, then WORKER_STATUS STARTED.
@@ -44,7 +44,6 @@ from pbl4.agent_protocol.messages import (
     MESSAGE_TYPE_COMMAND_ACK,
     MESSAGE_TYPE_HEARTBEAT,
     MESSAGE_TYPE_HELLO_ACK,
-    MESSAGE_TYPE_RESOURCE_SNAPSHOT,
     MESSAGE_TYPE_WORKER_STATUS,
     WORKER_ACTUAL_STATE_ENDED,
     WORKER_ACTUAL_STATE_FAILED,
@@ -70,7 +69,6 @@ from pbl4.node_agent.supervisor import (
     LOCAL_STATE_STOPPED,
     WorkerProcessSupervisor,
 )
-from pbl4.node_agent.telemetry import sample_resources
 
 logger = logging.getLogger(__name__)
 
@@ -236,11 +234,10 @@ class NodeAgentClient:
 
         # 4. Launch concurrent tasks
         heartbeat_task = asyncio.create_task(self._heartbeat_loop(ws), name="agent-heartbeat")
-        telemetry_task = asyncio.create_task(self._telemetry_loop(ws), name="agent-telemetry")
         monitor_task = asyncio.create_task(self._monitor_loop(ws), name="agent-monitor")
         receive_task = asyncio.create_task(self._receive_loop(ws), name="agent-receive")
 
-        tasks = [heartbeat_task, telemetry_task, monitor_task, receive_task]
+        tasks = [heartbeat_task, monitor_task, receive_task]
         self._active_tasks = set(tasks)
 
         try:
@@ -586,23 +583,4 @@ class NodeAgentClient:
                 break
             except Exception as exc:
                 logger.warning("Error in heartbeat loop: %s", exc)
-                raise exc
-
-    async def _telemetry_loop(self, ws: Any) -> None:
-        """Periodically sample host resources and send RESOURCE_SNAPSHOT to Backend."""
-        while not self._stopped:
-            try:
-                snapshot = sample_resources()
-                env = AgentEnvelope(
-                    message_type=MESSAGE_TYPE_RESOURCE_SNAPSHOT,
-                    node_id=self.identity.node_id,
-                    payload=snapshot,
-                )
-                await self._send_envelope(ws, env)
-                logger.debug("Sent RESOURCE_SNAPSHOT: CPU=%.1f%%", snapshot.cpu_utilization_pct)
-                await asyncio.sleep(self._telemetry_interval)
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                logger.warning("Error in telemetry loop: %s", exc)
                 raise exc

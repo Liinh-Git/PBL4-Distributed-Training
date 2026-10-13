@@ -259,7 +259,11 @@ def start_job(
         )
     req = body or JobStartRequest()
     attempt_row, cmd_row = attempt_service.execute_start_job(
-        db, job_id, note=req.note, idempotency_key=idempotency_key
+        db,
+        job_id,
+        note=req.note,
+        idempotency_key=idempotency_key,
+        **({"node_ids": req.node_ids} if req.node_ids is not None else {}),
     )
 
     return ItemResponse(

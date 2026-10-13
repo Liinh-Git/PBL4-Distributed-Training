@@ -1,5 +1,17 @@
 # Implementation Contract — PBL4 Distributed Training
 
+Phase 2 execution update (user-approved scope, 2026-10-13): in the trusted test
+environment, `pbl4-agent start` auto-enrolls via `POST /api/v1/nodes/enroll`
+without an enrollment code, then persists/reuses Node identity. Periodic hardware
+telemetry is disabled; static capabilities, heartbeat and Worker status remain.
+This open enrollment endpoint is not a public Internet security model.
+`POST /api/v1/jobs/{job_id}/start` additionally accepts optional `node_ids`:
+exactly N distinct, ONLINE, available Nodes. Omission preserves deterministic
+automatic placement. Node selection is execution data outside the frozen
+training contract; idempotency includes the selected set. Managed
+`START_WORKER.model_id` is explicit and missing/unsupported values are rejected.
+The unmanaged legacy Worker path retains its documented ResNet default.
+
 > **IMPORTANT NOTICE:**  
 > This is a repository-local implementation projection.  
 > It does not create or override architecture.  

@@ -16,7 +16,7 @@ import { formatDiagnosticEvent, EventIconType } from '../utils/eventFormatter';
 import { EventDetailDrawer } from '../components/drawers/EventDetailDrawer';
 import { DiagnosticEvent, WorkerSession } from '../types';
 import { systemService, eventsService, attemptsService, workersService } from '../api';
-import { HealthData, CapabilitiesData, EventListItemData, WorkerSessionItemData } from '../types/api';
+import { HealthData, CapabilitiesData, EventListItemData, WorkerSessionItemData, NodeItemData } from '../types/api';
 import { deriveHealthState, mapSubsystemStatus } from '../utils/health';
 import { config } from '../config';
 
@@ -33,6 +33,7 @@ export const SystemPage: React.FC = () => {
   const [capabilitiesData, setCapabilitiesData] = useState<CapabilitiesData | null>(null);
   const [apiEvents, setApiEvents] = useState<EventListItemData[]>([]);
   const [liveWorkers, setLiveWorkers] = useState<WorkerSessionItemData[]>([]);
+  const [nodes, setNodes] = useState<NodeItemData[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,12 +45,14 @@ export const SystemPage: React.FC = () => {
     try {
       setLoading(true);
       setError(null);
-      const [healthRes, capRes, evRes, attemptRes] = await Promise.allSettled([
+      const [healthRes, capRes, evRes, attemptRes, nodesRes] = await Promise.allSettled([
         systemService.getHealth(),
         systemService.getCapabilities(),
         eventsService.listEvents({ limit: 50 }),
         attemptsService.listAttempts({ state: 'RUNNING', limit: 1 }),
+        systemService.getNodes(),
       ]);
+      if (nodesRes.status === 'fulfilled') setNodes(nodesRes.value.data || []);
 
       if (healthRes.status === 'fulfilled') {
         setHealthData(healthRes.value.data);
@@ -263,6 +266,14 @@ export const SystemPage: React.FC = () => {
 
       {activeTab === 'overview' ? (
         <div className="space-y-6">
+          <section className="space-y-2">
+            <h2 className="text-xs font-semibold text-[#f3f3f4]">Node Agents</h2>
+            {nodes.length === 0 ? <p className="text-xs text-[#73737c]">Chưa có dữ liệu</p> : (
+              <ul className="space-y-2 text-xs text-[#a1a1a8]">
+                {nodes.map(node => <li key={node.node_id}>{node.display_name} · {node.node_id} · {node.state} · {node.last_seen_at ? new Date(node.last_seen_at).toLocaleString() : 'Chưa có dữ liệu'}</li>)}
+              </ul>
+            )}
+          </section>
           {/* Core Services Table */}
           <div className="space-y-2">
             <h2 className="text-xs font-semibold text-[#f3f3f4]">

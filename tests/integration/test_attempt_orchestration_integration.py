@@ -152,6 +152,7 @@ def _create_test_job(
                     {
                         "synchronization": {"expected_workers": expected_workers},
                         "training": {"training_seed": training_seed},
+                        "model": {"model_id": "resnet18_groupnorm"},
                     }
                 ),
                 f"hash-{job_id}",
@@ -369,7 +370,9 @@ def test_start_attempt_runtime_rejection_no_worker_dispatch(pg_conn, runtime_sta
                 job_id,
                 idempotency_key=f"ik-{uuid.uuid4().hex}",
             )
-        assert exc_info.value.code == ("COMMAND_REJECTED" if runtime_state == "REJECTED" else "COMMAND_FAILED")
+        assert exc_info.value.code == (
+            "COMMAND_REJECTED" if runtime_state == "REJECTED" else "COMMAND_FAILED"
+        )
 
     # Runtime was called
     mock_rt_gw.send_command_and_wait_result.assert_called_once()
@@ -383,19 +386,30 @@ def test_start_attempt_runtime_rejection_no_worker_dispatch(pg_conn, runtime_sta
     allocs = allocation_repository.list_for_attempt(pg_conn, attempt_id)
     assert len(allocs) == 1
     assert attempts[0]["state"] == "FAILED"
-    assert attempts[0]["failure_code"] == ("COMMAND_REJECTED" if runtime_state == "REJECTED" else "COMMAND_FAILED")
+    assert attempts[0]["failure_code"] == (
+        "COMMAND_REJECTED" if runtime_state == "REJECTED" else "COMMAND_FAILED"
+    )
     assert attempts[0]["failure_message"] == "Parameter server out of memory"
     assert allocs[0]["actual_state"] == allocation_repository.ACTUAL_STATE_FAILED
-    assert not [a for a in allocation_repository.list_active(pg_conn) if a["attempt_id"] == attempt_id]
-    commands = command_repository.list_commands(pg_conn, command_type="START_ATTEMPT", target_id=attempt_id)
+    assert not [
+        a for a in allocation_repository.list_active(pg_conn) if a["attempt_id"] == attempt_id
+    ]
+    commands = command_repository.list_commands(
+        pg_conn, command_type="START_ATTEMPT", target_id=attempt_id
+    )
     assert len(commands) == 1
     assert commands[0]["state"] == runtime_state
 
     mock_rt_gw.send_command_and_wait_result.return_value = {"state": "ACCEPTED"}
     mock_node_gw.send_start_worker.return_value = True
     with (
-        patch("pbl4.management_backend.services.attempt_service.get_gateway", return_value=mock_rt_gw),
-        patch("pbl4.management_backend.gateways.node_control_gateway.get_node_control_gateway", return_value=mock_node_gw),
+        patch(
+            "pbl4.management_backend.services.attempt_service.get_gateway", return_value=mock_rt_gw
+        ),
+        patch(
+            "pbl4.management_backend.gateways.node_control_gateway.get_node_control_gateway",
+            return_value=mock_node_gw,
+        ),
     ):
         retry_attempt, _ = attempt_service.execute_start_job(
             db, job_id, idempotency_key=f"ik-retry-{uuid.uuid4().hex}"
@@ -612,30 +626,31 @@ def test_start_attempt_lost_result_reconciles_running_snapshot(pg_conn):
         )
 
     gateway = RuntimeGateway()
-    gateway.handle_state_snapshot({
-        "runtime_instance_id": "rt-reconnected",
-        "active_job_id": job_id,
-        "active_attempt_id": attempt_id,
-        "attempt_state": "RUNNING",
-        "training_strategy": "strict_bsp",
-        "checkpoint_policy": "every_step",
-        "epoch": 0,
-        "current_operation_id": 1,
-        "current_batch_ordinal": 0,
-        "model_version": 0,
-        "workers": [],
-        "strategy_state": {},
-        "checkpoint_state": "IDLE",
-        "latest_checkpoint_id": None,
-        "recovery_cursor": {},
-        "dataset_build_id": "bld-1",
-        "dataset_manifest_hash": f"hash-{job_id}",
-        "last_runtime_event_seq": 1,
-        "management_event_gap_count": 0,
-        "captured_at": datetime.now(UTC).isoformat(),
-    })
+    gateway.handle_state_snapshot(
+        {
+            "runtime_instance_id": "rt-reconnected",
+            "active_job_id": job_id,
+            "active_attempt_id": attempt_id,
+            "attempt_state": "RUNNING",
+            "training_strategy": "strict_bsp",
+            "checkpoint_policy": "every_step",
+            "epoch": 0,
+            "current_operation_id": 1,
+            "current_batch_ordinal": 0,
+            "model_version": 0,
+            "workers": [],
+            "strategy_state": {},
+            "checkpoint_state": "IDLE",
+            "latest_checkpoint_id": None,
+            "recovery_cursor": {},
+            "dataset_build_id": "bld-1",
+            "dataset_manifest_hash": f"hash-{job_id}",
+            "last_runtime_event_seq": 1,
+            "management_event_gap_count": 0,
+            "captured_at": datetime.now(UTC).isoformat(),
+        }
+    )
     assert attempt_repository.get_attempt(pg_conn, attempt_id)["state"] == "RUNNING"
-
 
 
 def test_retry_creates_fresh_allocations_and_tokens(pg_conn):

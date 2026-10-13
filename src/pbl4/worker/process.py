@@ -55,12 +55,17 @@ class WorkerProcess:
         config: WorkerConfig,
         *,
         initialization_seed: int,
-        model_id: str = "resnet18_groupnorm",
+        model_id: str | None = None,
         device: str = "cpu",
         connect_timeout_seconds: float = 60.0,
         opener: Callable[..., object] | None = None,
     ) -> None:
         self._config = config
+        if model_id is None:
+            if config.worker_join_token:
+                raise ValueError("model_id is required for managed Workers")
+            # Preserve the explicit unmanaged/legacy construction path.
+            model_id = "resnet18_groupnorm"
         self._adapter = PyTorchAdapter(
             build_model(model_id, initialization_seed=initialization_seed, device=device),
             functional.cross_entropy,

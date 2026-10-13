@@ -136,6 +136,7 @@ class TestAgentProtocolMessages(unittest.TestCase):
     def test_command_start_worker_roundtrip(self) -> None:
         token = "eyJhbGciOiJIUzI1NiJ9.signature123"
         payload = StartWorkerPayload(
+            model_id="resnet18_groupnorm",
             command_id="cmd-start-1",
             allocation_id="alloc-1",
             attempt_id="attempt-1",
@@ -271,6 +272,7 @@ class TestAgentProtocolMessages(unittest.TestCase):
     def test_token_redaction_in_repr_and_logging_path(self) -> None:
         sensitive_token = "super-secret-worker-join-token-999"
         payload = StartWorkerPayload(
+            model_id="resnet18_groupnorm",
             command_id="cmd-start-1",
             allocation_id="alloc-1",
             attempt_id="attempt-1",

@@ -51,6 +51,7 @@ def _make_start_command(
     allocation_id: str = "alloc-1", attempt_id: str = "att-1"
 ) -> StartWorkerPayload:
     return StartWorkerPayload(
+        model_id="resnet18_groupnorm",
         command_id="cmd-1",
         allocation_id=allocation_id,
         attempt_id=attempt_id,

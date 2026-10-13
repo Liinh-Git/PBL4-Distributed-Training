@@ -507,6 +507,14 @@ export interface JobArchiveResponseData {
 
 export interface JobStartRequest {
   note?: string;
+  node_ids?: string[];
+}
+
+export interface NodeItemData {
+  node_id: string;
+  display_name: string;
+  state: 'ONLINE' | 'OFFLINE' | 'REVOKED';
+  last_seen_at?: string | null;
 }
 
 export interface JobResumeRequest {

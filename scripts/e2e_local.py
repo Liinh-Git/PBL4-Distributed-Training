@@ -84,7 +84,8 @@ class Harness:
             if not self.runtime_data.is_dir():
                 raise ValueError("--reuse-runtime-data must name an existing run directory")
         else:
-            self.runtime_data = (self.repo / ".var" / "e2e" / run_id).resolve()
+            state_root = Path(getattr(args, "state_root", None) or self.repo / ".var" / "e2e")
+            self.runtime_data = (state_root / run_id).resolve()
             self.runtime_data.mkdir(parents=True, exist_ok=False)
         self.children: list[Child] = []
         self.evidence_path = self.artifacts / "api-evidence.jsonl"

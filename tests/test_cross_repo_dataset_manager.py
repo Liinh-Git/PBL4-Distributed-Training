@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -17,7 +18,7 @@ from pbl4.worker.shard_downloader import ShardDownloader
 
 
 @pytest.fixture(scope="module")
-def standalone_service():
+def standalone_service(tmp_path_factory):
     """Start the standalone Dataset Manager service if configured via DATASET_MANAGER_REPO_ROOT."""
     repo_root_env = os.environ.get("DATASET_MANAGER_REPO_ROOT")
     if not repo_root_env:
@@ -45,12 +46,22 @@ def standalone_service():
     if not smoke_script.is_file():
         pytest.skip(f"Smoke server script not found at {smoke_script}")
 
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(dm_root / "src") + os.pathsep + os.environ.get("PYTHONPATH", ""),
+        "PBL4_DM_SMOKE_PORT": str(port),
+        "PBL4_DM_SMOKE_STORE": str(tmp_path_factory.mktemp("dataset-manager-store")),
+    }
     proc = subprocess.Popen(
         [str(python_exe), str(smoke_script)],
         cwd=str(dm_root),
+        env=env,
     )
 
-    base_url = "http://127.0.0.1:9200"
+    base_url = f"http://127.0.0.1:{port}"
     client = DatasetManagerClient(base_url)
 
     # Wait for server ready

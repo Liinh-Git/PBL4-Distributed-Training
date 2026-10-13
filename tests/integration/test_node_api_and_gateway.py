@@ -4,14 +4,11 @@ Reference: NODE_AGENT_IMPLEMENTATION_PLAN.md Section 8.2 & User Request Phase 6.
 
 Tests:
 1. REST API:
-   - create enrollment code (POST /api/v1/nodes/enrollment-codes)
-   - enroll node (POST /api/v1/nodes/enroll)
+   - open enrollment (POST /api/v1/nodes/enroll)
    - verify node_id and plaintext node_secret returned once
    - GET /api/v1/nodes/{node_id} (NodeDetail)
    - GET /api/v1/nodes (ListResponse[NodeItem])
    - revoke node (POST /api/v1/nodes/{node_id}/revoke)
-   - second enrollment with same code rejected (NODE_ENROLLMENT_CODE_INVALID)
-   - expired code rejected (NODE_ENROLLMENT_CODE_EXPIRED)
    - revoked node semantics
 2. WSS Gateway Auth & Single Connection:
    - valid node_secret -> connect success
@@ -46,13 +43,13 @@ Tests:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 
 import psycopg
 import pytest
@@ -85,7 +82,6 @@ from pbl4.management_backend.gateways.node_control_gateway import (
 )
 from pbl4.management_backend.repositories import (
     allocation_repository,
-    node_enrollment_repository,
     node_repository,
 )
 from pbl4.management_backend.services import (
@@ -210,26 +206,37 @@ def _wait_until(predicate, timeout: float = 3.0, interval: float = 0.05):
 # ─── 1. REST API Tests ────────────────────────────────────────────────────────
 
 
-def test_01_create_enrollment_code_api(app_client: TestClient) -> None:
-    res = app_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 1800})
+def _enroll_test_node(
+    app_client: TestClient,
+    *,
+    display_name: str = "Test Node",
+    capabilities: dict | None = None,
+    agent_version: str = "0.1.0",
+    platform: str = "Linux",
+) -> tuple[str, str]:
+    payload: dict[str, Any] = {
+        "display_name": display_name,
+        "agent_version": agent_version,
+        "platform": platform,
+    }
+    if capabilities is not None:
+        payload["capabilities"] = capabilities
+    res = app_client.post("/api/v1/nodes/enroll", json=payload)
     assert res.status_code == 201
     data = res.json()["data"]
-    assert "enrollment_code" in data
-    assert "code_hash" in data
-    assert len(data["enrollment_code"]) >= 32
-    assert data["code_hash"] == hashlib.sha256(data["enrollment_code"].encode("utf-8")).hexdigest()
+    return data["node_id"], data["node_secret"]
+
+
+def test_01_enrollment_codes_endpoint_removed(app_client: TestClient) -> None:
+    res = app_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 1800})
+    assert res.status_code in (404, 405)
 
 
 def test_02_enroll_node_and_credentials_api(
     app_client: TestClient, pg_conn: psycopg.Connection
 ) -> None:
-    # 1. Create code
-    code_res = app_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    raw_code = code_res.json()["data"]["enrollment_code"]
-
-    # 2. Enroll node
+    # 1. Enroll node directly without enrollment code
     enroll_payload = {
-        "enrollment_code": raw_code,
         "display_name": "Cluster Worker 01",
         "capabilities": {
             "hostname": "worker-box-01",
@@ -253,7 +260,7 @@ def test_02_enroll_node_and_credentials_api(
     assert node_item["state"] == "OFFLINE"  # Initial state strictly OFFLINE
     assert node_item["display_name"] == "Cluster Worker 01"
 
-    # 3. GET /api/v1/nodes/{node_id} (NodeDetail)
+    # 2. GET /api/v1/nodes/{node_id} (NodeDetail)
     detail_res = app_client.get(f"/api/v1/nodes/{node_id}")
     assert detail_res.status_code == 200
     detail = detail_res.json()["data"]
@@ -263,7 +270,7 @@ def test_02_enroll_node_and_credentials_api(
     assert "node_secret" not in detail  # Secret never exposed in GET
     assert "credential_hash" not in detail
 
-    # 4. GET /api/v1/nodes
+    # 3. GET /api/v1/nodes
     list_res = app_client.get("/api/v1/nodes")
     assert list_res.status_code == 200
     nodes = list_res.json()["data"]
@@ -272,35 +279,20 @@ def test_02_enroll_node_and_credentials_api(
     assert matching[0]["state"] == "OFFLINE"
 
 
-def test_03_enroll_code_second_use_rejected(app_client: TestClient) -> None:
-    code_res = app_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    raw_code = code_res.json()["data"]["enrollment_code"]
-
-    # First enrollment succeeds
-    r1 = app_client.post("/api/v1/nodes/enroll", json={"enrollment_code": raw_code})
+def test_03_open_enrollment_allows_multiple_nodes(app_client: TestClient) -> None:
+    r1 = app_client.post("/api/v1/nodes/enroll", json={"display_name": "Node A"})
     assert r1.status_code == 201
 
-    # Second enrollment with same code rejected
-    r2 = app_client.post("/api/v1/nodes/enroll", json={"enrollment_code": raw_code})
-    assert r2.status_code == 400
-    err = r2.json()["error"]
-    assert err["code"] == "NODE_ENROLLMENT_CODE_INVALID"
+    r2 = app_client.post("/api/v1/nodes/enroll", json={"display_name": "Node B"})
+    assert r2.status_code == 201
+
+    assert r1.json()["data"]["node_id"] != r2.json()["data"]["node_id"]
+    assert r1.json()["data"]["node_secret"] != r2.json()["data"]["node_secret"]
 
 
-def test_03b_enroll_same_onetime_code_concurrent_race_atomic(
+def test_03b_concurrent_open_enrollments_both_succeed(
     app_client: TestClient, pg_conn: psycopg.Connection
 ) -> None:
-    """Test 5: Concurrently enroll two clients with the exact same one-time code.
-    Guarantees:
-    - Atomicity of consume_code_if_valid.
-    - Exactly one client succeeds (201).
-    - Other client receives NODE_ENROLLMENT_CODE_INVALID (400).
-    - Exactly one Node is created in the database.
-    """
-    code_res = app_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    raw_code = code_res.json()["data"]["enrollment_code"]
-    code_hash = hashlib.sha256(raw_code.encode("utf-8")).hexdigest()
-
     import concurrent.futures
 
     results: list[tuple[int, dict]] = []
@@ -309,7 +301,6 @@ def test_03b_enroll_same_onetime_code_concurrent_race_atomic(
         resp = app_client.post(
             "/api/v1/nodes/enroll",
             json={
-                "enrollment_code": raw_code,
                 "display_name": f"Worker-{client_name}",
             },
         )
@@ -321,53 +312,21 @@ def test_03b_enroll_same_onetime_code_concurrent_race_atomic(
         f1.result()
         f2.result()
 
-    status_codes = sorted([r[0] for r in results])
-    assert status_codes == [201, 400]
-
-    succ_res = [r[1] for r in results if r[0] == 201][0]
-    fail_res = [r[1] for r in results if r[0] == 400][0]
-
-    assert "node_id" in succ_res["data"]
-    assert fail_res["error"]["code"] == "NODE_ENROLLMENT_CODE_INVALID"
-
-    # Verify directly on DB: exactly one node exists for this enrollment code
-    succ_node_id = succ_res["data"]["node_id"]
-    with pg_conn.cursor() as cur:
-        cur.execute("SELECT node_id, display_name FROM nodes WHERE node_id = %s", (succ_node_id,))
-        rows = cur.fetchall()
-        assert len(rows) == 1
-
-        # The enrollment code is recorded as used
-        code_record = node_enrollment_repository.get_enrollment_code(pg_conn, code_hash)
-        assert code_record is not None
-        assert code_record["used_at"] is not None
+    assert len(results) == 2
+    assert all(r[0] == 201 for r in results)
+    node_ids = {r[1]["data"]["node_id"] for r in results}
+    assert len(node_ids) == 2
 
 
-def test_04_expired_enrollment_code_rejected(
-    app_client: TestClient, pg_conn: psycopg.Connection
-) -> None:
-    # Insert already-expired code
-    raw_code = f"expired-{uuid.uuid4().hex}"
-    code_hash = hashlib.sha256(raw_code.encode("utf-8")).hexdigest()
-    now = datetime.now(UTC)
-    node_enrollment_repository.create_enrollment_code(
-        pg_conn,
-        code_hash=code_hash,
-        created_at=now - timedelta(hours=2),
-        expires_at=now - timedelta(hours=1),
-    )
-
-    r = app_client.post("/api/v1/nodes/enroll", json={"enrollment_code": raw_code})
-    assert r.status_code == 400
-    err = r.json()["error"]
-    assert err["code"] == "NODE_ENROLLMENT_CODE_EXPIRED"
+def test_04_enroll_with_empty_payload_succeeds(app_client: TestClient) -> None:
+    r = app_client.post("/api/v1/nodes/enroll", json={})
+    assert r.status_code == 201
+    assert r.json()["data"]["node_id"].startswith("node-")
+    assert len(r.json()["data"]["node_secret"]) >= 32
 
 
 def test_05_revoke_node_api(app_client: TestClient) -> None:
-    code_res = app_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    raw_code = code_res.json()["data"]["enrollment_code"]
-    enroll_res = app_client.post("/api/v1/nodes/enroll", json={"enrollment_code": raw_code})
-    node_id = enroll_res.json()["data"]["node_id"]
+    node_id, _ = _enroll_test_node(app_client)
 
     revoke_res = app_client.post(f"/api/v1/nodes/{node_id}/revoke")
     assert revoke_res.status_code == 200
@@ -383,11 +342,7 @@ def test_06_wss_auth_success_and_rejections(
     app_client: TestClient, pg_conn: psycopg.Connection
 ) -> None:
     # 1. Enroll valid node
-    c_res = app_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    raw_code = c_res.json()["data"]["enrollment_code"]
-    e_res = app_client.post("/api/v1/nodes/enroll", json={"enrollment_code": raw_code})
-    node_id = e_res.json()["data"]["node_id"]
-    node_secret = e_res.json()["data"]["node_secret"]
+    node_id, node_secret = _enroll_test_node(app_client)
 
     # A. Valid secret -> Connect succeeds
     with app_client.websocket_connect(
@@ -431,11 +386,7 @@ def test_06_wss_auth_success_and_rejections(
 
 
 def test_07_one_active_control_connection_per_node(app_client: TestClient) -> None:
-    c_res = app_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    raw_code = c_res.json()["data"]["enrollment_code"]
-    e_res = app_client.post("/api/v1/nodes/enroll", json={"enrollment_code": raw_code})
-    node_id = e_res.json()["data"]["node_id"]
-    node_secret = e_res.json()["data"]["node_secret"]
+    node_id, node_secret = _enroll_test_node(app_client)
 
     # Open first connection
     with (
@@ -459,11 +410,7 @@ def test_07_one_active_control_connection_per_node(app_client: TestClient) -> No
 def test_08_agent_hello_transitions_offline_to_online(
     app_client: TestClient, pg_conn: psycopg.Connection
 ) -> None:
-    c_res = app_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    raw_code = c_res.json()["data"]["enrollment_code"]
-    e_res = app_client.post("/api/v1/nodes/enroll", json={"enrollment_code": raw_code})
-    node_id = e_res.json()["data"]["node_id"]
-    node_secret = e_res.json()["data"]["node_secret"]
+    node_id, node_secret = _enroll_test_node(app_client)
 
     # Initially OFFLINE
     node = node_repository.get_node(pg_conn, node_id)
@@ -506,11 +453,7 @@ def test_08_agent_hello_transitions_offline_to_online(
 def test_09_heartbeat_and_disconnect_alone_does_not_offline(
     app_client: TestClient, pg_conn: psycopg.Connection
 ) -> None:
-    c_res = app_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    raw_code = c_res.json()["data"]["enrollment_code"]
-    e_res = app_client.post("/api/v1/nodes/enroll", json={"enrollment_code": raw_code})
-    node_id = e_res.json()["data"]["node_id"]
-    node_secret = e_res.json()["data"]["node_secret"]
+    node_id, node_secret = _enroll_test_node(app_client)
 
     with app_client.websocket_connect(
         f"/ws/v1/nodes/{node_id}/control",
@@ -545,11 +488,7 @@ def test_09_heartbeat_and_disconnect_alone_does_not_offline(
 def test_10_resource_snapshot_persisted(
     app_client: TestClient, pg_conn: psycopg.Connection
 ) -> None:
-    c_res = app_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    raw_code = c_res.json()["data"]["enrollment_code"]
-    e_res = app_client.post("/api/v1/nodes/enroll", json={"enrollment_code": raw_code})
-    node_id = e_res.json()["data"]["node_id"]
-    node_secret = e_res.json()["data"]["node_secret"]
+    node_id, node_secret = _enroll_test_node(app_client)
 
     with app_client.websocket_connect(
         f"/ws/v1/nodes/{node_id}/control",
@@ -607,12 +546,7 @@ def test_11_command_ack_and_worker_status_lifecycle(
     app_client: TestClient, pg_conn: psycopg.Connection
 ) -> None:
     _, attempt_id = _create_test_job_and_attempt(pg_conn)
-
-    c_res = app_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    raw_code = c_res.json()["data"]["enrollment_code"]
-    e_res = app_client.post("/api/v1/nodes/enroll", json={"enrollment_code": raw_code})
-    node_id = e_res.json()["data"]["node_id"]
-    node_secret = e_res.json()["data"]["node_secret"]
+    node_id, node_secret = _enroll_test_node(app_client)
 
     # Bring node ONLINE
     with app_client.websocket_connect(
@@ -717,12 +651,7 @@ def test_12_command_ack_rejected_transitions_to_failed(
     app_client: TestClient, pg_conn: psycopg.Connection
 ) -> None:
     _, attempt_id = _create_test_job_and_attempt(pg_conn)
-
-    c_res = app_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    raw_code = c_res.json()["data"]["enrollment_code"]
-    e_res = app_client.post("/api/v1/nodes/enroll", json={"enrollment_code": raw_code})
-    node_id = e_res.json()["data"]["node_id"]
-    node_secret = e_res.json()["data"]["node_secret"]
+    node_id, node_secret = _enroll_test_node(app_client)
 
     with app_client.websocket_connect(
         f"/ws/v1/nodes/{node_id}/control",
@@ -780,11 +709,7 @@ def test_12_command_ack_rejected_transitions_to_failed(
 def test_13_revoke_closes_active_wss_and_blocks_reconnect(
     app_client: TestClient, pg_conn: psycopg.Connection
 ) -> None:
-    c_res = app_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    raw_code = c_res.json()["data"]["enrollment_code"]
-    e_res = app_client.post("/api/v1/nodes/enroll", json={"enrollment_code": raw_code})
-    node_id = e_res.json()["data"]["node_id"]
-    node_secret = e_res.json()["data"]["node_secret"]
+    node_id, node_secret = _enroll_test_node(app_client)
 
     with app_client.websocket_connect(
         f"/ws/v1/nodes/{node_id}/control",
@@ -819,11 +744,7 @@ def test_14_stale_node_becomes_offline_without_altering_allocations(
     app_client: TestClient, pg_conn: psycopg.Connection
 ) -> None:
     _, attempt_id = _create_test_job_and_attempt(pg_conn)
-
-    c_res = app_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    raw_code = c_res.json()["data"]["enrollment_code"]
-    e_res = app_client.post("/api/v1/nodes/enroll", json={"enrollment_code": raw_code})
-    node_id = e_res.json()["data"]["node_id"]
+    node_id, _ = _enroll_test_node(app_client)
 
     # Manually mark ONLINE with old last_seen_at
     old_time = datetime.now(UTC) - timedelta(seconds=60)
@@ -853,11 +774,7 @@ def test_15_dispatched_timeout_aborts_attempt_and_marks_allocation_failed(
     app_client: TestClient, pg_conn: psycopg.Connection
 ) -> None:
     _, attempt_id = _create_test_job_and_attempt(pg_conn)
-
-    c_res = app_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    raw_code = c_res.json()["data"]["enrollment_code"]
-    e_res = app_client.post("/api/v1/nodes/enroll", json={"enrollment_code": raw_code})
-    node_id = e_res.json()["data"]["node_id"]
+    node_id, _ = _enroll_test_node(app_client)
     node_repository.update_state(pg_conn, node_id, "ONLINE")
 
     alloc = allocation_service.create_allocation(

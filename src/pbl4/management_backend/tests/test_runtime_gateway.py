@@ -52,6 +52,37 @@ def test_runtime_event_cursors_are_scoped_per_attempt() -> None:
     assert cursor_b.gap_fenced is False
 
 
+@pytest.mark.parametrize("state", ["RUNNING", "COMPLETED", "FAILED", "ABORTED"])
+def test_lifecycle_events_refresh_session_and_terminal_snapshot_without_ui_polling(state):
+    gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
+    snapshot = {"active_attempt_id": "attempt"}
+    payload = {
+        "attempt_id": "attempt",
+        "job_id": "job",
+        "runtime_event_seq": 1,
+        "event_type": "attempt.state_changed",
+        "event_schema_version": 1,
+        "occurred_at": datetime.now(UTC).isoformat(),
+        "source_component": "runtime",
+        "severity": "INFO",
+        "details": {"state": state},
+    }
+    with (
+        patch("pbl4.management_backend.db.transaction"),
+        patch("pbl4.management_backend.db.get_connection"),
+        patch(
+            "pbl4.management_backend.services.event_ingest.ingest_runtime_event",
+            return_value=MagicMock(inserted=True),
+        ),
+        patch.object(gateway, "record_event_seq"),
+        patch.object(gateway.port, "request_state", return_value=snapshot) as request,
+        patch.object(gateway, "handle_state_snapshot") as reconcile,
+    ):
+        gateway.handle_runtime_event(payload)
+    request.assert_called_once()
+    reconcile.assert_called_once_with(snapshot)
+
+
 def test_malformed_command_result_does_not_resolve_waiter() -> None:
     gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
     waiter: concurrent.futures.Future[dict] = concurrent.futures.Future()
@@ -261,11 +292,19 @@ def test_attempt_state_changed_event_cleans_up_allocations() -> None:
         "attempt_id": "attempt-1",
         "event_type": "attempt.state_changed",
         "occurred_at": occurred_at,
-        "details": {"state": "ABORTED", "failure_code": "USER_ABORTED", "failure_message": "User requested abort"},
+        "details": {
+            "state": "ABORTED",
+            "failure_code": "USER_ABORTED",
+            "failure_message": "User requested abort",
+        },
     }
     with (
-        patch("pbl4.management_backend.repositories.attempt_repository.update_attempt_state") as mock_update,
-        patch("pbl4.management_backend.services.allocation_service.cleanup_allocations_for_attempt") as mock_cleanup,
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.update_attempt_state"
+        ) as mock_update,
+        patch(
+            "pbl4.management_backend.services.allocation_service.cleanup_allocations_for_attempt"
+        ) as mock_cleanup,
     ):
         RuntimeGateway._project_runtime_event(object(), payload)
 
@@ -294,8 +333,12 @@ def test_attempt_state_changed_completed_projection_and_active_states() -> None:
         "details": {"previous_state": "RUNNING", "state": "COMPLETED"},
     }
     with (
-        patch("pbl4.management_backend.repositories.attempt_repository.update_attempt_state") as mock_update,
-        patch("pbl4.management_backend.services.allocation_service.cleanup_allocations_for_attempt") as mock_cleanup,
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.update_attempt_state"
+        ) as mock_update,
+        patch(
+            "pbl4.management_backend.services.allocation_service.cleanup_allocations_for_attempt"
+        ) as mock_cleanup,
     ):
         RuntimeGateway._project_runtime_event(object(), payload)
 
@@ -306,8 +349,6 @@ def test_attempt_state_changed_completed_projection_and_active_states() -> None:
 
         mock_cleanup.assert_called_once()
         assert mock_cleanup.call_args[0][1] == "attempt-1"
-
-
 
 
 def test_snapshot_creation_uses_runtime_owned_session_metadata() -> None:
@@ -810,9 +851,7 @@ def test_authoritative_snapshot_reconciles_gap_and_unfences_projection() -> None
             "pbl4.management_backend.repositories.attempt_repository.get_attempt",
             return_value={"state": "RUNNING", "runtime_metadata": {}},
         ),
-        patch(
-            "pbl4.management_backend.repositories.attempt_repository.update_attempt_state"
-        ),
+        patch("pbl4.management_backend.repositories.attempt_repository.update_attempt_state"),
         patch("pbl4.management_backend.websocket.hub.broadcast_sync"),
     ):
         gateway.handle_state_snapshot(snapshot_payload)
@@ -911,9 +950,7 @@ def test_duplicate_event_idempotency_and_conflict_raises_integrity_error() -> No
         patch("pbl4.management_backend.db.transaction", fake_transaction),
         patch(
             "pbl4.management_backend.services.event_ingest.ingest_runtime_event",
-            side_effect=ConflictingEventPayloadError(
-                "Payload conflict for attempt seq 1"
-            ),
+            side_effect=ConflictingEventPayloadError("Payload conflict for attempt seq 1"),
         ),
     ):
         with pytest.raises(ConflictingEventPayloadError, match="Payload conflict"):
@@ -951,7 +988,9 @@ def test_completed_attempt_ignores_delayed_running_event() -> None:
             "occurred_at": datetime.now(UTC).isoformat(),
             "details": {"state": "RUNNING"},
         }
-        with patch("pbl4.management_backend.services.allocation_service.cleanup_allocations_for_attempt") as mock_cleanup:
+        with patch(
+            "pbl4.management_backend.services.allocation_service.cleanup_allocations_for_attempt"
+        ) as mock_cleanup:
             gateway._project_runtime_event(fake_conn, event_payload)
             mock_cleanup.assert_not_called()
 
@@ -978,7 +1017,9 @@ def test_failed_attempt_ignores_stale_snapshot_running() -> None:
 
     with (
         patch("pbl4.management_backend.db.transaction", fake_transaction),
-        patch("pbl4.management_backend.repositories.attempt_repository.get_attempt") as mock_get_attempt,
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.get_attempt"
+        ) as mock_get_attempt,
         patch("pbl4.management_backend.websocket.hub.broadcast_sync") as mock_broadcast,
     ):
         gateway.handle_state_snapshot(stale_snap)
@@ -1017,8 +1058,10 @@ def test_failed_attempt_ignores_stale_snapshot_running() -> None:
     assert authoritative["attempt_state"] == "FAILED"
 
 
-def test_snapshot_seq_lower_than_authoritative_does_not_rollback_state_or_cursor_or_model_version() -> None:
-    """Snapshot seq lower than authoritative_snapshot_seq does not rollback state/model_version/cursor."""
+def test_snapshot_seq_lower_than_authoritative_does_not_rollback_state_or_cursor_or_model_version() -> (
+    None
+):
+    """An older snapshot must not roll back state, model version, or cursor."""
     gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
     cursor = gateway.get_cursor("attempt-rollback-guard")
     cursor.authoritative_snapshot_seq = 100
@@ -1047,7 +1090,9 @@ def test_snapshot_seq_lower_than_authoritative_does_not_rollback_state_or_cursor
 
     with (
         patch("pbl4.management_backend.db.transaction", fake_transaction),
-        patch("pbl4.management_backend.repositories.attempt_repository.get_attempt") as mock_get_attempt,
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.get_attempt"
+        ) as mock_get_attempt,
         patch("pbl4.management_backend.websocket.hub.broadcast_sync") as mock_broadcast,
     ):
         gateway.handle_state_snapshot(stale_snapshot)
@@ -1073,14 +1118,25 @@ def test_attempt_state_transition_validation() -> None:
     )
 
     # 1. Idempotent replay is always valid
-    for state in ["CREATED", "WAITING_WORKERS", "PROVISIONING", "INITIALIZING", "RUNNING", "COMPLETED", "FAILED", "ABORTED"]:
+    for state in [
+        "CREATED",
+        "WAITING_WORKERS",
+        "PROVISIONING",
+        "INITIALIZING",
+        "RUNNING",
+        "COMPLETED",
+        "FAILED",
+        "ABORTED",
+    ]:
         assert is_valid_attempt_transition(state, state) is True
 
     # 2. Terminal states cannot transition to ANY other state
     for term in ["COMPLETED", "FAILED", "ABORTED"]:
         for other in ["CREATED", "WAITING_WORKERS", "PROVISIONING", "INITIALIZING", "RUNNING"]:
             assert is_valid_attempt_transition(term, other) is False
-        assert is_valid_attempt_transition(term, "FAILED" if term != "FAILED" else "ABORTED") is False
+        assert (
+            is_valid_attempt_transition(term, "FAILED" if term != "FAILED" else "ABORTED") is False
+        )
 
     # 3. Progression order is monotonic forward
     assert is_valid_attempt_transition("CREATED", "WAITING_WORKERS") is True

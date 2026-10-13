@@ -1,12 +1,9 @@
-"""Node Enrollment Service — business logic for one-time code generation and node onboarding.
+"""Node Enrollment Service — business logic for node onboarding.
 
 Reference: NODE_AGENT_IMPLEMENTATION_PLAN.md & NODE_AGENT_DESIGN.md
 
 Responsibilities:
-- Issue one-time enrollment codes with high CSPRNG entropy.
-- Hash enrollment codes using SHA-256 before database persistence.
-- Atomically consume enrollment codes via repository to prevent race conditions.
-- Differentiate between expired and invalid/used codes for precise error reporting.
+- Open auto-enrollment for Node Agents.
 - Generate node_id and node_secret (secrets.token_urlsafe(32)).
 - Hash node_secret using SHA-256 before storage as credential_hash.
 - Return plaintext node_secret exactly once upon successful enrollment.
@@ -20,15 +17,12 @@ import hashlib
 import logging
 import secrets
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
 
-from pbl4.management_backend.repositories import (
-    node_enrollment_repository,
-    node_repository,
-)
+from pbl4.management_backend.repositories import node_repository
 
 logger = logging.getLogger(__name__)
 
@@ -46,18 +40,6 @@ class NodeEnrollmentError(Exception):
         self.message = message
 
 
-class NodeEnrollmentCodeInvalidError(NodeEnrollmentError):
-    """Raised when an enrollment code does not exist or has already been consumed."""
-
-    code: str = "NODE_ENROLLMENT_CODE_INVALID"
-
-
-class NodeEnrollmentCodeExpiredError(NodeEnrollmentError):
-    """Raised when an enrollment code has passed its expiration timestamp."""
-
-    code: str = "NODE_ENROLLMENT_CODE_EXPIRED"
-
-
 # ─── Service Implementation ───────────────────────────────────────────────────
 
 
@@ -67,49 +49,12 @@ def hash_secret(secret: str) -> str:
 
 
 class NodeEnrollmentService:
-    """Domain service managing node onboarding lifecycle and one-time enrollment codes."""
-
-    @staticmethod
-    def create_enrollment_code(
-        conn: psycopg.Connection,
-        *,
-        ttl_seconds: int = 3600,
-        now: datetime | None = None,
-    ) -> dict[str, Any]:
-        """Generate and persist a one-time enrollment code.
-
-        Returns a dictionary containing the plaintext enrollment_code (returned to caller once),
-        code_hash, created_at, and expires_at. Plaintext code is never logged or stored in DB.
-        """
-        current_time = now or datetime.now(UTC)
-        expires_at = current_time + timedelta(seconds=ttl_seconds)
-
-        # High-entropy CSPRNG token
-        raw_code = secrets.token_urlsafe(32)
-        code_hash = hash_secret(raw_code)
-
-        row = node_enrollment_repository.create_enrollment_code(
-            conn,
-            code_hash=code_hash,
-            created_at=current_time,
-            expires_at=expires_at,
-        )
-
-        logger.info(
-            "Created node enrollment code hash=%s expires_at=%s", code_hash[:8] + "...", expires_at
-        )
-        return {
-            "enrollment_code": raw_code,
-            "code_hash": code_hash,
-            "created_at": row["created_at"],
-            "expires_at": row["expires_at"],
-        }
+    """Domain service managing node onboarding lifecycle."""
 
     @staticmethod
     def enroll_node(
         conn: psycopg.Connection,
         *,
-        enrollment_code: str,
         capabilities: dict[str, Any] | None = None,
         display_name: str | None = None,
         agent_version: str | None = None,
@@ -117,33 +62,11 @@ class NodeEnrollmentService:
         node_id: str | None = None,
         now: datetime | None = None,
     ) -> dict[str, Any]:
-        """Atomically validate enrollment code, consume it, and create a new node.
+        """Atomically onboard a node and issue credentials.
 
         Returns plaintext node_secret exactly once. Newly created node starts at OFFLINE.
         """
-        if not isinstance(enrollment_code, str) or not enrollment_code.strip():
-            raise NodeEnrollmentCodeInvalidError("Enrollment code must be a non-empty string.")
-
         current_time = now or datetime.now(UTC)
-        code_hash = hash_secret(enrollment_code.strip())
-
-        # Atomically consume the code
-        consumed = node_enrollment_repository.consume_code_if_valid(
-            conn,
-            code_hash=code_hash,
-            now=current_time,
-        )
-
-        if consumed is None:
-            # Distinguish reason for consumption failure
-            existing = node_enrollment_repository.get_enrollment_code(conn, code_hash)
-            if existing is None:
-                raise NodeEnrollmentCodeInvalidError("Enrollment code is invalid.")
-            if existing.get("used_at") is not None:
-                raise NodeEnrollmentCodeInvalidError("Enrollment code has already been used.")
-            if existing.get("expires_at") and existing["expires_at"] <= current_time:
-                raise NodeEnrollmentCodeExpiredError("Enrollment code has expired.")
-            raise NodeEnrollmentCodeInvalidError("Enrollment code could not be consumed.")
 
         # Generate node credentials
         chosen_node_id = node_id or f"node-{uuid.uuid4().hex[:12]}"
@@ -182,5 +105,4 @@ class NodeEnrollmentService:
 
 
 # Module-level convenience functions
-create_enrollment_code = NodeEnrollmentService.create_enrollment_code
 enroll_node = NodeEnrollmentService.enroll_node

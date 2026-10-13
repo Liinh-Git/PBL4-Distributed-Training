@@ -183,6 +183,7 @@ class JobCloneRequest(StrictWriteModel):
 
 class JobStartRequest(StrictWriteModel):
     note: str | None = None
+    node_ids: list[str] | None = Field(default=None, min_length=1)
 
 
 class JobResumeRequest(StrictWriteModel):

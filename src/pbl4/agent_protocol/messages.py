@@ -369,8 +369,8 @@ class StartWorkerPayload:
     device: str
     initialization_seed: int
     worker_join_token: str
+    model_id: str
     command_type: str = COMMAND_TYPE_START_WORKER
-    model_id: str = "resnet18_groupnorm"
 
     def __post_init__(self) -> None:
         if self.command_type != COMMAND_TYPE_START_WORKER:
@@ -402,6 +402,10 @@ class StartWorkerPayload:
             raise AgentMessageError("worker_join_token must be a non-empty string")
         if not isinstance(self.model_id, str) or not self.model_id:
             raise AgentMessageError("model_id must be a non-empty string")
+        from pbl4.common.model_profiles import MODEL_PROFILES
+
+        if self.model_id not in MODEL_PROFILES:
+            raise AgentMessageError(f"Unsupported model_id '{self.model_id}'")
 
     def __repr__(self) -> str:
         # Mandatory credential redaction
@@ -443,7 +447,7 @@ class StartWorkerPayload:
             runtime_port=data.get("runtime_port", 0),
             device=data.get("device", ""),
             initialization_seed=data.get("initialization_seed", 0),
-            model_id=data.get("model_id", "resnet18_groupnorm"),
+            model_id=data.get("model_id", ""),
             worker_join_token=data.get("worker_join_token", ""),
             command_type=data.get("command_type", COMMAND_TYPE_START_WORKER),
         )

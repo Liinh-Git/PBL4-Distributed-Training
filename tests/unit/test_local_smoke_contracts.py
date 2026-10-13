@@ -52,7 +52,7 @@ def test_small_model_metadata_never_uses_resnet_global_hash(monkeypatch):
     assert provider.get_model_metadata("small_cnn")["parameter_manifest_hash"] == "b" * 64
 
 
-def test_start_worker_model_extension_defaults_and_round_trip():
+def test_start_worker_requires_explicit_model_and_round_trip():
     command = StartWorkerPayload(
         "cmd",
         "alloc",
@@ -67,7 +67,10 @@ def test_start_worker_model_extension_defaults_and_round_trip():
     assert StartWorkerPayload.from_dict(command.to_dict()).model_id == "small_cnn"
     legacy = command.to_dict()
     legacy.pop("model_id")
-    assert StartWorkerPayload.from_dict(legacy).model_id == "resnet18_groupnorm"
+    from pbl4.agent_protocol.messages import AgentMessageError
+
+    with pytest.raises(AgentMessageError, match="model_id"):
+        StartWorkerPayload.from_dict(legacy)
     assert "private-token" not in repr(command)
     assert "private-token" not in str(command.to_dict(redact=True))
 

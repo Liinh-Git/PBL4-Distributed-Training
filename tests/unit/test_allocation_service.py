@@ -67,6 +67,7 @@ class TestAllocationService(unittest.TestCase):
         self.base_job = {
             "job_id": "job-01",
             "resolved_contract": {
+                "model": {"model_id": "resnet18_groupnorm"},
                 "training": {
                     "training_seed": 123456,
                 },
@@ -208,7 +209,9 @@ class TestAllocationService(unittest.TestCase):
         # 1. Valid seed extraction from JSON string resolved_contract
         job_with_json_str = {
             "job_id": "job-02",
-            "resolved_contract": json.dumps({"training": {"training_seed": 777}}),
+            "resolved_contract": json.dumps(
+                {"training": {"training_seed": 777}, "model": {"model_id": "resnet18_groupnorm"}}
+            ),
         }
         cmd = build_start_worker_command(
             allocation=self.base_allocation,

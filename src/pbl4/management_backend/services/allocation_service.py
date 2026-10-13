@@ -336,7 +336,7 @@ class AllocationService:
             runtime_port=app_settings.runtime_dtp_port,
             device=device,
             initialization_seed=seed,
-            model_id=(resolved_contract.get("model") or {}).get("model_id", "resnet18_groupnorm"),
+            model_id=(resolved_contract.get("model") or {}).get("model_id", ""),
             worker_join_token=token,
         )
 

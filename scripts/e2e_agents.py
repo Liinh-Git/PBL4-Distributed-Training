@@ -12,6 +12,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -22,19 +23,6 @@ import psutil
 
 from e2e_local import Harness, _canonical, _now, _parser, _sha256
 from local_fault_proxy import SlowPeerProxy
-
-
-def redact(value):
-    if isinstance(value, dict):
-        return {
-            key: "[REDACTED]"
-            if key in {"enrollment_code", "node_secret", "worker_join_token", "code_hash"}
-            else redact(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [redact(item) for item in value]
-    return value
 
 
 def stop_tree(proc):
@@ -85,25 +73,9 @@ class AgentHarness(Harness):
         )
         self.agent_dirs: list[Path] = []
         self.proxy = None
-
-    def request(self, method, path, body=None, **kwargs):
-        # The enrollment response contains a one-time credential. Keep it out of
-        # evidence without modifying the response consumed by the enrollment CLI.
-        if path == "/api/v1/nodes/enrollment-codes":
-            import urllib.request
-
-            req = urllib.request.Request(
-                self.base_url + path,
-                data=_canonical(body or {}),
-                headers={"Content-Type": "application/json"},
-                method=method,
-            )
-            with urllib.request.urlopen(req, timeout=10) as response:
-                value = json.load(response)
-            with self.evidence_path.open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps({"at": _now(), "path": path, "body": redact(value)}) + "\n")
-            return value
-        return super().request(method, path, body, **kwargs)
+        self.bind_host = "127.0.0.1"
+        self.advertised_host = "127.0.0.1"
+        self.agent_backend_url = self.base_url
 
     def checked(self, name, command, *, env=None):
         with (self.logs / f"{name}.log").open("wb") as stream:
@@ -150,7 +122,7 @@ class AgentHarness(Harness):
             raise ValueError("Service ports must be distinct")
         for port in ports:
             with socket.socket() as probe:
-                probe.bind(("127.0.0.1", port))
+                probe.bind((self.bind_host, port))
         env = {
             **os.environ,
             "PYTHONUNBUFFERED": "1",
@@ -198,7 +170,7 @@ class AgentHarness(Harness):
                 "-m",
                 "dataset_manager.entrypoint",
                 "--host",
-                "127.0.0.1",
+                self.bind_host,
                 "--port",
                 str(self.dataset_port),
                 "--store-dir",
@@ -222,7 +194,7 @@ class AgentHarness(Harness):
                 "-m",
                 "pbl4.runtime.entrypoint",
                 "--host",
-                "127.0.0.1",
+                self.bind_host,
                 "--port",
                 str(self.dtp_port),
                 "--management-port",
@@ -238,9 +210,11 @@ class AgentHarness(Harness):
             ],
             env,
         )
-        if self.args.scenario not in {"happy", "cache-reuse", "cache-repair"}:
+        if self.args.scenario not in {"happy", "cache-reuse", "cache-repair", "workload-recovery"}:
             self.proxy = SlowPeerProxy(self.dtp_port)
         worker_port = self.proxy.port if self.proxy else self.dtp_port
+        if getattr(self.args, "agents_before_backend", False):
+            self.launch_agents(env)
         self.start_child(
             "backend",
             [
@@ -248,7 +222,7 @@ class AgentHarness(Harness):
                 "-m",
                 "pbl4.management_backend.entrypoint",
                 "--host",
-                "127.0.0.1",
+                self.bind_host,
                 "--port",
                 str(self.backend_port),
                 "--http",
@@ -256,8 +230,8 @@ class AgentHarness(Harness):
             ],
             {
                 **env,
-                "RUNTIME_HOST": "127.0.0.1",
-                "RUNTIME_ADVERTISED_HOST": "127.0.0.1",
+                "RUNTIME_HOST": self.advertised_host,
+                "RUNTIME_ADVERTISED_HOST": self.advertised_host,
                 "RUNTIME_PORT": str(worker_port),
                 "RUNTIME_MANAGEMENT_PORT": str(self.management_port),
                 "DATASET_MANAGER_URL": self.dataset_manager_url,
@@ -273,45 +247,8 @@ class AgentHarness(Harness):
             60,
             "MCP ready",
         )
-        for index in range(3):
-            agent_dir = self.runtime_data / f"agent-{index}"
-            self.agent_dirs.append(agent_dir)
-            if not self.reused_state:
-                code = self.request("POST", "/api/v1/nodes/enrollment-codes")["data"][
-                    "enrollment_code"
-                ]
-                self.checked(
-                    f"enroll-{index}",
-                    [
-                        sys.executable,
-                        "-m",
-                        "pbl4.node_agent.entrypoint",
-                        "enroll",
-                        "--backend-url",
-                        self.base_url,
-                        "--var-dir",
-                        str(agent_dir),
-                    ],
-                    env={**env, "PBL4_ENROLLMENT_CODE": code},
-                )
-            self.start_child(
-                f"agent-{index}",
-                [
-                    sys.executable,
-                    "-m",
-                    "pbl4.node_agent.entrypoint",
-                    "start",
-                    "--backend-url",
-                    self.base_url,
-                    "--var-dir",
-                    str(agent_dir),
-                    "--heartbeat-interval",
-                    "1",
-                    "--telemetry-interval",
-                    "1",
-                ],
-                env,
-            )
+        if not self.agent_dirs:
+            self.launch_agents(env)
         nodes = self.wait_value(
             lambda: self.request("GET", "/api/v1/nodes")["data"],
             lambda v: len(v) == 3 and all(n["state"] == "ONLINE" for n in v),
@@ -357,7 +294,8 @@ class AgentHarness(Harness):
             or root["shard_count"] != 3
         ):
             raise AssertionError("Unexpected smoke dataset provenance/size")
-        total_steps = root["batch_count_per_shard"]
+        total_units = sum(s["batch_count"] for s in root["shards"])
+        total_steps = (total_units // self.args.work_units_per_step) * self.args.epochs
         if total_steps < 3:
             raise AssertionError("Smoke must complete at least 3 steps")
         self.result["dataset"] = {
@@ -369,6 +307,14 @@ class AgentHarness(Harness):
             "source": "synthetic_smoke_v1",
             "storage": self.args.storage_backend,
             "build_reused": bool(self.reused_state),
+        }
+        self.result["workload"] = {
+            "policy": self.args.workload_policy,
+            "N": 3,
+            "U": 16,
+            "K": self.args.work_units_per_step,
+            "epochs": self.args.epochs,
+            "steps_per_epoch": total_units // self.args.work_units_per_step,
         }
         (self.runtime_data / "smoke-state.json").write_text(
             json.dumps(
@@ -390,10 +336,12 @@ class AgentHarness(Harness):
                 "requested_contract": {
                     "dataset_build_id": build_id,
                     "model_id": self.args.model_id,
-                    "epochs": 1,
+                    "epochs": self.args.epochs,
                     "learning_rate": 0.01,
                     "training_seed": self.args.training_seed,
                     "training_strategy": "strict_bsp",
+                    "workload_policy": self.args.workload_policy,
+                    "work_units_per_step": self.args.work_units_per_step,
                 },
             },
             idempotency_key=self.run_id + "-job",
@@ -403,7 +351,10 @@ class AgentHarness(Harness):
         if validation["errors"]:
             raise AssertionError(f"Job validation failed: {validation}")
         started = self.request(
-            "POST", f"/api/v1/jobs/{job_id}/start", {}, idempotency_key=self.run_id + "-start"
+            "POST",
+            f"/api/v1/jobs/{job_id}/start",
+            {"node_ids": [n["node_id"] for n in nodes]},
+            idempotency_key=self.run_id + "-start",
         )["data"]
         frozen = self.request("GET", f"/api/v1/jobs/{job_id}")["data"]
         resolved = frozen["resolved_contract"]["dataset"]
@@ -417,6 +368,29 @@ class AgentHarness(Harness):
         return self.run_attempt(
             env, nodes, job_id, attempt_id, total_steps, parameter_hash, checkpoint_dir
         )
+
+    def launch_agents(self, env):
+        for index in range(3):
+            agent_dir = self.runtime_data / f"agent-{index}"
+            self.agent_dirs.append(agent_dir)
+            self.start_child(
+                f"agent-{index}",
+                [
+                    sys.executable,
+                    "-m",
+                    "pbl4.node_agent.entrypoint",
+                    "start",
+                    "--backend-url",
+                    self.agent_backend_url,
+                    "--var-dir",
+                    str(agent_dir),
+                    "--heartbeat-interval",
+                    "1",
+                    "--telemetry-interval",
+                    "1",
+                ],
+                env,
+            )
 
     def create_dataset_build(self):
         ds = self.request(
@@ -557,8 +531,12 @@ class AgentHarness(Harness):
                 "data"
             ]
             values = detail["worker_steps"]
-            if detail["total_sample_count"] != 48 or any(
-                w["sample_count"] != 16 or w["loss"] is None or w["compute_ms"] <= 0 for w in values
+            if detail["total_sample_count"] != 16 * self.args.work_units_per_step or any(
+                w["sample_count"] < 16
+                or w["sample_count"] % 16
+                or w["loss"] is None
+                or w["compute_ms"] <= 0
+                for w in values
             ):
                 raise AssertionError("Missing real loss/compute/sample count evidence")
             self.result["step_metrics"].append(
@@ -588,6 +566,39 @@ class AgentHarness(Harness):
         if {w["node_id"] for w in self.result["workers"]} != {n["node_id"] for n in nodes}:
             raise AssertionError("Runtime membership does not match enrolled Nodes")
         self.result["worker_processes"] = records
+        starts = self.events(attempt_id, "step.started")
+        assignments = []
+        for start in starts:
+            detail = start["details"]
+            worker_units = detail["assignments"]
+            units = [u for a in worker_units for u in a["work_units"]]
+            identities = {(u["shard_id"], u["batch_id"]) for u in units}
+            if len(units) != self.args.work_units_per_step or len(identities) != len(units):
+                raise AssertionError("Duplicate/incomplete canonical Work Unit assignment")
+            if any(
+                a["sample_count"] != sum(u["sample_count"] for u in a["work_units"])
+                for a in worker_units
+            ):
+                raise AssertionError("Assignment sample count differs from Work Units")
+            assignments.append(
+                {
+                    "epoch": detail["epoch"],
+                    "operation_id": detail["operation_id"],
+                    "workers": worker_units,
+                }
+            )
+        self.result["assignments"] = assignments
+        plans = self.events(attempt_id, "workload.plan_changed")
+        self.result["workload_plans"] = plans
+        if self.args.workload_policy == "dbs" and not all(
+            any(p["details"]["epoch"] == epoch and p["details"]["policy"] == "dbs" for p in plans)
+            for epoch in range(1, self.args.epochs)
+        ):
+            raise AssertionError("DBS plan was not applied at each epoch boundary")
+        for plan in plans:
+            counts = list(plan["details"]["units_per_worker"].values())
+            if sum(counts) != self.args.work_units_per_step or min(counts) < 1:
+                raise AssertionError("Workload plan violates fixed K or minimum per Worker")
         self.verify_cache_evidence(records)
         self.result["allocations"] = self.wait_value(
             lambda: self.allocations(attempt_id),
@@ -604,6 +615,29 @@ class AgentHarness(Harness):
         self.result["scenario"] = self.args.scenario
         if self.args.scenario == "recovery":
             self.check_recovery(job_id, attempt_id, checkpoint_dir, parameter_hash)
+        if self.args.scenario == "workload-recovery":
+            self.check_workload_recovery(job_id, attempt_id, checkpoint_dir, total_steps)
+        if getattr(self.args, "frontend_api_test", False):
+            node = shutil.which("node")
+            if not node:
+                raise RuntimeError("Node.js unavailable for real frontend API acceptance")
+            evidence = self.artifacts / "frontend-api-result.json"
+            self.checked(
+                "frontend-api",
+                [
+                    node,
+                    str(self.repo / "web/node_modules/tsx/dist/cli.mjs"),
+                    "--test",
+                    str(self.repo / "web/src/api/__tests__/phase2LiveWorkflow.test.ts"),
+                ],
+                env={
+                    **env,
+                    "PBL4_API_SMOKE_URL": self.base_url,
+                    "PBL4_API_SMOKE_BUILD_ID": self.result["dataset"]["dataset_build_id"],
+                    "PBL4_API_SMOKE_EVIDENCE": str(evidence),
+                },
+            )
+            self.result["frontend_api"] = json.loads(evidence.read_text())
         self.result["verdict"] = "PASS"
         if self.args.hold_seconds:
             self.log(
@@ -830,6 +864,113 @@ class AgentHarness(Harness):
             finally:
                 source_path.write_bytes(original)
 
+    def check_workload_recovery(self, job_id, fresh_attempt, checkpoint_dir, total_steps):
+        import numpy as np
+
+        checkpoints = self.request(
+            "GET", f"/api/v1/checkpoints?attempt_id={fresh_attempt}&limit=200"
+        )["data"]
+        checkpoints.sort(key=lambda c: c["model_version"])
+
+        def payload(checkpoint, attempt):
+            return (
+                checkpoint_dir
+                / attempt
+                / _sha256(checkpoint["checkpoint_id"].encode())
+                / "model.bin"
+            )
+
+        reference = payload(checkpoints[-1], fresh_attempt).read_bytes()
+        cases = []
+        for source in checkpoints[:2]:
+            original = payload(source, fresh_attempt).read_bytes()
+            resumed = self.request(
+                "POST",
+                f"/api/v1/jobs/{job_id}/resume",
+                {"checkpoint_id": source["checkpoint_id"]},
+                idempotency_key=self.run_id + f"-resume-{source['model_version']}",
+            )["data"]
+            attempt = resumed["attempt_id"]
+            terminal = self.wait_value(
+                lambda attempt=attempt: self._poll_attempt(attempt),
+                lambda v: v["attempt"]["state"] in {"COMPLETED", "FAILED", "ABORTED"},
+                120,
+                "workload RESUME terminal",
+            )
+            if (
+                terminal["attempt"]["state"] != "COMPLETED"
+                or terminal["runtime"]["model_version"] != total_steps
+            ):
+                raise AssertionError("Workload RESUME failed or reset model version")
+            remaining = total_steps - source["model_version"]
+            steps = self.wait_value(
+                lambda attempt=attempt: self.request(
+                    "GET", f"/api/v1/attempts/{attempt}/steps?limit=200"
+                )["data"],
+                lambda values, remaining=remaining: (
+                    len(values) == remaining and all(s["state"] == "COMMITTED" for s in values)
+                ),
+                20,
+                "RESUME durable Steps",
+            )
+            if sorted(s["input_model_version"] for s in steps) != list(
+                range(source["model_version"], total_steps)
+            ):
+                raise AssertionError("RESUME skipped or replayed RecoveryCursor")
+            fresh_starts = self.events(fresh_attempt, "step.started")[source["model_version"] :]
+            resumed_starts = self.events(attempt, "step.started")
+
+            def identities(event):
+                return sorted(
+                    (u["shard_id"], u["batch_id"])
+                    for a in event["details"]["assignments"]
+                    for u in a["work_units"]
+                )
+
+            if [identities(e) for e in fresh_starts] != [identities(e) for e in resumed_starts]:
+                raise AssertionError("RESUME global Work Units differ from uninterrupted run")
+            saved = self.request("GET", f"/api/v1/checkpoints?attempt_id={attempt}&limit=200")[
+                "data"
+            ]
+            if len(saved) != remaining or any(c["state"] != "COMPLETE" for c in saved):
+                raise AssertionError("RESUME checkpoint count/state mismatch")
+            for checkpoint in saved:
+                data = payload(checkpoint, attempt).read_bytes()
+                metadata = json.loads(
+                    payload(checkpoint, attempt).with_name("checkpoint.json").read_bytes()
+                )
+                if metadata["model"]["payload_sha256"] != _sha256(data):
+                    raise AssertionError("RESUME checkpoint hash mismatch")
+            final = payload(max(saved, key=lambda c: c["model_version"]), attempt).read_bytes()
+            np.testing.assert_allclose(
+                np.frombuffer(final, dtype="<f4"),
+                np.frombuffer(reference, dtype="<f4"),
+                rtol=2e-5,
+                atol=2e-6,
+            )
+            if payload(source, fresh_attempt).read_bytes() != original:
+                raise AssertionError("RESUME modified source checkpoint")
+            self.wait_value(
+                lambda attempt=attempt: self.allocations(attempt),
+                lambda values: (
+                    len(values) == 3
+                    and all(a["actual_state"] in {"ENDED", "FAILED"} for a in values)
+                ),
+                20,
+                "RESUME allocation cleanup",
+            )
+            cases.append(
+                {
+                    "attempt_id": attempt,
+                    "source_version": source["model_version"],
+                    "steps": remaining,
+                    "final_version": total_steps,
+                    "matches_uninterrupted": True,
+                    "workload_plans": self.events(attempt, "workload.plan_changed"),
+                }
+            )
+        self.result["workload_resume"] = cases
+
     def finish(self, error):
         failures = []
         before_cleanup = self.data_fingerprints()
@@ -896,12 +1037,18 @@ def main():
             "agent-restart",
             "cache-reuse",
             "cache-repair",
+            "workload-recovery",
         ],
         default="happy",
     )
     parser.add_argument(
         "--model-id", choices=["small_cnn", "resnet18_groupnorm"], default="small_cnn"
     )
+    parser.add_argument("--workload-policy", choices=["equal", "dbs"], default="equal")
+    parser.add_argument("--work-units-per-step", type=int, default=3)
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--agents-before-backend", action="store_true")
+    parser.add_argument("--frontend-api-test", action="store_true")
     parser.add_argument(
         "--storage-backend",
         choices=["local", "huggingface"],

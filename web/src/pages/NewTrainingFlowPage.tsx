@@ -21,6 +21,7 @@ import {
   SupportedModelData,
   JobDetailData,
   JobValidateResponseData,
+  NodeItemData,
 } from '../types/api';
 
 export const NewTrainingFlowPage: React.FC = () => {
@@ -34,6 +35,8 @@ export const NewTrainingFlowPage: React.FC = () => {
   const [apiBuilds, setApiBuilds] = useState<DatasetBuildListItemData[]>([]);
   const [supportedModels, setSupportedModels] = useState<SupportedModelData[]>([]);
   const [loadingData, setLoadingData] = useState<boolean>(true);
+  const [nodes, setNodes] = useState<NodeItemData[]>([]);
+  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
 
   // Step state: 1 = Dataset, 2 = Model, 3 = Settings, 4 = Review, 5 = Ready
   const [step, setStep] = useState<1 | 2 | 3 | 4 | 5>(1);
@@ -45,12 +48,11 @@ export const NewTrainingFlowPage: React.FC = () => {
   // Form State
   const [selectedDatasetId, setSelectedDatasetId] = useState<string>(initialDatasetId);
   const [selectedBuildId, setSelectedBuildId] = useState<string>(initialBuildId);
-  const [selectedModel, setSelectedModel] = useState<string>('resnet18_groupnorm');
+  const [selectedModel, setSelectedModel] = useState<string>('');
   const [epochs, setEpochs] = useState<number>(20);
   const [learningRate, setLearningRate] = useState<number>(0.01);
   const [seed, setSeed] = useState<number>(42);
   const [workloadPolicy, setWorkloadPolicy] = useState<'equal' | 'dbs'>('equal');
-  const [initialPolicy, setInitialPolicy] = useState<'equal' | 'dbs'>('equal');
   const [existingWups, setExistingWups] = useState<number | undefined>(undefined);
   const [jobName, setJobName] = useState<string>('');
   const [jobDescription, setJobDescription] = useState<string>('');
@@ -71,12 +73,14 @@ export const NewTrainingFlowPage: React.FC = () => {
     const loadFlowData = async () => {
       try {
         setLoadingData(true);
-        const [dsRes, buildsRes, capRes, jobRes] = await Promise.allSettled([
+        const [dsRes, buildsRes, capRes, jobRes, nodesRes] = await Promise.allSettled([
           datasetsService.listDatasets({ limit: 50 }),
           datasetBuildsService.listBuilds({ limit: 100 }),
           systemService.getCapabilities(),
           isEditMode && jobId ? jobsService.getJob(jobId) : Promise.resolve(null),
+          systemService.getNodes(),
         ]);
+        if (nodesRes.status === 'fulfilled') setNodes(nodesRes.value.data || []);
 
         let loadedBuilds: DatasetBuildListItemData[] = [];
         if (buildsRes.status === 'fulfilled') {
@@ -118,7 +122,6 @@ export const NewTrainingFlowPage: React.FC = () => {
               (job as any).resolved_contract?.workload?.policy;
             if (pol === 'dbs' || pol === 'equal') {
               setWorkloadPolicy(pol);
-              setInitialPolicy(pol);
             }
             if (req.work_units_per_step !== undefined) {
               setExistingWups(req.work_units_per_step);
@@ -206,6 +209,10 @@ export const NewTrainingFlowPage: React.FC = () => {
   const handleProceedToReview = async () => {
     try {
       setFormError(null);
+      if (!selectedModel || !supportedModels.some(m => m.model_id === selectedModel)) {
+        setFormError('Choose a supported model from the Backend catalog.');
+        return;
+      }
       if (workloadPolicy === 'dbs' && (!Number.isInteger(existingWups) || (existingWups ?? 0) <= 0)) {
         setFormError('Enter a positive whole number of work units per step for DBS. It must exceed the expected worker count.');
         return;
@@ -230,7 +237,7 @@ export const NewTrainingFlowPage: React.FC = () => {
             training_seed: seed,
             training_strategy: 'strict_bsp',
             workload_policy: workloadPolicy,
-            ...((workloadPolicy === 'dbs' || workloadPolicy === initialPolicy) && existingWups !== undefined
+            ...(existingWups !== undefined
               ? { work_units_per_step: existingWups }
               : {}),
           },
@@ -250,7 +257,7 @@ export const NewTrainingFlowPage: React.FC = () => {
             training_seed: seed,
             training_strategy: 'strict_bsp',
             workload_policy: workloadPolicy,
-            ...((workloadPolicy === 'dbs' || workloadPolicy === initialPolicy) && existingWups !== undefined
+            ...(existingWups !== undefined
               ? { work_units_per_step: existingWups }
               : {}),
           },
@@ -281,7 +288,11 @@ export const NewTrainingFlowPage: React.FC = () => {
     try {
       setActionLoading('start');
       setFormError(null);
-      const startRes = await jobsService.startJob(targetId);
+      if (selectedNodeIds.length && selectedNodeIds.length !== selectedBuild?.shard_count) {
+        setFormError(`Select exactly ${selectedBuild?.shard_count} Nodes, or clear the selection for automatic placement.`);
+        return;
+      }
+      const startRes = await jobsService.startJob(targetId, selectedNodeIds.length ? { node_ids: selectedNodeIds } : undefined);
       const attemptId = startRes.data.attempt_id;
       // Navigate to live monitoring or job detail with real attempt_id
       navigate(`/jobs/${targetId}`);
@@ -605,6 +616,7 @@ export const NewTrainingFlowPage: React.FC = () => {
             <button
               type="button"
               onClick={() => setStep(3)}
+              disabled={!selectedModel || !supportedModels.some(m => m.model_id === selectedModel)}
               className="px-4 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white transition-colors flex items-center gap-1.5"
             >
               <span>Next: Training settings</span>
@@ -814,7 +826,6 @@ export const NewTrainingFlowPage: React.FC = () => {
                 </p>
               </div>
             </div>
-            {workloadPolicy === 'dbs' && (
               <div>
                 <label htmlFor="work-units-per-step" className="block text-xs text-[#a1a1a8] mb-1">
                   Work units per step (K)
@@ -825,14 +836,27 @@ export const NewTrainingFlowPage: React.FC = () => {
                   type="number"
                   min={1}
                   step={1}
-                  required
+                  required={workloadPolicy === 'dbs'}
                   value={existingWups ?? ''}
                   onChange={e => setExistingWups(e.target.value === '' ? undefined : Number(e.target.value))}
                   className="w-full px-3 py-1.5 bg-[#171719] border border-white/[0.07] rounded text-xs text-[#f3f3f4] focus:border-blue-500 focus:outline-hidden"
                 />
-                <p className="text-[11px] text-[#73737c] mt-1">K must exceed the expected worker count.</p>
+                <p className="text-[11px] text-[#73737c] mt-1">
+                  {workloadPolicy === 'dbs' ? 'K must exceed the expected worker count.' : 'K must be at least the expected worker count. Leave empty to use that count.'}
+                </p>
               </div>
-            )}
+              <fieldset className="space-y-2">
+                <legend className="text-xs text-[#a1a1a8]">Nodes</legend>
+                <p className="text-[11px] text-[#73737c]">Choose {selectedBuild?.shard_count ?? 'the required number of'} ONLINE Nodes, or leave all unchecked for automatic placement.</p>
+                {nodes.length === 0 && <p className="text-xs text-[#73737c]">Chưa có dữ liệu</p>}
+                {nodes.map(node => (
+                  <label key={node.node_id} className="flex items-center gap-2 text-xs text-[#a1a1a8]">
+                    <input type="checkbox" disabled={node.state !== 'ONLINE'} checked={selectedNodeIds.includes(node.node_id)}
+                      onChange={e => setSelectedNodeIds(ids => e.target.checked ? [...ids, node.node_id] : ids.filter(id => id !== node.node_id))} />
+                    {node.display_name} · {node.node_id} · {node.state}
+                  </label>
+                ))}
+              </fieldset>
           </div>
 
           {/* Navigation */}

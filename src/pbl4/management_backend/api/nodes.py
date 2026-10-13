@@ -1,8 +1,7 @@
 """Node Management REST API and Control Plane WebSocket Router.
 
 Endpoints:
-- POST /api/v1/nodes/enrollment-codes  — issue one-time enrollment code
-- POST /api/v1/nodes/enroll            — enroll node, consume code, issue node_secret
+- POST /api/v1/nodes/enroll            — enroll node, issue node_secret
 - GET  /api/v1/nodes                   — list registered nodes (with optional state filter)
 - GET  /api/v1/nodes/{node_id}         — get detailed node inspect
 - POST /api/v1/nodes/{node_id}/revoke  — revoke node credentials and disconnect active WSS
@@ -26,8 +25,6 @@ from pbl4.management_backend import db
 from pbl4.management_backend.gateways.node_control_gateway import get_node_control_gateway
 from pbl4.management_backend.schemas.common import ItemResponse, ListResponse, PageInfo
 from pbl4.management_backend.schemas.node import (
-    EnrollmentCodeCreateRequest,
-    EnrollmentCodeCreateResponse,
     NodeDetail,
     NodeEnrollRequest,
     NodeEnrollResponse,
@@ -46,37 +43,19 @@ router = APIRouter(tags=["Nodes"])
 
 
 @router.post(
-    "/api/v1/nodes/enrollment-codes",
-    response_model=ItemResponse[EnrollmentCodeCreateResponse],
-    status_code=status.HTTP_201_CREATED,
-    summary="Generate one-time node enrollment code",
-)
-def create_enrollment_code(body: EnrollmentCodeCreateRequest | None = None):
-    """Generate a high-entropy, short-lived enrollment code.
-
-    The code must be securely transmitted to the remote node agent operator.
-    """
-    req = body or EnrollmentCodeCreateRequest()
-    with db.transaction() as conn:
-        res = node_enrollment_service.create_enrollment_code(conn, ttl_seconds=req.ttl_seconds)
-        return ItemResponse(data=EnrollmentCodeCreateResponse(**res))
-
-
-@router.post(
     "/api/v1/nodes/enroll",
     response_model=ItemResponse[NodeEnrollResponse],
     status_code=status.HTTP_201_CREATED,
-    summary="Enroll a new node using a one-time enrollment code",
+    summary="Enroll a new node",
 )
 def enroll_node(body: NodeEnrollRequest):
-    """Atomically consume enrollment code and issue node credentials.
+    """Onboard a new node and issue node credentials.
 
     Returns the plaintext `node_secret` exactly once. Newly created node starts in OFFLINE state.
     """
     with db.transaction() as conn:
         res = node_enrollment_service.enroll_node(
             conn,
-            enrollment_code=body.enrollment_code,
             display_name=body.display_name,
             capabilities=body.capabilities,
             agent_version=body.agent_version,

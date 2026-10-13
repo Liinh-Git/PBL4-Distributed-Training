@@ -202,6 +202,13 @@ class RuntimeGateway:
                         conn.rollback()
                         break
                     cursor.highest_contiguous_seq = next_seq
+                    if next_ev.get("event_type") == "model.updated":
+                        snapshot = self._attempt_snapshots.get(attempt_id)
+                        if snapshot is not None:
+                            snapshot["model_version"] = max(
+                                snapshot.get("model_version") or 0,
+                                int(details["output_model_version"]),
+                            )
                     expected = next_seq + 1
                     event_ingest.broadcast_runtime_event(
                         attempt_id=attempt_id,
@@ -825,6 +832,18 @@ class RuntimeGateway:
             if attempt_id is not None and (ingest_result.inserted or is_contiguous):
                 with db.get_connection() as conn:
                     self.record_event_seq(attempt_id, seq, conn)
+            if (
+                ingest_result.inserted
+                and event_type == "attempt.state_changed"
+                and event_payload.get("state") in {"RUNNING", "COMPLETED", "FAILED", "ABORTED"}
+            ):
+                # Session rows come from authoritative snapshots. Establish them
+                # before model.updated references their IDs, without relying on
+                # a browser/CLI polling /runtime/snapshot. Refresh terminal model
+                # metadata too; this is management-only, outside any DB transaction.
+                snapshot = self._port.request_state()
+                if snapshot and snapshot.get("active_attempt_id") == attempt_id:
+                    self.handle_state_snapshot(snapshot)
         except event_ingest.ConflictingEventPayloadError:
             raise
         except Exception as exc:

@@ -1,18 +1,23 @@
-"""Unit tests for pbl4-agent CLI entrypoint (enroll, start, status).
+"""Unit tests for pbl4-agent CLI entrypoint (start, status).
 
-Reference: NODE_AGENT_IMPLEMENTATION_PLAN.md Section 8.1 & User Request Phase 7.
+Auto-enrollment on start and removal of explicit enroll command.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pbl4.node_agent.enrollment import EnrollmentError
+from pbl4.node_agent.enrollment import EnrollmentConnectionError, EnrollmentError
 from pbl4.node_agent.entrypoint import main
 from pbl4.node_agent.identity import NodeIdentity, load_identity, save_identity
+
+
+@pytest.fixture(autouse=True)
+def static_capabilities_without_hardware_probe(monkeypatch):
+    monkeypatch.setattr("pbl4.node_agent.entrypoint.collect_static_capabilities", lambda: {})
 
 
 def test_cli_version(capsys: pytest.CaptureFixture[str]) -> None:
@@ -28,6 +33,7 @@ def test_cli_status_not_enrolled(tmp_path: Path, capsys: pytest.CaptureFixture[s
     assert code == 0
     captured = capsys.readouterr()
     assert "Enrollment Status:  NOT ENROLLED" in captured.out
+    assert "auto-enroll" in captured.out.lower()
     assert "node_secret" not in captured.out
 
 
@@ -44,230 +50,123 @@ def test_cli_status_enrolled_redaction(tmp_path: Path, capsys: pytest.CaptureFix
     assert "secret" not in captured.out.lower()
 
 
-def test_cli_start_requires_prior_enrollment(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    code = main(["start", "--var-dir", str(tmp_path)])
-    assert code == 1
+def test_cli_enroll_subcommand_removed(capsys: pytest.CaptureFixture[str]) -> None:
+    """Verifies that 'pbl4-agent enroll' subcommand has been completely removed."""
+    with pytest.raises(SystemExit) as exc_info:
+        main(["enroll", "--backend-url", "http://127.0.0.1:8000"])
+    assert exc_info.value.code != 0
     captured = capsys.readouterr()
-    assert "Error: Node identity not found" in captured.err
-    assert "pbl4-agent enroll" in captured.err
+    assert (
+        "invalid choice" in captured.err
+        or "unrecognized" in captured.err
+        or "error" in captured.err.lower()
+    )
 
 
-def test_cli_enroll_missing_code(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    code = main(["enroll", "--var-dir", str(tmp_path), "--code", ""])
-    assert code == 1
-    captured = capsys.readouterr()
-    assert "Enrollment code is required" in captured.err
-
-
+@patch("pbl4.node_agent.entrypoint.NodeAgentClient")
 @patch("pbl4.node_agent.entrypoint.enroll")
-def test_cli_enroll_success(
+def test_cli_start_auto_enroll_success(
     mock_enroll: MagicMock,
+    mock_client_cls: MagicMock,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    mock_enroll.return_value = NodeIdentity(node_id="node-new-123", node_secret="secret-abc-789")
+    """When node identity does not exist, start automatically calls enroll and persists identity."""
+    mock_enroll.return_value = NodeIdentity(node_id="node-auto-123", node_secret="secret-auto-456")
+    mock_client_instance = MagicMock()
+    mock_client_instance.start = AsyncMock()
+    mock_client_cls.return_value = mock_client_instance
 
     code = main(
         [
-            "enroll",
+            "start",
             "--backend-url",
             "http://127.0.0.1:8000",
-            "--code",
-            "one-time-token",
             "--var-dir",
             str(tmp_path),
         ]
     )
     assert code == 0
-    captured = capsys.readouterr()
-    assert "Host successfully enrolled! Assigned node_id: node-new-123" in captured.out
-    # Security: Secret never printed
-    assert "secret-abc-789" not in captured.out
-    assert "one-time-token" not in captured.out
-
+    mock_enroll.assert_called_once()
     saved = load_identity(tmp_path)
     assert saved is not None
-    assert saved.node_id == "node-new-123"
-    assert saved.node_secret == "secret-abc-789"
+    assert saved.node_id == "node-auto-123"
+    assert saved.node_secret == "secret-auto-456"
+
+    mock_client_cls.assert_called_once()
+    _, kwargs = mock_client_cls.call_args
+    assert kwargs["identity"].node_id == "node-auto-123"
 
 
+@patch("pbl4.node_agent.entrypoint.NodeAgentClient")
 @patch("pbl4.node_agent.entrypoint.enroll")
-def test_cli_enroll_already_enrolled_rejects_force_and_prevents_ghost_nodes(
+def test_cli_start_existing_identity_skips_enroll(
     mock_enroll: MagicMock,
+    mock_client_cls: MagicMock,
     tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Test 6: Existing identity + --force must NOT silently create a new Node or overwrite identity."""
-    save_identity(tmp_path, NodeIdentity(node_id="existing-node", node_secret="secret-old"))
+    """When node identity already exists, start reuses it and never calls enroll."""
+    save_identity(tmp_path, NodeIdentity(node_id="existing-node-77", node_secret="secret-77"))
+    mock_client_instance = MagicMock()
+    mock_client_instance.start = AsyncMock()
+    mock_client_cls.return_value = mock_client_instance
 
-    # Without --force -> blocked, reuses identity without enrolling
     code = main(
         [
-            "enroll",
+            "start",
             "--backend-url",
             "http://127.0.0.1:8000",
-            "--code",
-            "one-time-token",
             "--var-dir",
             str(tmp_path),
         ]
     )
-    assert code == 1
+    assert code == 0
     mock_enroll.assert_not_called()
-    captured = capsys.readouterr()
-    assert "Node is already enrolled with node_id='existing-node'" in captured.err
-
-    # With --force -> rejected to prevent duplicate/ghost nodes
-    code_force = main(
-        [
-            "enroll",
-            "--backend-url",
-            "http://127.0.0.1:8000",
-            "--code",
-            "one-time-token",
-            "--var-dir",
-            str(tmp_path),
-            "--force",
-        ]
-    )
-    assert code_force == 1
-    mock_enroll.assert_not_called()
-    captured_force = capsys.readouterr()
-    assert "Automatic re-enrollment with --force is disabled to prevent duplicate/ghost nodes" in captured_force.err
-
-    # Identity remains intact and was NOT overwritten
-    saved = load_identity(tmp_path)
-    assert saved is not None
-    assert saved.node_id == "existing-node"
-    assert saved.node_secret == "secret-old"
+    mock_client_cls.assert_called_once()
+    _, kwargs = mock_client_cls.call_args
+    assert kwargs["identity"].node_id == "existing-node-77"
 
 
 @patch("pbl4.node_agent.entrypoint.enroll")
-def test_cli_enroll_expired_code_surfaces_code_and_message(
+def test_cli_start_auto_enroll_failure(
     mock_enroll: MagicMock,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Test 1: Expired enrollment code surfaces authoritative code and message, saves no identity."""
-    mock_enroll.side_effect = EnrollmentError(
-        "Enrollment code has expired.",
-        code="NODE_ENROLLMENT_CODE_EXPIRED",
-        status_code=400,
-    )
+    """When auto-enrollment fails, start exits with code 1 and writes no identity."""
+    mock_enroll.side_effect = EnrollmentError("Backend unreachable", code="CONNECTION_FAILED")
 
     code = main(
         [
-            "enroll",
+            "start",
             "--backend-url",
             "http://127.0.0.1:8000",
-            "--code",
-            "expired-token",
             "--var-dir",
             str(tmp_path),
         ]
     )
     assert code == 1
     captured = capsys.readouterr()
-    assert "Enrollment failed:" in captured.err
-    assert "code=NODE_ENROLLMENT_CODE_EXPIRED" in captured.err
-    assert "message=Enrollment code has expired." in captured.err
-    assert "status 400" not in captured.err  # Not just an unhelpful status 400
-
-    # No identity file written
+    assert (
+        "Auto-enrollment failed:" in captured.err or "Error: Auto-enrollment failed" in captured.err
+    )
     assert load_identity(tmp_path) is None
 
 
+@patch("pbl4.node_agent.entrypoint.time.sleep")
+@patch("pbl4.node_agent.entrypoint.NodeAgentClient")
 @patch("pbl4.node_agent.entrypoint.enroll")
-def test_cli_enroll_invalid_code_surfaces_code_and_message(
-    mock_enroll: MagicMock,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Test 2: Invalid enrollment code surfaces code and message, saves no identity."""
-    mock_enroll.side_effect = EnrollmentError(
-        "Enrollment code is invalid.",
-        code="NODE_ENROLLMENT_CODE_INVALID",
-        status_code=400,
+def test_start_before_backend_retries_then_persists_one_identity(
+    mock_enroll, mock_client, mock_sleep, tmp_path
+):
+    mock_enroll.side_effect = [
+        EnrollmentConnectionError("unavailable"),
+        NodeIdentity("node-retry", "private"),
+    ]
+    mock_client.return_value.start = AsyncMock()
+    assert (
+        main(["start", "--backend-url", "http://127.0.0.1:8000", "--var-dir", str(tmp_path)]) == 0
     )
-
-    code = main(
-        [
-            "enroll",
-            "--backend-url",
-            "http://127.0.0.1:8000",
-            "--code",
-            "invalid-token",
-            "--var-dir",
-            str(tmp_path),
-        ]
-    )
-    assert code == 1
-    captured = capsys.readouterr()
-    assert "code=NODE_ENROLLMENT_CODE_INVALID" in captured.err
-    assert "message=Enrollment code is invalid." in captured.err
-    assert load_identity(tmp_path) is None
-
-
-@patch("pbl4.node_agent.entrypoint.enroll")
-def test_cli_enroll_already_used_code_surfaces_reason(
-    mock_enroll: MagicMock,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Test 3: Already consumed enrollment code surfaces clear reason, saves no identity."""
-    mock_enroll.side_effect = EnrollmentError(
-        "Enrollment code has already been used.",
-        code="NODE_ENROLLMENT_CODE_INVALID",
-        status_code=400,
-    )
-
-    code = main(
-        [
-            "enroll",
-            "--backend-url",
-            "http://127.0.0.1:8000",
-            "--code",
-            "already-used-token",
-            "--var-dir",
-            str(tmp_path),
-        ]
-    )
-    assert code == 1
-    captured = capsys.readouterr()
-    assert "code=NODE_ENROLLMENT_CODE_INVALID" in captured.err
-    assert "message=Enrollment code has already been used." in captured.err
-    assert load_identity(tmp_path) is None
-
-
-@patch("pbl4.node_agent.entrypoint.enroll")
-def test_cli_enroll_non_json_error_fallback(
-    mock_enroll: MagicMock,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Test 4: Non-JSON / malformed HTTP error body falls back gracefully without crashing."""
-    mock_enroll.side_effect = EnrollmentError(
-        "HTTP request failed with status 502: Bad Gateway: upstream server unavailable",
-        code=None,
-        status_code=502,
-    )
-
-    code = main(
-        [
-            "enroll",
-            "--backend-url",
-            "http://127.0.0.1:8000",
-            "--code",
-            "valid-token",
-            "--var-dir",
-            str(tmp_path),
-        ]
-    )
-    assert code == 1
-    captured = capsys.readouterr()
-    assert "Enrollment failed:" in captured.err
-    assert "HTTP request failed with status 502" in captured.err
-    assert "Bad Gateway" in captured.err
-    assert load_identity(tmp_path) is None
+    assert mock_enroll.call_count == 2
+    mock_sleep.assert_called_once_with(1.0)
+    assert load_identity(tmp_path).node_id == "node-retry"

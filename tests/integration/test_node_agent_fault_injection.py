@@ -226,6 +226,7 @@ time.sleep(30)
 
         # Step 6: Verify duplicate START_WORKER after restart does NOT spawn second process
         cmd = StartWorkerPayload(
+            model_id="resnet18_groupnorm",
             command_id="cmd-dup",
             allocation_id="alloc-fi-1",
             attempt_id="att-fi-1",
@@ -392,6 +393,7 @@ class TestFaultInvariant3DuplicateStartWorker(unittest.TestCase):
 
     def test_duplicate_start_and_terminal_idempotency_matrix(self) -> None:
         cmd_a = StartWorkerPayload(
+            model_id="resnet18_groupnorm",
             command_id="cmd-1",
             allocation_id="alloc-dup-A",
             attempt_id="att-dup",
@@ -432,6 +434,7 @@ class TestFaultInvariant3DuplicateStartWorker(unittest.TestCase):
 
             # Case B: Duplicate START when STARTING -> ACCEPTED no-op
             cmd_b = StartWorkerPayload(
+                model_id="resnet18_groupnorm",
                 command_id="cmd-2",
                 allocation_id="alloc-dup-B",
                 attempt_id="att-dup",

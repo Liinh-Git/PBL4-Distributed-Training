@@ -299,6 +299,7 @@ def _preflight_job_and_select_placements(
     conn: psycopg.Connection,
     job: dict[str, Any],
     res: dict[str, Any] | None,
+    node_ids: list[str] | None = None,
 ) -> list[WorkerPlacementSpec]:
     job_id = job["job_id"]
     if not res or not isinstance(res, dict):
@@ -331,6 +332,13 @@ def _preflight_job_and_select_placements(
         conn, state=node_repository.NODE_STATE_ONLINE, limit=1000
     )
     active_allocs = allocation_repository.list_active(conn)
+    if node_ids is not None:
+        if len(node_ids) != expected_workers or len(set(node_ids)) != len(node_ids):
+            raise JobValidationError(f"Select exactly {expected_workers} distinct Nodes.")
+        selected = set(node_ids)
+        online_nodes = [n for n in online_nodes if n["node_id"] in selected]
+        if {n["node_id"] for n in online_nodes} != selected:
+            raise JobValidationError("Selected Nodes must all exist and be ONLINE.")
     return ClusterScheduler.select_placements(
         expected_workers=expected_workers,
         nodes=online_nodes,
@@ -338,7 +346,13 @@ def _preflight_job_and_select_placements(
     )
 
 
-def start_job(conn: psycopg.Connection, job_id: str, note: str | None = None) -> tuple[dict, dict]:
+def start_job(
+    conn: psycopg.Connection,
+    job_id: str,
+    note: str | None = None,
+    *,
+    node_ids: list[str] | None = None,
+) -> tuple[dict, dict]:
     """Start a FRESH attempt for a DRAFT or READY job.
 
     If job is in DRAFT state, it is frozen to READY first (freeze-on-start).
@@ -366,7 +380,7 @@ def start_job(conn: psycopg.Connection, job_id: str, note: str | None = None) ->
     if isinstance(res, str):
         res = json.loads(res)
 
-    placements = _preflight_job_and_select_placements(conn, job, res)
+    placements = _preflight_job_and_select_placements(conn, job, res, node_ids=node_ids)
 
     attempt_id = _new_attempt_id()
     command_id = _new_command_id()
@@ -1175,15 +1189,9 @@ def _dispatch_workers_for_attempt(
                 timeout=5.0,
             )
             abort_state = (
-                abort_res.get("state", "SUCCEEDED")
-                if isinstance(abort_res, dict)
-                else "SUCCEEDED"
+                abort_res.get("state", "SUCCEEDED") if isinstance(abort_res, dict) else "SUCCEEDED"
             )
-            abort_result = (
-                abort_res.get("result")
-                if isinstance(abort_res, dict)
-                else None
-            )
+            abort_result = abort_res.get("result") if isinstance(abort_res, dict) else None
             with db_module.transaction() as conn:
                 command_repository.update_command_state(
                     conn,
@@ -1211,6 +1219,7 @@ def execute_start_job(
     *,
     note: str | None = None,
     idempotency_key: str | None = None,
+    node_ids: list[str] | None = None,
 ) -> tuple[dict, dict]:
     """Execute START_ATTEMPT following the canonical 2-phase pattern.
 
@@ -1223,7 +1232,11 @@ def execute_start_job(
     request_hash = idempotency.compute_request_hash(
         operation="START_ATTEMPT",
         path=f"/api/v1/jobs/{job_id}/start",
-        body_obj={"job_id": job_id, "note": note},
+        body_obj={
+            "job_id": job_id,
+            "note": note,
+            **({"node_ids": sorted(node_ids)} if node_ids is not None else {}),
+        },
     )
 
     with db_module.transaction() as conn:
@@ -1262,12 +1275,19 @@ def execute_start_job(
             ):
                 dispatch_payload = _extract_command_payload(cmd_row)
             else:
-                attempt_row, cmd_row = start_job(conn, job_id, note=note)
+                attempt_row, cmd_row = start_job(
+                    conn,
+                    job_id,
+                    note=note,
+                    **({"node_ids": node_ids} if node_ids is not None else {}),
+                )
                 dispatch_payload = _extract_command_payload(cmd_row)
                 command_id = str(cmd_row["command_id"])
                 attempt_id = str(attempt_row["attempt_id"])
         else:
-            attempt_row, cmd_row = start_job(conn, job_id, note=note)
+            attempt_row, cmd_row = start_job(
+                conn, job_id, note=note, **({"node_ids": node_ids} if node_ids is not None else {})
+            )
             dispatch_payload = _extract_command_payload(cmd_row)
             command_id = str(cmd_row["command_id"])
             attempt_id = str(attempt_row["attempt_id"])
