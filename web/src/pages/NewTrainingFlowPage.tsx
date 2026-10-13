@@ -171,28 +171,13 @@ export const NewTrainingFlowPage: React.FC = () => {
   const selectedBuild = readyBuilds.find(b => b.dataset_build_id === selectedBuildId) ||
     apiBuilds.find(b => b.dataset_build_id === selectedBuildId);
 
-  // Model Options: dynamic from capabilities if provided, with fallback defaults
-  const MODEL_OPTIONS = supportedModels.length > 0
-    ? supportedModels.map(m => ({
-        id: m.model_id,
-        name: m.display_name || m.model_id,
-        description: `Architecture ${m.model_id} for distributed training.`,
-        parameters: '11.2M',
-      }))
-    : [
-        {
-          id: 'resnet18_groupnorm',
-          name: 'ResNet-18 (GroupNorm)',
-          description: 'Standard 18-layer residual network with GroupNorm for robust distributed mini-batch training.',
-          parameters: '11.2M',
-        },
-        {
-          id: 'resnet50_groupnorm',
-          name: 'ResNet-50 (GroupNorm)',
-          description: 'Deeper 50-layer residual network for high-capacity distributed vision tasks.',
-          parameters: '25.6M',
-        },
-      ];
+  // Model choices come from the Backend catalog, including the CPU smoke model.
+  const MODEL_OPTIONS = supportedModels.map(m => ({
+    id: m.model_id,
+    name: m.display_name || m.model_id,
+    description: `Architecture ${m.model_id} for distributed training.`,
+    parameters: 'Chưa có dữ liệu',
+  }));
 
   const handleBuildDataset = async () => {
     if (!selectedDatasetId) return;

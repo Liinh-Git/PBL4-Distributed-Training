@@ -97,31 +97,31 @@ export const SystemPage: React.FC = () => {
         name: 'Backend API',
         status: backendStatus,
         lastSeen: 'now',
-        latency: '< 2 ms',
-        protocol: 'HTTP/2 REST',
+        latency: 'Chưa có dữ liệu',
+        protocol: 'HTTP REST',
       },
       {
         id: 'runtime',
         name: 'Coordinator Runtime',
         status: runtimeStatus,
         lastSeen: isRuntimeStale ? 'Stale' : 'now',
-        latency: '< 3 ms',
-        protocol: 'WebSocket v1.2 / DTP/1',
+        latency: 'Chưa có dữ liệu',
+        protocol: 'MCP/1',
       },
       {
         id: 'database',
         name: 'PostgreSQL Database',
         status: postgresStatus,
         lastSeen: 'now',
-        latency: '< 1 ms',
-        protocol: 'PostgreSQL 16',
+        latency: 'Chưa có dữ liệu',
+        protocol: 'PostgreSQL',
       },
       {
         id: 'dataset_mgr',
         name: 'Dataset Manager',
         status: dmStatus,
         lastSeen: 'now',
-        latency: '< 4 ms',
+        latency: 'Chưa có dữ liệu',
         protocol: 'HTTP Service',
       },
     ];
@@ -134,8 +134,8 @@ export const SystemPage: React.FC = () => {
         nodeLabel: w.node_label || `Compute Node 0${w.worker_id + 1}`,
         workerLabel: `Worker ${w.worker_id}`,
         state: w.state === 'READY' ? 'Active · Synchronized' : w.state,
-        lastHeartbeat: w.last_heartbeat_at ? new Date(w.last_heartbeat_at).toLocaleTimeString() : 'connected',
-        internalIp: `10.240.0.1${w.worker_id + 1}`,
+        lastHeartbeat: w.last_heartbeat_at ? new Date(w.last_heartbeat_at).toLocaleTimeString() : 'Chưa có dữ liệu',
+        internalIp: 'Chưa có dữ liệu',
         protocol: 'dtp/v1.0',
         workerData: {
           workerId: w.worker_id,
@@ -150,39 +150,8 @@ export const SystemPage: React.FC = () => {
       }));
     }
 
-    return [
-      {
-        id: 'node-01',
-        nodeLabel: 'Compute Node 01',
-        workerLabel: 'Worker 0',
-        state: isHealthy ? 'Standby · Operational' : 'Offline',
-        lastHeartbeat: isHealthy ? 'heartbeat ok' : 'unreachable',
-        internalIp: '10.240.0.11',
-        protocol: 'dtp/v1.0',
-        workerData: null,
-      },
-      {
-        id: 'node-02',
-        nodeLabel: 'Compute Node 02',
-        workerLabel: 'Worker 1',
-        state: isHealthy ? 'Standby · Operational' : 'Offline',
-        lastHeartbeat: isHealthy ? 'heartbeat ok' : 'unreachable',
-        internalIp: '10.240.0.12',
-        protocol: 'dtp/v1.0',
-        workerData: null,
-      },
-      {
-        id: 'node-03',
-        nodeLabel: 'Compute Node 03',
-        workerLabel: 'Worker 2',
-        state: isHealthy ? 'Standby · Operational' : 'Offline',
-        lastHeartbeat: isHealthy ? 'heartbeat ok' : 'unreachable',
-        internalIp: '10.240.0.13',
-        protocol: 'dtp/v1.0',
-        workerData: null,
-      },
-    ];
-  }, [liveWorkers, isHealthy]);
+    return [];
+  }, [liveWorkers]);
 
   // Convert AuditEventResponse to DiagnosticEvent format for UI
   const displayEvents: DiagnosticEvent[] = useMemo(() => {
@@ -345,6 +314,7 @@ export const SystemPage: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/[0.04]">
+                  {clusterNodes.length === 0 ? <tr><td colSpan={4} className="py-4 px-3 text-[#73737c]">Chưa có dữ liệu Worker</td></tr> : null}
                   {clusterNodes.map(node => (
                     <tr
                       key={node.id}
