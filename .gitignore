@@ -73,3 +73,5 @@ postgres-data/
 report.md
 var/*
 start_worker_doc.md
+worker_join_job.md
+node_agent.md

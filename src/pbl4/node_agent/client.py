@@ -70,7 +70,7 @@ from pbl4.node_agent.supervisor import (
     LOCAL_STATE_STOPPED,
     WorkerProcessSupervisor,
 )
-from pbl4.node_agent.telemetry import sample_resources
+# from pbl4.node_agent.telemetry import sample_resources
 
 logger = logging.getLogger(__name__)
 
@@ -236,11 +236,12 @@ class NodeAgentClient:
 
         # 4. Launch concurrent tasks
         heartbeat_task = asyncio.create_task(self._heartbeat_loop(ws), name="agent-heartbeat")
-        telemetry_task = asyncio.create_task(self._telemetry_loop(ws), name="agent-telemetry")
+        # Continuous hardware telemetry reporting disabled to save resources:
+        # telemetry_task = asyncio.create_task(self._telemetry_loop(ws), name="agent-telemetry")
         monitor_task = asyncio.create_task(self._monitor_loop(ws), name="agent-monitor")
         receive_task = asyncio.create_task(self._receive_loop(ws), name="agent-receive")
 
-        tasks = [heartbeat_task, telemetry_task, monitor_task, receive_task]
+        tasks = [heartbeat_task, monitor_task, receive_task]
         self._active_tasks = set(tasks)
 
         try:
@@ -570,21 +571,22 @@ class NodeAgentClient:
                 logger.warning("Error in heartbeat loop: %s", exc)
                 raise exc
 
-    async def _telemetry_loop(self, ws: Any) -> None:
-        """Periodically sample host resources and send RESOURCE_SNAPSHOT to Backend."""
-        while not self._stopped:
-            try:
-                snapshot = sample_resources()
-                env = AgentEnvelope(
-                    message_type=MESSAGE_TYPE_RESOURCE_SNAPSHOT,
-                    node_id=self.identity.node_id,
-                    payload=snapshot,
-                )
-                await self._send_envelope(ws, env)
-                logger.debug("Sent RESOURCE_SNAPSHOT: CPU=%.1f%%", snapshot.cpu_utilization_pct)
-                await asyncio.sleep(self._telemetry_interval)
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                logger.warning("Error in telemetry loop: %s", exc)
-                raise exc
+    # Continuous hardware telemetry loop disabled to save resources:
+    # async def _telemetry_loop(self, ws: Any) -> None:
+    #     """Periodically sample host resources and send RESOURCE_SNAPSHOT to Backend."""
+    #     while not self._stopped:
+    #         try:
+    #             snapshot = sample_resources()
+    #             env = AgentEnvelope(
+    #                 message_type=MESSAGE_TYPE_RESOURCE_SNAPSHOT,
+    #                 node_id=self.identity.node_id,
+    #                 payload=snapshot,
+    #             )
+    #             await self._send_envelope(ws, env)
+    #             logger.debug("Sent RESOURCE_SNAPSHOT: CPU=%.1f%%", snapshot.cpu_utilization_pct)
+    #             await asyncio.sleep(self._telemetry_interval)
+    #         except asyncio.CancelledError:
+    #             break
+    #         except Exception as exc:
+    #             logger.warning("Error in telemetry loop: %s", exc)
+    #             raise exc
