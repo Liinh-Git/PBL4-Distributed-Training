@@ -184,6 +184,8 @@ def resolve_dataset_manager_source(source_type: str, source_reference: str) -> d
             "type": "cifar10_download",
             "dataset_name": "cifar10",
         }
+    if source_type == "builtin" and source_reference == "synthetic_smoke_v1":
+        return {"type": "synthetic_smoke", "dataset_name": "synthetic_smoke_v1", "version": "v1"}
     raise ValueError(
         f"Unsupported dataset source mapping: source_type='{source_type}', "
         f"source_reference='{source_reference}'. V1 only supports builtin/cifar10."

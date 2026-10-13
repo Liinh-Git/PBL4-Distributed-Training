@@ -528,12 +528,12 @@ def resume_job(conn: psycopg.Connection, job_id: str, checkpoint_id: str) -> tup
     if (
         res
         and ckpt.get("dataset_build_id")
-        and res.get("dataset_build_id")
-        and ckpt["dataset_build_id"] != res["dataset_build_id"]
+        and (res.get("dataset") or {}).get("dataset_build_id")
+        and ckpt["dataset_build_id"] != res["dataset"]["dataset_build_id"]
     ):
         raise CheckpointContractMismatchError(
             f"Checkpoint dataset_build_id '{ckpt['dataset_build_id']}' "
-            f"does not match job contract '{res['dataset_build_id']}'."
+            f"does not match job contract '{res['dataset']['dataset_build_id']}'."
         )
 
     active = attempt_repository.get_active_attempt(conn)

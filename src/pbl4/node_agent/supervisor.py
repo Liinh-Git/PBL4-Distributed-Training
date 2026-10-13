@@ -282,6 +282,10 @@ class WorkerProcessSupervisor:
                 command.device,
                 "--initialization-seed",
                 str(command.initialization_seed),
+                "--model-id",
+                command.model_id,
+                "--cache-dir",
+                str(self.var_dir / "worker-cache" / command.allocation_id),
             ]
 
             env = os.environ.copy()
@@ -436,7 +440,10 @@ class WorkerProcessSupervisor:
                                 ret,
                             )
                             self._subprocesses.pop(allocation_id, None)
-                            record.transition_to(LOCAL_STATE_FAILED, exit_code=ret)
+                            record.transition_to(
+                                LOCAL_STATE_STOPPED if ret == 0 else LOCAL_STATE_FAILED,
+                                exit_code=ret,
+                            )
                             state_changed = True
                     elif record.pid is not None:
                         try:

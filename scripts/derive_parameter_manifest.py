@@ -8,7 +8,7 @@ from pathlib import Path
 
 from torch.nn import functional
 
-from pbl4.adapter.models.resnet18_gn import build_resnet18_groupnorm
+from pbl4.adapter.models.factory import build_model
 from pbl4.adapter.pytorch_adapter import PyTorchAdapter
 
 
@@ -16,10 +16,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=20260910)
+    parser.add_argument("--model-id", default="resnet18_groupnorm")
     args = parser.parse_args()
 
     adapter = PyTorchAdapter(
-        build_resnet18_groupnorm(initialization_seed=args.seed, device="cpu"),
+        build_model(args.model_id, initialization_seed=args.seed, device="cpu"),
         functional.cross_entropy,
         local_gradient_reduction="mean",
     )

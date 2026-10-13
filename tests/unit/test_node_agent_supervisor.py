@@ -111,6 +111,8 @@ class TestWorkerProcessSupervisor(unittest.TestCase):
             self.assertEqual(cmd_list[0], sys.executable)
             self.assertIn("-m", cmd_list)
             self.assertIn("pbl4.worker.entrypoint", cmd_list)
+            self.assertEqual(cmd_list[cmd_list.index("--model-id") + 1], "resnet18_groupnorm")
+            self.assertIn(str(self.supervisor.var_dir / "worker-cache" / "alloc-1"), cmd_list)
             self.assertNotIn("secret-token-xyz", cmd_list)
 
             env = called_kwargs["env"]

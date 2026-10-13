@@ -14,7 +14,7 @@ import numpy as np
 from torch.nn import functional
 
 from pbl4.adapter.base import TensorBundle
-from pbl4.adapter.models.resnet18_gn import build_resnet18_groupnorm
+from pbl4.adapter.models.factory import build_model
 from pbl4.adapter.pytorch_adapter import PyTorchAdapter
 from pbl4.protocol.messages import DatasetAssignment, Error, ShardReady, StepStart, Stop
 from pbl4.protocol.transfer import CompletedTensorTransfer
@@ -55,13 +55,14 @@ class WorkerProcess:
         config: WorkerConfig,
         *,
         initialization_seed: int,
+        model_id: str = "resnet18_groupnorm",
         device: str = "cpu",
         connect_timeout_seconds: float = 60.0,
         opener: Callable[..., object] | None = None,
     ) -> None:
         self._config = config
         self._adapter = PyTorchAdapter(
-            build_resnet18_groupnorm(initialization_seed=initialization_seed, device=device),
+            build_model(model_id, initialization_seed=initialization_seed, device=device),
             functional.cross_entropy,
             local_gradient_reduction="mean",
         )

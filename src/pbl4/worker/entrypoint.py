@@ -7,8 +7,6 @@ Important boundary:
 - Connects to Runtime via DTP/1; does NOT communicate directly with Management Backend.
 - worker_id is assigned by Runtime; not specified via CLI flags.
 
-Status:
-- Scaffold only. Core worker loop is intentionally not implemented.
 """
 
 from __future__ import annotations
@@ -44,6 +42,7 @@ def main() -> None:
     parser.add_argument("--cache-dir", default="var/worker-cache")
     parser.add_argument("--initialization-seed", type=int, required=True)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--model-id", default="resnet18_groupnorm")
     parser.add_argument("--heartbeat-interval", type=float, default=5.0)
     parser.add_argument("--attempt-id", default=None, help="Managed execution attempt ID.")
     parser.add_argument("--allocation-id", default=None, help="Managed worker allocation ID.")
@@ -86,6 +85,7 @@ def main() -> None:
             worker_join_token=join_token,
         ),
         initialization_seed=args.initialization_seed,
+        model_id=args.model_id,
         device=args.device,
     )
     raise SystemExit(0 if process.run() else 1)

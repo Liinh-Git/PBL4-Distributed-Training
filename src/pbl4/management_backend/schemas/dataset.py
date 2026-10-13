@@ -21,7 +21,7 @@ class DatasetCreateRequest(StrictWriteModel):
     name: str = Field(min_length=1)
     task_type: Literal["image_classification"]
     source_type: Literal["builtin"]
-    source_reference: Literal["cifar10"]
+    source_reference: Literal["cifar10", "synthetic_smoke_v1"]
 
 
 class DatasetItem(BaseModel):

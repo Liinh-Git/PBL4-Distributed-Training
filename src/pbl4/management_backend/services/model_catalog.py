@@ -6,7 +6,7 @@ CANONICAL REFERENCES:
 - docs/IMPLEMENTATION_CONTRACT.md
 
 V1 SPECIFICATION:
-- Strictly supports model_id = "resnet18_groupnorm"
+- Supports resnet18_groupnorm and the optional small_cnn smoke workload
 - Profile = "RESNET18_GROUPNORM_V1"
 - Backend must resolve canonical model metadata via ModelMetadataProvider port.
 - If authoritative parameter_manifest_hash is not available in isolated branch,
@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import os
 from typing import Any, Protocol
+
+from pbl4.common.model_profiles import MODEL_PROFILES
 
 CANONICAL_MODEL_ID = "resnet18_groupnorm"
 CANONICAL_MODEL_PROFILE = "RESNET18_GROUPNORM_V1"
@@ -37,6 +39,14 @@ _V1_MODELS: dict[str, dict[str, Any]] = {
         "input_shape": [3, 32, 32],
         "num_classes": 10,
     }
+}
+
+_V1_MODELS["small_cnn"] = {
+    **_V1_MODELS[CANONICAL_MODEL_ID],
+    "model_id": "small_cnn",
+    "profile": MODEL_PROFILES["small_cnn"],
+    "display_name": "SmallCNN (CPU smoke)",
+    "description": "Small convolutional image classifier for local smoke training.",
 }
 
 
@@ -64,7 +74,7 @@ def validate_model_id(model_id: str) -> dict[str, Any]:
 
 def is_supported_model(model_id: str) -> bool:
     """Return True if model_id or its canonical profile is supported."""
-    return model_id in _V1_MODELS or model_id == CANONICAL_MODEL_PROFILE
+    return model_id in _V1_MODELS or model_id in MODEL_PROFILES.values()
 
 
 get_model_spec = get_model
@@ -94,12 +104,13 @@ class DefaultModelMetadataProvider:
         if spec is None:
             return None
         # Check if an authoritative parameter manifest hash is injected via env
-        env_hash = os.environ.get("CANONICAL_PARAMETER_MANIFEST_HASH") or os.environ.get(
-            f"PARAMETER_MANIFEST_HASH_{model_id.upper()}"
-        )
-        if not env_hash:
+        env_hash = os.environ.get(f"PARAMETER_MANIFEST_HASH_{model_id.upper()}")
+        if not env_hash and model_id == CANONICAL_MODEL_ID:
+            env_hash = os.environ.get("CANONICAL_PARAMETER_MANIFEST_HASH")
+        if not env_hash and model_id == CANONICAL_MODEL_ID:
             from pathlib import Path
             import json
+
             for p in (Path(".var/parameter-manifest.json"), Path("var/parameter-manifest.json")):
                 if p.is_file():
                     try:

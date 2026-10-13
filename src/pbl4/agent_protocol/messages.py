@@ -370,6 +370,7 @@ class StartWorkerPayload:
     initialization_seed: int
     worker_join_token: str
     command_type: str = COMMAND_TYPE_START_WORKER
+    model_id: str = "resnet18_groupnorm"
 
     def __post_init__(self) -> None:
         if self.command_type != COMMAND_TYPE_START_WORKER:
@@ -399,6 +400,8 @@ class StartWorkerPayload:
             raise AgentMessageError("initialization_seed must be an integer")
         if not isinstance(self.worker_join_token, str) or not self.worker_join_token:
             raise AgentMessageError("worker_join_token must be a non-empty string")
+        if not isinstance(self.model_id, str) or not self.model_id:
+            raise AgentMessageError("model_id must be a non-empty string")
 
     def __repr__(self) -> str:
         # Mandatory credential redaction
@@ -424,6 +427,7 @@ class StartWorkerPayload:
             "runtime_port": self.runtime_port,
             "device": self.device,
             "initialization_seed": self.initialization_seed,
+            "model_id": self.model_id,
             "worker_join_token": "***REDACTED***" if redact else self.worker_join_token,
         }
 
@@ -439,6 +443,7 @@ class StartWorkerPayload:
             runtime_port=data.get("runtime_port", 0),
             device=data.get("device", ""),
             initialization_seed=data.get("initialization_seed", 0),
+            model_id=data.get("model_id", "resnet18_groupnorm"),
             worker_join_token=data.get("worker_join_token", ""),
             command_type=data.get("command_type", COMMAND_TYPE_START_WORKER),
         )

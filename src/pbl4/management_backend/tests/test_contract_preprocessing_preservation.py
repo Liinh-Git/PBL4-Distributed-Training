@@ -116,7 +116,7 @@ def test_contract_resolver_does_not_invent_normalization_when_missing():
         "dataset_manifest_hash": "b" * 64,
         "batch_size": 32,
         "shard_count": 3,
-        "input_shape_json": [1, 28, 28],
+        "input_shape_json": [3, 28, 28],
         "dtype": "float32",
         "num_classes": 10,
         "preprocessing_json": {

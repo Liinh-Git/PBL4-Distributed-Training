@@ -6,8 +6,6 @@ Canonical responsibility:
 Important boundary:
 - Does NOT participate in worker-side training loop or framework execution.
 
-Status:
-- Scaffold only. Core process loop is intentionally not implemented.
 """
 
 from __future__ import annotations

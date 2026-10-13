@@ -11,11 +11,13 @@ import urllib.request
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 import numpy as np
 
 from pbl4.common.artifact_origin import derive_root_manifest_path, resolve_artifact_url
 from pbl4.common.hashing import canonical_json_bytes, sha256_bytes
+from pbl4.common.model_profiles import MODEL_PROFILES
 from pbl4.common.work_unit import WorkUnitRef
 from pbl4.protocol.messages import DatasetAssignment, StepStart
 from pbl4.protocol.parameter_manifest import ParameterManifest
@@ -133,7 +135,16 @@ class RuntimeProcess:
         attempt_id = str(payload["attempt_id"])
         if command_type == "START_ATTEMPT":
             with self._lock:
-                if self._active is not None and not self._active.terminal:
+                previous = self._active
+            if previous is not None and previous.terminal:
+                # Coordinator terminal state is visible before the runner has
+                # released DTP sockets. Finish bounded cleanup before reusing
+                # the listener for RETRY/RESUME, outside the Runtime state lock.
+                previous.join(5.0)
+            with self._lock:
+                if self._active is not None and (
+                    not self._active.terminal or self._active._thread.is_alive()
+                ):
                     return self._result(
                         command_id,
                         attempt_id,
@@ -231,6 +242,8 @@ class _AttemptRunner:
 
     @property
     def terminal(self) -> bool:
+        if self._coordinator is not None:
+            return self._coordinator.snapshot()["state"] in {"COMPLETED", "FAILED", "ABORTED"}
         with self._state_lock:
             return self._state in {"COMPLETED", "FAILED", "ABORTED"}
 
@@ -755,8 +768,8 @@ class _AttemptRunner:
         if (
             self._payload.get("execution_mode") not in {"FRESH", "RETRY_FROM_START", "RESUME"}
             or not isinstance(model, dict)
-            or model.get("model_id") != "resnet18_groupnorm"
-            or model.get("profile") != "RESNET18_GROUPNORM_V1"
+            or model.get("model_id") not in MODEL_PROFILES
+            or model.get("profile") != MODEL_PROFILES.get(model.get("model_id"))
             or model.get("parameter_manifest_hash")
             != self._process._manifest.parameter_manifest_hash
             or not isinstance(sync, dict)
@@ -791,6 +804,12 @@ class _AttemptRunner:
         for reference in root.value["shards"]:
             shard_id = int(reference["shard_id"])
             relative_path = reference.get("relative_shard_manifest_path")
+            if root.root_manifest_path == "manifest.json" and (
+                "/artifacts/v1/dataset-builds/" in unquote(urlsplit(root.artifact_base_url).path)
+            ):
+                # Standalone local storage exposes explicit HTTP artifact routes;
+                # manifest filesystem paths are used only by remote stores.
+                relative_path = f"shards/{shard_id}/manifest.json"
             if not isinstance(relative_path, str):
                 if root.root_manifest_path != "manifest.json":
                     raise ValueError("Root Dataset Manifest lacks relative shard manifest path")

@@ -64,7 +64,12 @@ def test_capabilities_ok(client):
             "model_id": "resnet18_groupnorm",
             "display_name": "ResNet-18 (GroupNorm)",
             "task_type": "image_classification",
-        }
+        },
+        {
+            "model_id": "small_cnn",
+            "display_name": "SmallCNN (CPU smoke)",
+            "task_type": "image_classification",
+        },
     ]
 
 

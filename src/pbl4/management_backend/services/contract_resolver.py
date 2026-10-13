@@ -79,9 +79,7 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
         provider = get_model_metadata_provider()
         model_meta = provider.get_model_metadata(model_id)
         if model_meta is None:
-            errors.append(
-                f"Unsupported model_id '{model_id}'. V1 only supports 'resnet18_groupnorm'."
-            )
+            errors.append(f"Unsupported model_id '{model_id}'.")
         elif not model_meta.get("parameter_manifest_hash"):
             errors.append(
                 f"Authoritative parameter_manifest_hash not available for model '{model_id}'. "
@@ -229,17 +227,32 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
             )
 
     resolved_preprocessing: dict[str, Any] = dict(preprocessing)
+    resolved_shape = (
+        input_shape
+        or preprocessing.get("input_shape")
+        or model_meta.get("input_shape", [3, 32, 32])
+    )
+    task_type = _get_task_type(conn, build["dataset_id"])
+    if (
+        not isinstance(resolved_shape, list)
+        or len(resolved_shape) != 3
+        or any(type(size) is not int or size <= 0 for size in resolved_shape)
+        or resolved_shape[0] != 3
+        or build.get("num_classes", 10) != model_meta.get("num_classes", 10)
+        or build.get("dtype", "float32") != "float32"
+        or task_type != "image_classification"
+    ):
+        raise ContractResolutionError(
+            "Dataset is incompatible with the selected image classifier.",
+            ["Require 3-channel float32 images and the model's class count."],
+        )
 
     resolved: dict[str, Any] = {
         "dataset": {
             "dataset_build_id": build["dataset_build_id"],
             "dataset_manifest_hash": dataset_manifest_hash,
-            "task_type": _get_task_type(conn, build["dataset_id"]),
-            "input_shape": (
-                input_shape
-                or preprocessing.get("input_shape")
-                or model_meta.get("input_shape", [3, 32, 32])
-            ),
+            "task_type": task_type,
+            "input_shape": resolved_shape,
             "dtype": build.get("dtype", "float32"),
             "num_classes": build.get("num_classes", model_meta.get("num_classes", 10)),
             "batch_size": build["batch_size"],

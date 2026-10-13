@@ -41,7 +41,7 @@ def test_model_catalog_v1_resnet18_groupnorm():
     assert spec["profile"] == "RESNET18_GROUPNORM_V1"
 
     models = list_supported_models()
-    assert len(models) == 1
+    assert {model["model_id"] for model in models} == {"resnet18_groupnorm", "small_cnn"}
     assert models[0]["model_id"] == "resnet18_groupnorm"
 
 
