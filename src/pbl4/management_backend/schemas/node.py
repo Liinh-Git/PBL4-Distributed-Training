@@ -90,34 +90,9 @@ class NodeDetail(NodeItem):
         )
 
 
-class EnrollmentCodeCreateRequest(StrictWriteModel):
-    """Request payload to create a new one-time enrollment code."""
-
-    ttl_seconds: int = Field(
-        default=3600,
-        gt=0,
-        le=86400 * 7,
-        description="Time-to-live in seconds for the one-time enrollment code (default 1 hour).",
-    )
-
-
-class EnrollmentCodeCreateResponse(BaseModel):
-    """Response returned when an enrollment code is successfully generated."""
-
-    enrollment_code: str = Field(
-        description="Plaintext one-time code to be distributed to node operator."
-    )
-    code_hash: str = Field(description="SHA-256 digest persisted in backend.")
-    created_at: datetime
-    expires_at: datetime
-
-
 class NodeEnrollRequest(StrictWriteModel):
-    """Payload sent by Node Agent or operator to enroll a new node."""
+    """Payload sent by Node Agent to enroll a new node."""
 
-    enrollment_code: str = Field(
-        min_length=1, description="One-time enrollment code issued by backend."
-    )
     display_name: str | None = Field(
         default=None, max_length=128, description="Optional human-readable label."
     )
@@ -137,3 +112,4 @@ class NodeEnrollResponse(BaseModel):
         description="Secret token for outbound WSS control authentication. Shown only once."
     )
     node: NodeItem
+

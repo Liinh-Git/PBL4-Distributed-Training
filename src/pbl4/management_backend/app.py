@@ -70,10 +70,6 @@ from pbl4.management_backend.services.job_service import (
     JobStateError,
     JobValidationError,
 )
-from pbl4.management_backend.services.node_enrollment_service import (
-    NodeEnrollmentCodeExpiredError,
-    NodeEnrollmentCodeInvalidError,
-)
 from pbl4.management_backend.services.node_service import (
     NodeNotFoundError,
     NodeOfflineError,
@@ -633,18 +629,6 @@ def create_app() -> FastAPI:
         )
 
     # ─── Node & Allocation Exception Handlers ─────────────────────────────────
-    @app.exception_handler(NodeEnrollmentCodeInvalidError)
-    async def node_enrollment_code_invalid_handler(
-        request: Request, exc: NodeEnrollmentCodeInvalidError
-    ) -> JSONResponse:
-        return _error_response(400, exc.code, str(exc), request)
-
-    @app.exception_handler(NodeEnrollmentCodeExpiredError)
-    async def node_enrollment_code_expired_handler(
-        request: Request, exc: NodeEnrollmentCodeExpiredError
-    ) -> JSONResponse:
-        return _error_response(400, exc.code, str(exc), request)
-
     @app.exception_handler(NodeUnauthorizedError)
     async def node_unauthorized_handler(
         request: Request, exc: NodeUnauthorizedError

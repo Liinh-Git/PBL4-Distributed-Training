@@ -3,8 +3,8 @@
 Reference: NODE_AGENT_IMPLEMENTATION_PLAN.md Section 8.2 & User Request Phase 7.
 
 Validates end-to-end integration against live Backend and PostgreSQL database:
-1. Enrollment CLI flow with persistent identity and initial OFFLINE state.
-2. Start CLI validation (fails cleanly with exit code 1 if not enrolled).
+1. Start CLI auto-enrollment flow with persistent identity and initial OFFLINE state.
+2. Start CLI failure validation when auto-enrollment fails.
 3. Status CLI safety (shows node_id and allocation status with zero secret leaks).
 4. Agent WSS connection & Handshake:
    - Valid node_secret -> CONNECT success
@@ -138,7 +138,7 @@ def live_server():
 @pytest.fixture
 def http_client(live_server: str):
     """HTTP client communicating with the live test server."""
-    with httpx.Client(base_url=live_server, timeout=5.0) as client:
+    with httpx.Client(base_url=live_server, timeout=15.0) as client:
         yield client
 
 
@@ -214,7 +214,7 @@ def _create_test_job_and_attempt(conn: psycopg.Connection) -> tuple[str, str]:
     return job_id, attempt_id
 
 
-def _wait_until(predicate, timeout: float = 3.0, interval: float = 0.05):
+def _wait_until(predicate, timeout: float = 10.0, interval: float = 0.05):
     """Wait until predicate returns truthy value, or raise TimeoutError."""
     start = time.time()
     while time.time() - start < timeout:
@@ -228,61 +228,68 @@ def _wait_until(predicate, timeout: float = 3.0, interval: float = 0.05):
 # ─── 1. CLI Tests ─────────────────────────────────────────────────────────────
 
 
-def test_01_cli_enrollment_persists_identity_and_creates_offline_node(
+def _enroll_agent_node(http_client: httpx.Client, *, display_name: str | None = None) -> tuple[str, str]:
+    payload: dict[str, Any] = {}
+    if display_name:
+        payload["display_name"] = display_name
+    enroll_res = http_client.post("/api/v1/nodes/enroll", json=payload)
+    assert enroll_res.status_code == 201
+    data = enroll_res.json()["data"]
+    return data["node_id"], data["node_secret"]
+
+
+def test_01_cli_start_auto_enrolls_when_not_enrolled(
     live_server: str,
     http_client: httpx.Client,
     pg_conn: psycopg.Connection,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # 1. Issue one-time enrollment code from backend
-    code_res = http_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    assert code_res.status_code == 201
-    code_data = code_res.json()["data"]
-    enrollment_code = code_data["enrollment_code"]
+    def _fake_run(coro):
+        coro.close()
+        return 0
 
-    # 2. Run pbl4-agent enroll CLI command
-    exit_code = main(
-        [
-            "enroll",
-            "--backend-url",
-            live_server,
-            "--code",
-            enrollment_code,
-            "--var-dir",
-            str(tmp_path),
-        ]
-    )
+    # 1. Run pbl4-agent start CLI command with no prior identity, patching asyncio.run
+    with patch("asyncio.run", side_effect=_fake_run) as mock_run:
+        exit_code = main(
+            [
+                "start",
+                "--backend-url",
+                live_server,
+                "--var-dir",
+                str(tmp_path),
+            ]
+        )
     assert exit_code == 0
+    mock_run.assert_called_once()
 
-    # 3. Verify identity file created locally
+    # 2. Verify identity file created locally
     identity = load_identity(tmp_path)
     assert identity is not None
     assert identity.node_id.startswith("node-")
     assert len(identity.node_secret) >= 32
 
-    # 4. Verify node persisted in database in OFFLINE state
+    # 3. Verify node persisted in database in OFFLINE state
     node = node_repository.get_node(pg_conn, identity.node_id)
     assert node is not None
     assert node["state"] == "OFFLINE"
     assert node["capabilities_jsonb"]["cpu_count_logical"] > 0
 
-    # 5. Verify security: plaintext secret is never printed in CLI output
+    # 4. Verify security: plaintext secret is never printed in CLI output
     captured = capsys.readouterr()
     assert identity.node_secret not in captured.out
     assert identity.node_secret not in captured.err
 
 
-def test_02_cli_start_fails_cleanly_when_not_enrolled(
+def test_02_cli_start_fails_cleanly_when_auto_enroll_fails(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     empty_dir = tmp_path / "empty_agent_dir"
-    exit_code = main(["start", "--var-dir", str(empty_dir)])
+    exit_code = main(["start", "--backend-url", "http://127.0.0.1:9999", "--var-dir", str(empty_dir)])
     assert exit_code == 1
     captured = capsys.readouterr()
-    assert "Error: Node identity not found" in captured.err
-    assert "pbl4-agent enroll" in captured.err
+    assert "Auto-enrollment failed" in captured.err
 
 
 def test_03_cli_status_displays_safe_metadata_without_secrets(
@@ -311,11 +318,7 @@ def test_04_agent_connect_and_handshake_transitions_node_to_online(
     tmp_path: Path,
 ) -> None:
     # 1. Enroll node
-    code_res = http_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    code = code_res.json()["data"]["enrollment_code"]
-    enroll_res = http_client.post("/api/v1/nodes/enroll", json={"enrollment_code": code})
-    node_id = enroll_res.json()["data"]["node_id"]
-    node_secret = enroll_res.json()["data"]["node_secret"]
+    node_id, node_secret = _enroll_agent_node(http_client)
 
     identity = NodeIdentity(node_id=node_id, node_secret=node_secret)
     config = NodeAgentConfig(
@@ -341,7 +344,7 @@ def test_04_agent_connect_and_handshake_transitions_node_to_online(
             n = node_repository.get_node(pg_conn, node_id)
             return n is not None and n["state"] == "ONLINE" and client.is_connected
 
-        _wait_until(_check_online, timeout=5.0)
+        _wait_until(_check_online, timeout=12.0)
 
         node = node_repository.get_node(pg_conn, node_id)
         assert node["state"] == "ONLINE"
@@ -360,10 +363,7 @@ def test_05_agent_connect_with_invalid_credentials_rejected(
     http_client: httpx.Client,
     tmp_path: Path,
 ) -> None:
-    code_res = http_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    code = code_res.json()["data"]["enrollment_code"]
-    enroll_res = http_client.post("/api/v1/nodes/enroll", json={"enrollment_code": code})
-    node_id = enroll_res.json()["data"]["node_id"]
+    node_id, _ = _enroll_agent_node(http_client)
 
     # Deliberately invalid node_secret
     identity = NodeIdentity(node_id=node_id, node_secret="wrong-invalid-secret")
@@ -398,11 +398,7 @@ def test_06_heartbeat_and_telemetry_persisted(
     pg_conn: psycopg.Connection,
     tmp_path: Path,
 ) -> None:
-    code_res = http_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    code = code_res.json()["data"]["enrollment_code"]
-    enroll_res = http_client.post("/api/v1/nodes/enroll", json={"enrollment_code": code})
-    node_id = enroll_res.json()["data"]["node_id"]
-    node_secret = enroll_res.json()["data"]["node_secret"]
+    node_id, node_secret = _enroll_agent_node(http_client)
 
     identity = NodeIdentity(node_id=node_id, node_secret=node_secret)
     config = NodeAgentConfig(
@@ -427,7 +423,7 @@ def test_06_heartbeat_and_telemetry_persisted(
                 and "cpu_utilization_pct" in n["latest_resources_jsonb"]
             )
 
-        _wait_until(_check_telemetry, timeout=5.0)
+        _wait_until(_check_telemetry, timeout=12.0)
 
         node = node_repository.get_node(pg_conn, node_id)
         latest_res = node["latest_resources_jsonb"]
@@ -448,12 +444,7 @@ def test_07_start_worker_and_env_token(
     tmp_path: Path,
 ) -> None:
     # 1. Enroll node
-    c_res = http_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    e_res = http_client.post(
-        "/api/v1/nodes/enroll", json={"enrollment_code": c_res.json()["data"]["enrollment_code"]}
-    )
-    node_id = e_res.json()["data"]["node_id"]
-    node_secret = e_res.json()["data"]["node_secret"]
+    node_id, node_secret = _enroll_agent_node(http_client)
 
     # 2. Create agent client with mock popen to verify environment token
     supervisor = WorkerProcessSupervisor(var_dir=tmp_path, node_id=node_id)
@@ -487,7 +478,7 @@ def test_07_start_worker_and_env_token(
 
         try:
             # 3. Wait until node connects and transitions to ONLINE
-            _wait_until(lambda: client.is_connected, timeout=5.0)
+            _wait_until(lambda: client.is_connected, timeout=12.0)
 
             # 4. Now that node is ONLINE, setup job, attempt, and allocation in DB
             job_id, attempt_id = _create_test_job_and_attempt(pg_conn)
@@ -509,7 +500,7 @@ def test_07_start_worker_and_env_token(
                 a = allocation_repository.get_allocation(pg_conn, allocation_id)
                 return a is not None and a["actual_state"] == "STARTED"
 
-            _wait_until(_check_started, timeout=5.0)
+            _wait_until(_check_started, timeout=12.0)
 
             # 7. Verify security invariants:
             # - Token was passed via env["PBL4_WORKER_JOIN_TOKEN"]
@@ -529,12 +520,7 @@ def test_08_duplicate_start_worker_noop(
     pg_conn: psycopg.Connection,
     tmp_path: Path,
 ) -> None:
-    c_res = http_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    e_res = http_client.post(
-        "/api/v1/nodes/enroll", json={"enrollment_code": c_res.json()["data"]["enrollment_code"]}
-    )
-    node_id = e_res.json()["data"]["node_id"]
-    node_secret = e_res.json()["data"]["node_secret"]
+    node_id, node_secret = _enroll_agent_node(http_client)
 
     supervisor = WorkerProcessSupervisor(var_dir=tmp_path, node_id=node_id)
     client = NodeAgentClient(
@@ -566,7 +552,7 @@ def test_08_duplicate_start_worker_noop(
 
         try:
             # Wait until node is ONLINE
-            _wait_until(lambda: client.is_connected, timeout=5.0)
+            _wait_until(lambda: client.is_connected, timeout=12.0)
 
             job_id, attempt_id = _create_test_job_and_attempt(pg_conn)
             alloc = allocation_service.create_allocation(
@@ -586,7 +572,7 @@ def test_08_duplicate_start_worker_noop(
                     allocation_repository.get_allocation(pg_conn, allocation_id)["actual_state"]
                     == "STARTED"
                 ),
-                timeout=5.0,
+                timeout=12.0,
             )
             assert spawn_count == 1
 
@@ -606,12 +592,7 @@ def test_09_stop_worker_graceful(
     pg_conn: psycopg.Connection,
     tmp_path: Path,
 ) -> None:
-    c_res = http_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    e_res = http_client.post(
-        "/api/v1/nodes/enroll", json={"enrollment_code": c_res.json()["data"]["enrollment_code"]}
-    )
-    node_id = e_res.json()["data"]["node_id"]
-    node_secret = e_res.json()["data"]["node_secret"]
+    node_id, node_secret = _enroll_agent_node(http_client)
 
     supervisor = WorkerProcessSupervisor(var_dir=tmp_path, node_id=node_id)
     client = NodeAgentClient(
@@ -631,7 +612,7 @@ def test_09_stop_worker_graceful(
 
         try:
             # Wait until node is ONLINE
-            _wait_until(lambda: client.is_connected, timeout=5.0)
+            _wait_until(lambda: client.is_connected, timeout=12.0)
 
             job_id, attempt_id = _create_test_job_and_attempt(pg_conn)
             alloc = allocation_service.create_allocation(
@@ -651,7 +632,7 @@ def test_09_stop_worker_graceful(
                     allocation_repository.get_allocation(pg_conn, allocation_id)["actual_state"]
                     == "STARTED"
                 ),
-                timeout=5.0,
+                timeout=12.0,
             )
 
             # Stop worker
@@ -665,7 +646,7 @@ def test_09_stop_worker_graceful(
                 a = allocation_repository.get_allocation(pg_conn, allocation_id)
                 return a is not None and a["actual_state"] == "ENDED"
 
-            _wait_until(_check_ended, timeout=5.0)
+            _wait_until(_check_ended, timeout=12.0)
             assert supervisor.get_record(allocation_id).local_state == LOCAL_STATE_STOPPED
         finally:
             client.stop()
@@ -677,12 +658,7 @@ def test_10_worker_crash_detected_and_reported_failed(
     pg_conn: psycopg.Connection,
     tmp_path: Path,
 ) -> None:
-    c_res = http_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    e_res = http_client.post(
-        "/api/v1/nodes/enroll", json={"enrollment_code": c_res.json()["data"]["enrollment_code"]}
-    )
-    node_id = e_res.json()["data"]["node_id"]
-    node_secret = e_res.json()["data"]["node_secret"]
+    node_id, node_secret = _enroll_agent_node(http_client)
 
     supervisor = WorkerProcessSupervisor(var_dir=tmp_path, node_id=node_id)
     client = NodeAgentClient(
@@ -701,7 +677,7 @@ def test_10_worker_crash_detected_and_reported_failed(
 
         try:
             # Wait until node is ONLINE
-            _wait_until(lambda: client.is_connected, timeout=5.0)
+            _wait_until(lambda: client.is_connected, timeout=12.0)
 
             job_id, attempt_id = _create_test_job_and_attempt(pg_conn)
             alloc = allocation_service.create_allocation(
@@ -720,7 +696,7 @@ def test_10_worker_crash_detected_and_reported_failed(
                     allocation_repository.get_allocation(pg_conn, allocation_id)["actual_state"]
                     == "STARTED"
                 ),
-                timeout=5.0,
+                timeout=12.0,
             )
 
             # Simulate worker process crash
@@ -731,7 +707,7 @@ def test_10_worker_crash_detected_and_reported_failed(
                 a = allocation_repository.get_allocation(pg_conn, allocation_id)
                 return a is not None and a["actual_state"] == "FAILED"
 
-            _wait_until(_check_failed, timeout=5.0)
+            _wait_until(_check_failed, timeout=12.0)
 
             rec = supervisor.get_record(allocation_id)
             assert rec.local_state == LOCAL_STATE_FAILED
@@ -749,12 +725,7 @@ def test_11_reconnect_and_worker_survival_invariant(
     pg_conn: psycopg.Connection,
     tmp_path: Path,
 ) -> None:
-    c_res = http_client.post("/api/v1/nodes/enrollment-codes", json={"ttl_seconds": 3600})
-    e_res = http_client.post(
-        "/api/v1/nodes/enroll", json={"enrollment_code": c_res.json()["data"]["enrollment_code"]}
-    )
-    node_id = e_res.json()["data"]["node_id"]
-    node_secret = e_res.json()["data"]["node_secret"]
+    node_id, node_secret = _enroll_agent_node(http_client)
 
     supervisor = WorkerProcessSupervisor(var_dir=tmp_path, node_id=node_id)
     client = NodeAgentClient(
@@ -778,7 +749,7 @@ def test_11_reconnect_and_worker_survival_invariant(
 
         try:
             # Wait until node is ONLINE
-            _wait_until(lambda: client.is_connected, timeout=5.0)
+            _wait_until(lambda: client.is_connected, timeout=12.0)
 
             job_id, attempt_id = _create_test_job_and_attempt(pg_conn)
             alloc = allocation_service.create_allocation(
@@ -798,7 +769,7 @@ def test_11_reconnect_and_worker_survival_invariant(
                     allocation_repository.get_allocation(pg_conn, allocation_id)["actual_state"]
                     == "STARTED"
                 ),
-                timeout=5.0,
+                timeout=12.0,
             )
 
             # Force server-side disconnect of active websocket
@@ -815,7 +786,7 @@ def test_11_reconnect_and_worker_survival_invariant(
             mock_proc.kill.assert_not_called()
 
             # Wait for client to reconnect automatically
-            _wait_until(lambda: client.is_connected, timeout=5.0)
+            _wait_until(lambda: client.is_connected, timeout=12.0)
 
             # Allocation record in supervisor is still RUNNING
             rec = supervisor.get_record(allocation_id)

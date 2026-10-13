@@ -72,3 +72,4 @@ postgres-data/
 # ─── Reports / Local ─────────────────────────────────────
 report.md
 var/*
+start_worker_doc.md
