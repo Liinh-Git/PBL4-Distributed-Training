@@ -15,7 +15,7 @@ import {
   WifiOff,
 } from 'lucide-react';
 import { useAttemptStream } from '../hooks/useAttemptStream';
-import { attemptsService, metricsService, workersService, stepsService, systemService, jobsService } from '../api';
+import { attemptsService, workersService, stepsService, systemService, jobsService } from '../api';
 import {
   MetricItemData,
   WorkerSessionItemData,
@@ -39,7 +39,7 @@ import { detectSlowWorkers } from '../utils/stragglerDetection';
 
 export const LiveTrainingPage: React.FC = () => {
   const [searchParams] = useSearchParams();
-  const explicitAttemptId = searchParams.get('attemptId');
+  const explicitAttemptId = searchParams.get('attemptId') ?? searchParams.get('attempt_id');
   const explicitJobId = searchParams.get('jobId');
 
   // Attempt Resolution
@@ -80,31 +80,6 @@ export const LiveTrainingPage: React.FC = () => {
   // Realtime stream hook
   const stream = useAttemptStream(resolvedAttemptId);
 
-  // Metrics from API 40.0
-  const [metrics, setMetrics] = useState<MetricItemData[]>([]);
-  const [metricsLoading, setMetricsLoading] = useState<boolean>(false);
-  const [metricsUnavailable, setMetricsUnavailable] = useState<boolean>(false);
-
-  useEffect(() => {
-    if (!resolvedAttemptId) return;
-
-    const fetchMetrics = async () => {
-      try {
-        setMetricsLoading(true);
-        setMetricsUnavailable(false);
-        const res = await metricsService.queryMetrics(resolvedAttemptId, { limit: 100 });
-        setMetrics(res.data || []);
-      } catch (err: any) {
-        // Backend discrepancy: API 40.0 not yet implemented in backend
-        setMetricsUnavailable(true);
-      } finally {
-        setMetricsLoading(false);
-      }
-    };
-
-    fetchMetrics();
-  }, [resolvedAttemptId, stream.lastReceivedSeq]);
-
   // System capabilities (protocol versions, runtime instance, supported models, feature flags)
   const [capabilities, setCapabilities] = useState<CapabilitiesData | null>(null);
 
@@ -124,23 +99,32 @@ export const LiveTrainingPage: React.FC = () => {
   // Step Details cache (authoritative worker telemetry: compute_ms, upload_ms, loss, accuracy, timings)
   const [stepDetailsMap, setStepDetailsMap] = useState<Record<number, StepDetailData>>({});
 
+  useEffect(() => { setStepDetailsMap({}); }, [resolvedAttemptId]);
+
   useEffect(() => {
     if (!resolvedAttemptId || stream.steps.length === 0) return;
     let isMounted = true;
 
     const fetchStepDetails = async () => {
-      const topSteps = stream.steps.slice(0, 10);
-      for (const st of topSteps) {
-        if (!stepDetailsMap[st.step_id]) {
-          try {
-            const res = await stepsService.getStep(resolvedAttemptId, st.step_id);
-            if (isMounted && res.data) {
-              setStepDetailsMap((prev) => ({ ...prev, [st.step_id]: res.data }));
+      const neededSteps = stream.steps.filter((st) => !stepDetailsMap[st.step_id] || stepDetailsMap[st.step_id].state !== st.state);
+      if (neededSteps.length === 0) return;
+
+      const batchSize = 6;
+      for (let i = 0; i < neededSteps.length; i += batchSize) {
+        if (!isMounted) break;
+        const batch = neededSteps.slice(i, i + batchSize);
+        await Promise.all(
+          batch.map(async (st) => {
+            try {
+              const res = await stepsService.getStep(resolvedAttemptId, st.step_id);
+              if (isMounted && res.data) {
+                setStepDetailsMap((prev) => ({ ...prev, [st.step_id]: res.data }));
+              }
+            } catch {
+              // Ignore background step fetch error
             }
-          } catch {
-            // Ignore background step fetch error
-          }
-        }
+          })
+        );
       }
     };
 
@@ -149,7 +133,7 @@ export const LiveTrainingPage: React.FC = () => {
     return () => {
       isMounted = false;
     };
-  }, [resolvedAttemptId, stream.steps.map((s) => s.step_id).join(',')]);
+  }, [resolvedAttemptId, stream.steps.map((s) => `${s.step_id}:${s.state}`).join(',')]);
 
   // UI state
   const [activeTab, setActiveTab] = useState<'live' | 'metrics' | 'technical'>('live');
@@ -158,6 +142,7 @@ export const LiveTrainingPage: React.FC = () => {
   const [checkpointSavedToast, setCheckpointSavedToast] = useState(false);
   const [showDetailedSyncModal, setShowDetailedSyncModal] = useState(false);
   const [isOverflowOpen, setIsOverflowOpen] = useState(false);
+  const [jobDetail, setJobDetail] = useState<import('../types/api').JobDetailData | null>(null);
   const [jobDisplayName, setJobDisplayName] = useState<string | null>(null);
 
   // Drawer selected items
@@ -169,12 +154,15 @@ export const LiveTrainingPage: React.FC = () => {
 
   // Resolve Job Display Name
   useEffect(() => {
+    setJobDetail(null);
+    setJobDisplayName(null);
     if (!attempt?.job_id) return;
     let isMounted = true;
     jobsService.getJob(attempt.job_id)
       .then(res => {
         if (isMounted && res.data?.display_name) {
           setJobDisplayName(res.data.display_name);
+          setJobDetail(res.data);
         }
       })
       .catch(() => {
@@ -200,10 +188,16 @@ export const LiveTrainingPage: React.FC = () => {
     }
   };
 
+  const TERMINAL_STATES = new Set(['COMPLETED', 'FAILED', 'ABORTED', 'CANCELLED']);
+  const isTerminal = attempt ? TERMINAL_STATES.has(attempt.state) : false;
+
   const handleConfirmAbort = async () => {
     try {
       await stream.abortAttempt('Operator aborted training run');
       setIsAbortModalOpen(false);
+      // Force a REST refresh so UI reflects the new state immediately,
+      // without depending on a WebSocket push (WS closes quickly on CREATED attempts).
+      await stream.refreshSnapshot();
     } catch (err: any) {
       alert(`Failed to abort attempt: ${err?.message || 'Unknown error'}`);
     }
@@ -296,7 +290,7 @@ export const LiveTrainingPage: React.FC = () => {
     state: attempt.state,
     executionMode: attempt.execution_mode,
     epoch: snapshot?.epoch ?? attempt.epoch ?? 0,
-    totalEpochs: attempt.progress_cursor ? 1 : 1,
+    totalEpochs: jobDetail?.resolved_contract?.training.epochs ?? jobDetail?.requested_contract.epochs,
     currentBatch: snapshot?.current_batch_ordinal ?? attempt.progress_cursor?.next_batch_ordinal ?? 0,
     totalBatches: 0,
     activeWorkers: workers.filter(w => w.state === 'READY' || w.state === 'INITIALIZING' || w.state === 'RUNNING').length,
@@ -304,7 +298,7 @@ export const LiveTrainingPage: React.FC = () => {
     modelVersion: snapshot?.model_version !== null && snapshot?.model_version !== undefined
       ? `v${snapshot.model_version}`
       : (attempt.model_version !== null && attempt.model_version !== undefined ? `v${attempt.model_version}` : 'v—'),
-    datasetBuildId: attempt.links?.job ? attempt.job_id : '—',
+    datasetBuildId: jobDetail?.resolved_contract?.dataset.dataset_build_id ?? jobDetail?.requested_contract.dataset_build_id ?? '—',
     elapsedFormatted: attempt.started_at ? 'Active run' : 'Pending',
     runtimeEventSeq: stream.lastReceivedSeq,
   };
@@ -345,16 +339,7 @@ export const LiveTrainingPage: React.FC = () => {
             bytesSent: ws.bytes_sent,
             bytesReceived: ws.bytes_received,
           }))
-        : workers.map((w) => ({
-            workerId: w.worker_id,
-            sessionId: w.session_id,
-            shardId: w.shard_id,
-            batchId: st.batch_ordinal,
-            sampleCount: st.total_sample_count && workers.length ? Math.round(st.total_sample_count / workers.length) : 0,
-            samples: st.total_sample_count && workers.length ? Math.round(st.total_sample_count / workers.length) : 0,
-            contributionAccepted: undefined,
-            parameterApplied: undefined,
-          }));
+        : [];
 
     const timing = detail?.timing;
     const totalDurationMs =
@@ -369,8 +354,8 @@ export const LiveTrainingPage: React.FC = () => {
       batchOrdinal: st.batch_ordinal,
       state: st.state,
       inputModelVersion: st.input_model_version,
-      outputModelVersion: st.output_model_version ?? (st.input_model_version != null ? Number(st.input_model_version) + 1 : null),
-      totalSampleCount: st.total_sample_count ?? 192,
+      outputModelVersion: st.output_model_version,
+      totalSampleCount: st.total_sample_count,
       loss: detail?.metrics?.loss,
       accuracy: detail?.metrics?.accuracy,
       metrics: detail?.metrics,
@@ -386,10 +371,7 @@ export const LiveTrainingPage: React.FC = () => {
     };
   });
 
-  const slowWorkersMap = useMemo(
-    () => detectSlowWorkers(legacyStepsAdapter),
-    [legacyStepsAdapter]
-  );
+  const slowWorkersMap = detectSlowWorkers(legacyStepsAdapter);
 
   return (
     <div className="space-y-4 w-full pb-10 font-sans select-none">
@@ -578,13 +560,15 @@ export const LiveTrainingPage: React.FC = () => {
                   <div className="h-px bg-white/[0.07] my-1" />
                   <button
                     type="button"
+                    disabled={isTerminal}
                     onClick={() => {
                       setIsOverflowOpen(false);
                       setIsAbortModalOpen(true);
                     }}
-                    className="w-full text-left px-3 py-1.5 text-rose-400 hover:bg-rose-500/10 transition-colors"
+                    className="w-full text-left px-3 py-1.5 text-rose-400 hover:bg-rose-500/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                    title={isTerminal ? `Attempt already ${attempt?.state}` : 'Abort this training run'}
                   >
-                    Abort training
+                    {isTerminal ? `Already ${attempt?.state?.toLowerCase()}` : 'Abort training'}
                   </button>
                 </div>
               )}
@@ -614,7 +598,7 @@ export const LiveTrainingPage: React.FC = () => {
                 : 'text-[#73737c] hover:text-[#f3f3f4]'
             }`}
           >
-            Metrics {metricsUnavailable && <span className="text-[10px] text-amber-400">(Unavailable)</span>}
+            Metrics
           </button>
           <button
             type="button"
@@ -896,7 +880,7 @@ export const LiveTrainingPage: React.FC = () => {
           {/* Live Metrics Charts */}
           <LiveTrainingCharts
             steps={legacyStepsAdapter}
-            expectedWorkers={expectedWorkersCount ?? 3}
+            expectedWorkers={expectedWorkersCount ?? 0}
             onViewAllMetrics={() => setActiveTab('metrics')}
           />
         </div>
@@ -906,15 +890,9 @@ export const LiveTrainingPage: React.FC = () => {
       {/* TAB 3: FULL METRICS */}
       {activeTab === 'metrics' && (
         <div className="space-y-4">
-          {metricsUnavailable && (
-            <div className="p-3 bg-[#171719] border border-amber-500/20 rounded flex items-center gap-2 text-xs text-amber-300">
-              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
-              <span>Metrics API 40.0 is not yet implemented on the server. Time-series metrics will populate once available.</span>
-            </div>
-          )}
           <FullMetricsDashboard
             steps={legacyStepsAdapter}
-            expectedWorkers={expectedWorkersCount ?? 3}
+            expectedWorkers={expectedWorkersCount ?? 0}
           />
         </div>
       )}

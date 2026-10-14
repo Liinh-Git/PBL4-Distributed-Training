@@ -40,8 +40,8 @@ export const TrainingConfigurationDrawer: React.FC<TrainingConfigurationDrawerPr
 
   const configName = getConfigurationDisplayName(build);
   const isReady = build.state === 'READY';
-  const partitionCount = build.shardCount || build.shards?.length || 3;
-  const totalSamples = build.totalSamples || build.sampleCount || 50000;
+  const partitionCount = build.shardCount ?? build.shards?.length ?? 0;
+  const totalSamples = build.totalSamples ?? build.sampleCount;
 
   const handleUseForTraining = () => {
     navigate(`/training/new?datasetId=${dataset.id}&buildId=${build.id}`);

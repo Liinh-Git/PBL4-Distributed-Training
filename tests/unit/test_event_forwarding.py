@@ -23,6 +23,8 @@ from pbl4.runtime.runtime_events import RuntimeEvent
 class _MockProcess:
     def __init__(self) -> None:
         self._stopping = threading.Event()
+        self._manifest = None
+        self._manifests = {}
 
 
 class _MockManagement:

@@ -91,7 +91,6 @@ from pbl4.management_backend.services import (
 
 TEST_DB_URL = (
     os.environ.get("TEST_DATABASE_URL")
-    or os.environ.get("DATABASE_URL")
     or "postgresql://postgres:123456@localhost:5432/pbl4_test"
 )
 

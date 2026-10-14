@@ -488,8 +488,8 @@ export const NewTrainingFlowPage: React.FC = () => {
               <div className="space-y-2">
                 {readyBuilds.map(b => {
                   const isBuildSelected = selectedBuildId === b.dataset_build_id;
-                  const shardsCount = b.shard_count || 3;
-                  const sampleCount = b.sample_count || 50000;
+                  const shardsCount = b.shard_count ?? 0;
+                  const sampleCount = b.sample_count ?? 0;
                   return (
                     <label
                       key={b.dataset_build_id}

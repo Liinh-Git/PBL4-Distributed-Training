@@ -269,7 +269,7 @@ export const DatasetBuildDetailPage: React.FC = () => {
             <div className="p-3">
               <div className="text-[11px] text-[#73737c]">Sample Count</div>
               <div className="text-sm font-semibold text-[#f3f3f4] mt-0.5">
-                {(build.sample_count || 50000).toLocaleString()}
+                {build.sample_count?.toLocaleString() ?? '—'}
               </div>
             </div>
             <div className="p-3">

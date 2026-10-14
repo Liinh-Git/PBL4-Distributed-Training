@@ -1299,7 +1299,7 @@ def execute_start_job(
             command_id=command_id,
             target_id=attempt_id,
             payload=dispatch_payload,
-            timeout=5.0,
+            timeout=15.0,
         )
     except RuntimeUnavailableError as exc:
         logger.warning(
@@ -1471,7 +1471,7 @@ def execute_retry_job(
             command_id=command_id,
             target_id=attempt_id,
             payload=dispatch_payload,
-            timeout=5.0,
+            timeout=15.0,
         )
     except RuntimeUnavailableError as exc:
         logger.warning(
@@ -1644,7 +1644,7 @@ def execute_resume_job(
             command_id=command_id,
             target_id=attempt_id,
             payload=dispatch_payload,
-            timeout=5.0,
+            timeout=15.0,
         )
     except RuntimeUnavailableError as exc:
         logger.warning(

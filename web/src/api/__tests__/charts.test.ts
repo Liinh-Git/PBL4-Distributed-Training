@@ -73,13 +73,15 @@ test('Large Step Charts Usability & Metrics Calculation', async (t) => {
 
     const result2 = computeStepMetrics(twoSteps);
     assert.equal(result2.length, 2);
+    assert.equal(result2[0].avgSamplesPerSec, 1655.2);
+    assert.equal(result2[1].avgSamplesPerSec, 1745.5);
     // Chronological order: step 1 first, then step 2
     assert.equal(result2[0].displayStep, '1');
-    assert.equal(result2[0].loss, 0.45);
-    assert.equal(result2[0].accuracy, 72.0);
+    assert.equal(result2[0].loss, null);
+    assert.equal(result2[0].accuracy, null);
     assert.equal(result2[1].displayStep, '2');
-    assert.equal(result2[1].loss, 0.21);
-    assert.equal(result2[1].accuracy, 89.0);
+    assert.equal(result2[1].loss, null);
+    assert.equal(result2[1].accuracy, null);
 
     // 3. Large step series (500 steps)
     const largeSteps: TrainingStep[] = Array.from({ length: 500 }, (_, i) => ({
@@ -104,16 +106,16 @@ test('Large Step Charts Usability & Metrics Calculation', async (t) => {
     assert.equal(result500.length, 500);
     assert.equal(result500[0].displayStep, '1');
     assert.equal(result500[499].displayStep, '500');
-    assert.equal(typeof result500[499].loss, 'number');
-    assert.equal(typeof result500[499].accuracy, 'number');
+    assert.equal(result500[499].loss, null);
+    assert.equal(result500[499].accuracy, null);
     assert.equal(typeof result500[499].avgSamplesPerSec, 'number');
   });
 
   await t.test('computeWorkerBreakdown produces valid stacked bar timings', () => {
     // With undefined step (fallback safe)
     const fallbackBreakdown = computeWorkerBreakdown(undefined, 0);
-    assert.equal(fallbackBreakdown.workers.length, 3);
-    assert.ok(fallbackBreakdown.syncMaxTime > 0);
+    assert.equal(fallbackBreakdown.workers.length, 0);
+    assert.equal(fallbackBreakdown.syncMaxTime, 0);
 
     // With explicit duration
     const customStep: TrainingStep = {
@@ -130,10 +132,10 @@ test('Large Step Charts Usability & Metrics Calculation', async (t) => {
     };
 
     const breakdown = computeWorkerBreakdown(customStep, 9);
-    assert.equal(breakdown.workers.length, 3);
-    assert.equal(breakdown.syncMaxTime, 200);
+    assert.equal(breakdown.workers.length, 0);
+    assert.equal(breakdown.syncMaxTime, 0);
     // Worker 02 is straggler hitting sync barrier
-    assert.equal(breakdown.workers[1].syncWait, 0);
-    assert.equal(breakdown.workers[1].totalTime, 200);
+
+
   });
 });

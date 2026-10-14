@@ -56,7 +56,8 @@ class RuntimeProcess:
         management_port: int,
         dataset_manager_url: str,
         checkpoint_dir: Path,
-        parameter_manifest: ParameterManifest,
+        parameter_manifest: ParameterManifest | None = None,
+        parameter_manifests: dict[str, ParameterManifest] | None = None,
         heartbeat_timeout_seconds: float = 120.0,
         worker_admission_secret: str | None = None,
         require_worker_admission: bool = True,
@@ -66,6 +67,9 @@ class RuntimeProcess:
         self._dataset_manager_url = dataset_manager_url.rstrip("/")
         self._checkpoint_dir = Path(checkpoint_dir)
         self._manifest = parameter_manifest
+        self._manifests = dict(parameter_manifests or {})
+        if parameter_manifest is None and not self._manifests:
+            raise ValueError("At least one parameter manifest is required")
         self._heartbeat_timeout = heartbeat_timeout_seconds
         self._worker_admission_secret = worker_admission_secret
         self._require_worker_admission = require_worker_admission
@@ -86,7 +90,7 @@ class RuntimeProcess:
             self._management.bound_address,
             self._host,
             self._dtp_port,
-            self._manifest.parameter_manifest_hash,
+            self._manifest.parameter_manifest_hash if self._manifest else sorted(self._manifests),
         )
         try:
             while not self._stopping.wait(0.5):
@@ -214,6 +218,7 @@ class _AttemptRunner:
         management: ManagementEndpoint,
     ) -> None:
         self._process = process
+        self._manifest = process._manifest
         self._payload = payload
         self._management = management
         self.job_id = str(payload["job_id"])
@@ -276,7 +281,7 @@ class _AttemptRunner:
                 attempt_id=self.attempt_id,
                 job_id=self.job_id,
                 expected_workers=expected_workers,
-                manifest=self._process._manifest,
+                manifest=self._manifest,
                 registry=registry,
                 worker_admission_secret=self._process._worker_admission_secret,
                 require_worker_admission=self._process._require_worker_admission,
@@ -350,7 +355,7 @@ class _AttemptRunner:
                 raise TimeoutError("Timed out waiting for Parameter Manifests")
             execution_mode = str(self._payload["execution_mode"])
             if execution_mode == "RESUME":
-                initial = np.zeros(self._process._manifest.total_numel, dtype=np.float32)
+                initial = np.zeros(self._manifest.total_numel, dtype=np.float32)
             else:
                 if not self._model_init.wait(120.0):
                     raise TimeoutError("Timed out waiting for worker-0 canonical initialization")
@@ -359,7 +364,7 @@ class _AttemptRunner:
                     raise ValueError("Canonical initialization transfer is unavailable")
                 initial = np.frombuffer(transfer.data, dtype="<f4").astype(np.float32, copy=True)
                 if (
-                    initial.size != self._process._manifest.total_numel
+                    initial.size != self._manifest.total_numel
                     or not np.isfinite(initial).all()
                 ):
                     raise ValueError("Canonical initialization tensor is invalid")
@@ -374,9 +379,9 @@ class _AttemptRunner:
                 str(contract["update_policy"]["type"]),
                 dataset.dataset_build_id,
                 dataset.dataset_manifest_hash,
-                self._process._manifest.parameter_manifest_hash,
+                self._manifest.parameter_manifest_hash,
                 int(contract["protocols"]["dtp_version"]),
-                self._process._manifest.total_numel,
+                self._manifest.total_numel,
                 members,
             )
             work_units = self._extract_work_units(
@@ -428,7 +433,7 @@ class _AttemptRunner:
                 optimizer=str(contract["update_policy"]["type"]),
                 created_at=_now(),
                 model=ModelSnapshot(
-                    0, self._process._manifest.parameter_manifest_hash, initial.tobytes()
+                    0, self._manifest.parameter_manifest_hash, initial.tobytes()
                 ),
                 recovery_cursor=RecoveryCursor(0, 0),
             )
@@ -464,7 +469,7 @@ class _AttemptRunner:
             model = CanonicalModel(
                 initial,
                 model_version,
-                self._process._manifest.parameter_manifest_hash,
+                self._manifest.parameter_manifest_hash,
             )
             coordinator = Coordinator(
                 context,
@@ -579,7 +584,7 @@ class _AttemptRunner:
                             "expected_sample_count": assignment.sample_count,
                             "training_strategy": "strict_bsp",
                             "parameter_manifest_hash": (
-                                self._process._manifest.parameter_manifest_hash
+                                self._manifest.parameter_manifest_hash
                             ),
                             "work_units": [u.to_dict() for u in assignment.work_units],
                         }
@@ -761,6 +766,8 @@ class _AttemptRunner:
         if not isinstance(contract, dict):
             raise ValueError("START_ATTEMPT lacks a resolved contract")
         model = contract.get("model")
+        if isinstance(model, dict) and self._process._manifests:
+            self._manifest = self._process._manifests.get(str(model.get("model_id")))
         sync = contract.get("synchronization")
         checkpoint = contract.get("checkpoint_policy")
         update = contract.get("update_policy")
@@ -770,8 +777,9 @@ class _AttemptRunner:
             or not isinstance(model, dict)
             or model.get("model_id") not in MODEL_PROFILES
             or model.get("profile") != MODEL_PROFILES.get(model.get("model_id"))
+            or self._manifest is None
             or model.get("parameter_manifest_hash")
-            != self._process._manifest.parameter_manifest_hash
+            != self._manifest.parameter_manifest_hash
             or not isinstance(sync, dict)
             or sync.get("training_strategy") != "strict_bsp"
             or type(sync.get("expected_workers")) is not int

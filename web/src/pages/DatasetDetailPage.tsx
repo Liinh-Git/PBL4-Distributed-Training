@@ -175,15 +175,15 @@ export const DatasetDetailPage: React.FC = () => {
 
   // Fallback dataset representation
   const dataset = {
-    id: datasetData?.dataset_id || datasetId || 'cifar10',
-    name: datasetData?.name || 'CIFAR-10',
+    id: datasetData?.dataset_id || datasetId || '—',
+    name: datasetData?.name || '—',
     task: datasetData?.task || 'Image classification',
     source: datasetData?.source_type || 'Built-in dataset',
-    totalSamples: 50000,
+    totalSamples: buildsData.find(b => b.state === 'READY')?.sample_count,
     description:
       datasetData?.description ||
-      'Standard computer vision benchmark dataset consisting of 60,000 32x32 color images in 10 classes, with 50,000 training samples and 10,000 test samples.',
-    createdAt: datasetData?.created_at || '2026-08-18T10:00:00Z',
+      'No description provided.',
+    createdAt: datasetData?.created_at || '—',
   };
 
   // Map buildsData to local configuration format
@@ -191,13 +191,13 @@ export const DatasetDetailPage: React.FC = () => {
     id: b.dataset_build_id,
     datasetId: b.dataset_id,
     datasetName: b.dataset_name || dataset.name,
-    batchSize: b.batch_size || 64,
+    batchSize: b.batch_size ?? 0,
     state: b.state as any,
-    shardCount: b.shard_count || 3,
-    sampleCount: b.sample_count || 50000,
-    totalSamples: b.sample_count || 50000,
-    profile: b.profile || 'standard-sharded-fp32',
-    createdAt: b.created_at || '2026-09-08',
+    shardCount: b.shard_count ?? 0,
+    sampleCount: b.sample_count ?? 0,
+    totalSamples: b.sample_count ?? 0,
+    profile: b.profile || '—',
+    createdAt: b.created_at || '—',
     shards: [],
   }));
 
@@ -287,7 +287,7 @@ export const DatasetDetailPage: React.FC = () => {
               <span>·</span>
               <span>{dataset.source || 'Built-in dataset'}</span>
               <span>·</span>
-              <span>{(dataset.totalSamples || 50000).toLocaleString()} training samples</span>
+              <span>{dataset.totalSamples?.toLocaleString() ?? '—'} training samples</span>
               <span>·</span>
               <span>{datasetData?.build_counts?.ready ?? readyConfigs.length} {readyConfigs.length === 1 ? 'configuration' : 'configurations'} ready</span>
             </div>
@@ -368,7 +368,7 @@ export const DatasetDetailPage: React.FC = () => {
               <div className="p-3">
                 <div className="text-[11px] text-[#73737c]">Training samples</div>
                 <div className="text-xs font-medium text-[#f3f3f4] mt-0.5">
-                  {(dataset.totalSamples || 50000).toLocaleString()}
+                  {dataset.totalSamples?.toLocaleString() ?? '—'}
                 </div>
               </div>
 
@@ -385,7 +385,7 @@ export const DatasetDetailPage: React.FC = () => {
               <h2 className="text-xs font-semibold text-[#f3f3f4]">About this dataset</h2>
               <p className="text-xs text-[#a1a1a8] leading-relaxed max-w-3xl">
                 {dataset.description ||
-                  'Standard computer vision benchmark dataset consisting of 60,000 32x32 color images in 10 classes, with 50,000 training samples and 10,000 test samples.'}
+                  'No description provided.'}
               </p>
             </div>
 
@@ -579,8 +579,8 @@ export const DatasetDetailPage: React.FC = () => {
                   const configName = getConfigurationDisplayName(config);
                   const isReady = config.state === 'READY';
                   const isDeprecated = config.state === 'DEPRECATED';
-                  const partitionCount = config.shardCount || config.shards?.length || 3;
-                  const totalSamples = config.totalSamples || config.sampleCount || 50000;
+                  const partitionCount = config.shardCount ?? config.shards?.length ?? 0;
+                  const totalSamples = config.totalSamples ?? config.sampleCount;
 
                   return (
                     <tr

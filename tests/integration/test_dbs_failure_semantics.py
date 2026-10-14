@@ -272,6 +272,8 @@ def test_failure_contract_validation_rejects_invalid_k_and_m() -> None:
     session = _AttemptRunner.__new__(_AttemptRunner)
     session._process = MagicMock()
     session._process._manifest.parameter_manifest_hash = "hash-param"
+    session._process._manifests = {}
+    session._manifest = session._process._manifest
     session._payload = {
         "execution_mode": "FRESH",
         "resolved_contract": {

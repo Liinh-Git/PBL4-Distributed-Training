@@ -1,8 +1,8 @@
 # PBL4 — Distributed Deep Learning Training Infrastructure
 
-> **STATUS:** Architecture scaffold / bootstrap.  
-> **Core distributed training behavior is NOT implemented yet.**  
-> This repository provides an architecture-aligned structural skeleton, interfaces, and boundary checks to guide future implementation.
+Chạy Runtime, Backend, ba Node Agent và WebUI bằng `python services/start.py` trong môi trường Python đã cài dependencies. Tạo Job, chọn model/Build và bắt đầu training trên WebUI.
+
+Hướng dẫn hiện hành: [Chạy qua WebUI](docs/DISTRIBUTED_DEMO_GUIDE.md). Database lấy từ `.env` (Aiven trên máy này); launcher không tạo database hoặc Job mẫu.
 
 “Xây dựng hạ tầng huấn luyện mô hình học sâu phân tán với cơ chế đồng bộ tham số giữa các thiết bị.”
 
@@ -76,7 +76,7 @@ The system uses a Parameter Server architecture organized around three distinct 
 | CLI | `pblctl` | Command-line management tool (talks to Management Backend) |
 | WebUI | (in `web/`) | React monitoring dashboard (talks to Management Backend only) |
 
-*(Note: Attempting to start unimplemented services will display pending status and exit non-zero. Use `--help` for available options).*
+Use `--help` for each service’s available options.
 
 ---
 

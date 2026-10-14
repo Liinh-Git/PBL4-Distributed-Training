@@ -137,185 +137,46 @@ export const ScrollableChartWrapper: React.FC<ScrollableChartWrapperProps> = ({
   );
 };
 
-// Generate deterministic & sketch-aligned metrics for any series of steps
+// Missing telemetry remains null; charts must never fabricate training results.
 export function computeStepMetrics(steps: TrainingStep[]) {
-  // Chronological order (oldest to newest)
-  const chronological = [...steps].reverse();
-
-  return chronological.map((st, idx) => {
-    // 1. Normalized step number (0, 1, 2, 3... or 1, 2, 3...)
-    const normalizedStep = idx;
-    const stepLabel = `Step ${idx + 1}`;
-    const displayStep = `${idx + 1}`;
-    const opNumber = `#${st.operationId}`;
-
-    // 2. Global Loss: Real metrics if present, otherwise smooth convergence fallback
-    let loss: number;
-    const candidateLoss = st.loss ?? st.metrics?.loss;
-    if (candidateLoss !== undefined && candidateLoss !== null) {
-      loss = candidateLoss;
-    } else if (idx === 0) {
-      loss = 0.45;
-    } else if (idx === 1) {
-      loss = 0.21;
-    } else {
-      loss = Math.max(
-        0.052,
-        Math.round((0.21 * Math.pow(0.86, idx - 1)) * 1000) / 1000
-      );
-    }
-
-    // 3. Accuracy: Real metrics if present, otherwise gradual gain fallback
-    let accuracy: number;
-    const candidateAcc = st.accuracy ?? st.metrics?.accuracy;
-    if (candidateAcc !== undefined && candidateAcc !== null) {
-      accuracy = candidateAcc;
-    } else if (idx === 0) {
-      accuracy = 72.0;
-    } else if (idx === 1) {
-      accuracy = 89.0;
-    } else {
-      accuracy = Math.min(
-        96.8,
-        Math.round((89.0 + (96.8 - 89.0) * (1 - Math.exp(-(idx - 1) * 0.45))) * 10) / 10
-      );
-    }
-
-    // 4. Avg Samples per second (Throughput)
-    const durationMs = st.timings.totalDurationMs || 116;
-    const samples = st.totalSampleCount || 192;
-    let avgSamplesPerSec = Math.round((samples / (durationMs / 1000)) * 10) / 10;
-    if (idx === 1) {
-      avgSamplesPerSec = 5000;
-    } else if (idx === 0) {
-      avgSamplesPerSec = 4820;
-    } else {
-      avgSamplesPerSec = Math.round(5000 + Math.sin(idx * 0.8) * 140 + idx * 18);
-    }
-
-    // 5. Timings & Accepted workers
-    const acceptedCount = (st.workerContributions || []).filter(
-      c => c.contributionAccepted
-    ).length;
-
-    const timeLabel = st.timings.committedAt
-      ? st.timings.committedAt.slice(-8)
-      : `T+${idx * 12}s`;
-
+  return [...steps].sort((a, b) => (a.stepId ?? a.operationId) - (b.stepId ?? b.operationId)).map((st, idx) => {
+    const durationMs = st.timings.totalDurationMs;
+    const samples = st.totalSampleCount;
     return {
-      step: st,
-      operationId: st.operationId,
-      opNumber,
-      normalizedStep,
-      stepLabel,
-      displayStep,
-      loss,
-      accuracy,
-      avgSamplesPerSec,
+      step: st, operationId: st.operationId, opNumber: `#${st.operationId}`,
+      normalizedStep: idx, stepLabel: `Step ${st.stepId ?? st.operationId}`, displayStep: `${st.stepId ?? st.operationId}`,
+      loss: st.loss ?? st.metrics?.loss ?? null,
+      accuracy: st.accuracy ?? st.metrics?.accuracy ?? null,
+      avgSamplesPerSec: durationMs != null && durationMs > 0 && samples != null
+        ? Math.round(samples * 10000 / durationMs) / 10 : null,
       durationMs,
-      acceptedWorkers: acceptedCount,
-      timeLabel,
+      acceptedWorkers: (st.workerContributions || []).filter(c => c.contributionAccepted).length,
+      timeLabel: st.timings.committedAt ?? '—',
     };
   });
 }
 
-// Generate per-worker breakdown (Training Time vs Pushing Time) for a selected step
-export function computeWorkerBreakdown(step: TrainingStep | undefined, stepIndex: number = 1) {
-  const contributions = step?.workerContributions || [];
-  const hasRealWorkerTelemetry = contributions.some(
-    (c: any) =>
-      (c.computeMs !== undefined && c.computeMs !== null) ||
-      (c.compute_ms !== undefined && c.compute_ms !== null) ||
-      (c.uploadMs !== undefined && c.uploadMs !== null) ||
-      (c.upload_ms !== undefined && c.upload_ms !== null)
-  );
-
-  if (hasRealWorkerTelemetry) {
-    const rawWorkers = contributions.map((c: any, i: number) => {
-      const train = Number(c.computeMs ?? c.compute_ms ?? 0);
-      const push = Number(c.uploadMs ?? c.upload_ms ?? 0);
-      const total = Math.round((train + push) * 10) / 10;
-      const workerId = c.workerId ?? i;
-      return {
-        workerId,
-        workerName: `Worker ${workerId < 9 ? '0' : ''}${workerId + 1}`,
-        trainingTime: train,
-        pushingTime: push,
-        totalTime: total,
-        syncWait: 0,
-        loss: c.loss,
-        accuracy: c.accuracy,
-        parameterApplyMs: c.parameterApplyMs ?? c.parameter_apply_ms,
-        bytesSent: c.bytesSent ?? c.bytes_sent,
-        bytesReceived: c.bytesReceived ?? c.bytes_received,
-      };
-    });
-
-    const maxTotal = Math.max(...rawWorkers.map(w => w.totalTime), 1);
-    const workers = rawWorkers.map(w => ({
-      ...w,
-      syncWait: Math.max(0, Math.round((maxTotal - w.totalTime) * 10) / 10),
-    }));
-
+export function computeWorkerBreakdown(step: TrainingStep | undefined, _stepIndex = 1) {
+  const workers = (step?.workerContributions || []).map((c: any) => {
+    const train = c.computeMs ?? c.compute_ms ?? null;
+    const push = c.uploadMs ?? c.upload_ms ?? null;
     return {
-      syncMaxTime: maxTotal,
-      workers,
+      workerId: c.workerId, workerName: `Worker ${c.workerId}`,
+      trainingTime: train, pushingTime: push,
+      totalTime: train != null && push != null ? train + push : null,
+      loss: c.loss, accuracy: c.accuracy,
+      parameterApplyMs: c.parameterApplyMs ?? c.parameter_apply_ms,
+      bytesSent: c.bytesSent ?? c.bytes_sent, bytesReceived: c.bytesReceived ?? c.bytes_received,
     };
-  }
-
-  const totalMs = step?.timings?.totalDurationMs || 110;
-
-  // Worker 01: Training ~58%, Pushing ~24%
-  const w1Train = Math.round(totalMs * 0.56);
-  const w1Push = Math.round(totalMs * 0.24);
-  const w1Total = w1Train + w1Push;
-
-  // Worker 02: Straggler! Training ~72%, Pushing ~28%
-  const w2Train = Math.round(totalMs * 0.72);
-  const w2Push = totalMs - w2Train;
-  const w2Total = totalMs;
-
-  // Worker 03: Fast Node! Training ~38%, Pushing ~24%
-  const w3Train = Math.round(totalMs * 0.38);
-  const w3Push = Math.round(totalMs * 0.24);
-  const w3Total = w3Train + w3Push;
-
-  return {
-    syncMaxTime: w2Total,
-    workers: [
-      {
-        workerId: 0,
-        workerName: 'Worker 01',
-        trainingTime: w1Train,
-        pushingTime: w1Push,
-        totalTime: w1Total,
-        syncWait: w2Total - w1Total,
-      },
-      {
-        workerId: 1,
-        workerName: 'Worker 02',
-        trainingTime: w2Train,
-        pushingTime: w2Push,
-        totalTime: w2Total,
-        syncWait: 0,
-      },
-      {
-        workerId: 2,
-        workerName: 'Worker 03',
-        trainingTime: w3Train,
-        pushingTime: w3Push,
-        totalTime: w3Total,
-        syncWait: w2Total - w3Total,
-      },
-    ],
-  };
+  });
+  return { syncMaxTime: Math.max(0, ...workers.map(w => w.totalTime ?? 0)), workers };
 }
 
 // Custom data label for Global Loss chart milestones
 const renderLossLabel = (props: any) => {
   const { x, y, value, index } = props;
   if (value === undefined || value === null) return null;
-  // Annotate key milestones like Step 1 (0.45) & Step 2 (0.21)
+  // Annotate the first measured points.
   const isKey = index === 0 || index === 1;
   if (!isKey) return null;
   return (
@@ -467,7 +328,7 @@ export const WorkerExecutionBreakdownChart: React.FC<WorkerBreakdownProps> = ({
               strokeDasharray="4 4"
               strokeWidth={0.75}
               label={{
-                value: 'Sync',
+                value: 'Max observed',
                 position: 'top',
                 fill: '#f3f3f4',
                 fontSize: 11,
@@ -569,7 +430,7 @@ export const WorkerExecutionBreakdownChart: React.FC<WorkerBreakdownProps> = ({
    ========================================================================= */
 export const LiveTrainingCharts: React.FC<LiveTrainingChartsProps> = ({
   steps,
-  expectedWorkers = 3,
+  expectedWorkers = 0,
   onViewAllMetrics,
 }) => {
   const chartData = useMemo(() => computeStepMetrics(steps), [steps]);
@@ -640,7 +501,7 @@ export const LiveTrainingCharts: React.FC<LiveTrainingChartsProps> = ({
             </div>
             <div className="text-right shrink-0">
               <span className="text-xs font-mono font-semibold text-blue-400">
-                {latestItem?.loss ?? 0.21}
+                {latestItem?.loss ?? '—'}
               </span>
               <div className="text-[10px] text-[#73737c]">Latest Loss</div>
             </div>
@@ -702,8 +563,8 @@ export const LiveTrainingCharts: React.FC<LiveTrainingChartsProps> = ({
             </span>
             <span className="text-[#a1a1a8]">
               {totalSteps > 1
-                ? `Step 1: ${chartData[0]?.loss ?? 0.45} → Step ${totalSteps}: ${latestItem?.loss ?? 0.21}`
-                : 'Step 1: 0.45'}
+                ? `Step 1: ${chartData[0]?.loss ?? '—'} → Step ${totalSteps}: ${latestItem?.loss ?? '—'}`
+                : 'No loss telemetry'}
             </span>
           </div>
         </div>
@@ -756,12 +617,12 @@ export const LiveTrainingCharts: React.FC<LiveTrainingChartsProps> = ({
                 </h4>
               </div>
               <p className="text-[11px] text-[#73737c] truncate">
-                Batch validation accuracy progression across global steps
+                Reported training accuracy progression across global steps
               </p>
             </div>
             <div className="text-right shrink-0">
               <span className="text-xs font-mono font-semibold text-emerald-400">
-                {latestItem?.accuracy ?? 89.0}%
+                {latestItem?.accuracy ?? '—'}%
               </span>
               <div className="text-[10px] text-[#73737c]">Latest Accuracy</div>
             </div>
@@ -783,7 +644,7 @@ export const LiveTrainingCharts: React.FC<LiveTrainingChartsProps> = ({
                   minTickGap={28}
                 />
                 <YAxis
-                  domain={[60, 100]}
+                  domain={[0, 100]}
                   unit="%"
                   tick={{ fill: '#73737c', fontSize: 10 }}
                   axisLine={{ stroke: '#27272a' }}
@@ -824,8 +685,8 @@ export const LiveTrainingCharts: React.FC<LiveTrainingChartsProps> = ({
             </span>
             <span className="text-[#a1a1a8]">
               {totalSteps > 1
-                ? `Step 2 Target: 89% • Latest: ${latestItem?.accuracy ?? 89}%`
-                : 'Step 2 Target: 89%'}
+                ? `Latest: ${latestItem?.accuracy ?? '—'}%`
+                : 'No accuracy telemetry'}
             </span>
           </div>
         </div>
@@ -846,7 +707,7 @@ export const LiveTrainingCharts: React.FC<LiveTrainingChartsProps> = ({
             </div>
             <div className="text-right shrink-0">
               <span className="text-xs font-mono font-semibold text-emerald-400">
-                {latestItem?.avgSamplesPerSec ?? 5000} /s
+                {latestItem?.avgSamplesPerSec ?? '—'} /s
               </span>
               <div className="text-[10px] text-[#73737c]">Current Rate</div>
             </div>
@@ -926,7 +787,7 @@ export interface FullMetricsDashboardProps {
 
 export const FullMetricsDashboard: React.FC<FullMetricsDashboardProps> = ({
   steps,
-  expectedWorkers = 3,
+  expectedWorkers = 0,
 }) => {
   const chartData = useMemo(() => computeStepMetrics(steps), [steps]);
   const [selectedStepIdx, setSelectedStepIdx] = useState<number>(() => {
@@ -999,12 +860,12 @@ export const FullMetricsDashboard: React.FC<FullMetricsDashboardProps> = ({
             <span>Global Loss</span>
           </div>
           <div className="text-xl font-mono font-semibold text-[#f3f3f4] truncate">
-            {latestItem?.loss ?? 0.21}
+            {latestItem?.loss ?? '—'}
           </div>
           <div className="text-[10px] text-blue-400/90 font-medium truncate">
             {totalSteps > 1
-              ? `Step 1: ${chartData[0]?.loss ?? 0.45} → Step ${totalSteps}: ${latestItem?.loss ?? 0.21}`
-              : 'Step 1: 0.45'}
+              ? `Step 1: ${chartData[0]?.loss ?? '—'} → Step ${totalSteps}: ${latestItem?.loss ?? '—'}`
+              : 'No loss telemetry'}
           </div>
         </div>
 
@@ -1027,7 +888,7 @@ export const FullMetricsDashboard: React.FC<FullMetricsDashboardProps> = ({
             <span>Model Accuracy</span>
           </div>
           <div className="text-xl font-mono font-semibold text-[#f3f3f4] truncate">
-            {latestItem?.accuracy ?? 89.0}%
+            {latestItem?.accuracy ?? '—'}%
           </div>
           <div className="text-[10px] text-emerald-400/90 font-medium truncate">
             {totalSteps > 1 ? `Latest: ${latestItem?.accuracy}% (Step ${totalSteps})` : 'Baseline accuracy'}
@@ -1040,7 +901,7 @@ export const FullMetricsDashboard: React.FC<FullMetricsDashboardProps> = ({
             <span>Avg Samples / sec</span>
           </div>
           <div className="text-xl font-mono font-semibold text-[#f3f3f4] truncate">
-            {latestItem?.avgSamplesPerSec ?? 5000}
+            {latestItem?.avgSamplesPerSec ?? '—'}
           </div>
           <div className="text-[10px] text-emerald-400/90 font-medium truncate">
             {totalSteps > 0 ? `Step ${totalSteps} throughput` : 'Throughput rate'}
@@ -1133,7 +994,7 @@ export const FullMetricsDashboard: React.FC<FullMetricsDashboardProps> = ({
                 )}
               </span>
               <span className="text-blue-400 font-mono">
-                {chartData[0]?.loss ?? 0.45} (Step 1) → {latestItem?.loss ?? 0.21} (Step {totalSteps})
+                {chartData[0]?.loss ?? '—'} (Step 1) → {latestItem?.loss ?? '—'} (Step {totalSteps})
               </span>
             </div>
           </div>
@@ -1149,7 +1010,7 @@ export const FullMetricsDashboard: React.FC<FullMetricsDashboardProps> = ({
                   </h4>
                 </div>
                 <p className="text-[11px] text-[#73737c] truncate">
-                  Y: Worker 01, 02, 03 | X: Step vs Sync barrier
+                  Training Time (compute) vs Pushing Time (network) &amp; Sync barrier
                 </p>
               </div>
               <div className="px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20 text-xs font-mono font-semibold shrink-0">
@@ -1207,7 +1068,7 @@ export const FullMetricsDashboard: React.FC<FullMetricsDashboardProps> = ({
                     minTickGap={28}
                   />
                   <YAxis
-                    domain={[60, 100]}
+                    domain={[0, 100]}
                     unit="%"
                     tick={{ fill: '#73737c', fontSize: 10 }}
                     axisLine={{ stroke: '#27272a' }}
@@ -1246,7 +1107,7 @@ export const FullMetricsDashboard: React.FC<FullMetricsDashboardProps> = ({
                 )}
               </span>
               <span className="text-emerald-400 font-mono">
-                {totalSteps > 1 ? `Latest: ${latestItem?.accuracy}%` : 'Step 2 Milestone: 89%'}
+                {totalSteps > 1 ? `Latest: ${latestItem?.accuracy}%` : 'No accuracy telemetry'}
               </span>
             </div>
           </div>
@@ -1324,7 +1185,7 @@ export const FullMetricsDashboard: React.FC<FullMetricsDashboardProps> = ({
                   'Axis: Time timeline'
                 )}
               </span>
-              <span className="text-emerald-400 font-mono">5000 samples/sec</span>
+              <span className="text-emerald-400 font-mono">{latestItem?.avgSamplesPerSec ?? '—'} samples/sec</span>
             </div>
           </div>
         </div>
@@ -1466,3 +1327,4 @@ export const FullMetricsDashboard: React.FC<FullMetricsDashboardProps> = ({
     </div>
   );
 };
+

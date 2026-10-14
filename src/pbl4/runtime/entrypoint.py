@@ -42,7 +42,9 @@ def main() -> None:
     )
     parser.add_argument("--dataset-manager-url", required=True)
     parser.add_argument("--checkpoint-dir", required=True)
-    parser.add_argument("--parameter-manifest", required=True)
+    manifests = parser.add_mutually_exclusive_group(required=True)
+    manifests.add_argument("--parameter-manifest")
+    manifests.add_argument("--manifest-dir", help="Directory of <model_id>.json manifests")
     parser.add_argument("--heartbeat-timeout", type=float, default=120.0)
     parser.add_argument(
         "--allow-unmanaged-workers",
@@ -71,13 +73,25 @@ def main() -> None:
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    from pbl4.common.model_profiles import MODEL_PROFILES
+
+    catalog = {
+        model_id: load_parameter_manifest(Path(args.manifest_dir) / f"{model_id}.json")
+        for model_id in MODEL_PROFILES
+        if args.manifest_dir and (Path(args.manifest_dir) / f"{model_id}.json").is_file()
+    }
     process = RuntimeProcess(
         host=args.host,
         dtp_port=args.port,
         management_port=args.management_port,
         dataset_manager_url=args.dataset_manager_url,
         checkpoint_dir=Path(args.checkpoint_dir),
-        parameter_manifest=load_parameter_manifest(Path(args.parameter_manifest)),
+        parameter_manifest=(
+            load_parameter_manifest(Path(args.parameter_manifest))
+            if args.parameter_manifest
+            else None
+        ),
+        parameter_manifests=catalog,
         heartbeat_timeout_seconds=args.heartbeat_timeout,
         worker_admission_secret=worker_admission_secret,
         require_worker_admission=require_worker_admission,

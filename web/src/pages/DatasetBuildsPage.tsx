@@ -203,11 +203,11 @@ export const DatasetBuildsPage: React.FC = () => {
                     </td>
 
                     <td className="py-2.5 px-3 text-center text-[#f3f3f4]">
-                      {b.shard_count || 3}
+                      {b.shard_count ?? 0}
                     </td>
 
                     <td className="py-2.5 px-3 text-right text-[#f3f3f4]">
-                      {(b.sample_count || 50000).toLocaleString()}
+                      {b.sample_count?.toLocaleString() ?? '—'}
                     </td>
 
                     <td className="py-2.5 px-3 text-[11px] text-[#73737c]">

@@ -97,7 +97,7 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
       const [snapRes, workersRes, stepsRes] = await Promise.allSettled([
         attemptsService.getSnapshot(attemptId),
         workersService.listWorkers(attemptId),
-        stepsService.listSteps(attemptId, { limit: 50 }),
+        stepsService.listAllSteps(attemptId),
       ]);
 
       if (snapRes.status === 'fulfilled') {
@@ -164,7 +164,7 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
           attemptsService.getAttempt(attemptId),
           attemptsService.getSnapshot(attemptId),
           workersService.listWorkers(attemptId),
-          stepsService.listSteps(attemptId, { limit: 50 }),
+          stepsService.listAllSteps(attemptId),
           attemptsService.getCatchUpEvents(attemptId, { after_seq: 0, limit: 50 }),
         ]);
 
@@ -473,3 +473,4 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
     abortAttempt: abortAttemptAction,
   };
 }
+
