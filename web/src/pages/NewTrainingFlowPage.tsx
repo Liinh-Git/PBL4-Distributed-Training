@@ -293,9 +293,13 @@ export const NewTrainingFlowPage: React.FC = () => {
         return;
       }
       const startRes = await jobsService.startJob(targetId, selectedNodeIds.length ? { node_ids: selectedNodeIds } : undefined);
-      const attemptId = startRes.data.attempt_id;
-      // Navigate to live monitoring or job detail with real attempt_id
-      navigate(`/jobs/${targetId}`);
+      const attemptId = startRes.data?.attempt_id;
+      if (!attemptId || typeof attemptId !== 'string') {
+        setFormError('Training attempt was started, but the server response was missing a valid attempt identifier.');
+        return;
+      }
+      // Navigate directly to live monitoring with explicit attempt_id
+      navigate(`/live?attempt_id=${encodeURIComponent(attemptId)}`);
     } catch (err: any) {
       setFormError(err?.message || 'Failed to start training attempt');
     } finally {

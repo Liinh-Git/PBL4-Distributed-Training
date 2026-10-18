@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   Play,
@@ -57,6 +57,15 @@ const formatExecutionMode = (mode?: string | null): string => {
   if (mode === 'RESUME') return 'Resumed';
   return mode;
 };
+
+const ACTIVE_ATTEMPT_STATES: readonly string[] = [
+  'CREATED',
+  'WAITING_WORKERS',
+  'PROVISIONING',
+  'INITIALIZING',
+  'RUNNING',
+  'COMPLETING',
+];
 
 export const JobDetailPage: React.FC = () => {
   const { jobId } = useParams<{ jobId: string }>();
@@ -150,6 +159,38 @@ export const JobDetailPage: React.FC = () => {
     }
   }, [jobId]);
 
+  const isPollingRef = useRef<boolean>(false);
+
+  const refreshDataSilently = useCallback(async () => {
+    if (!jobId || isPollingRef.current) return;
+    try {
+      isPollingRef.current = true;
+      const [jobRes, attemptsRes] = await Promise.allSettled([
+        jobsService.getJob(jobId),
+        attemptsService.listAttempts({ job_id: jobId, limit: 50 }),
+      ]);
+      if (jobRes.status === 'fulfilled' && jobRes.value.data) {
+        setJob(prev => {
+          if (!prev) return jobRes.value.data;
+          if (
+            prev.state !== jobRes.value.data.state ||
+            prev.frozen_at !== jobRes.value.data.frozen_at
+          ) {
+            return { ...prev, ...jobRes.value.data };
+          }
+          return prev;
+        });
+      }
+      if (attemptsRes.status === 'fulfilled' && attemptsRes.value.data) {
+        setAttempts(attemptsRes.value.data || []);
+      }
+    } catch {
+      // Silently ignore background polling errors
+    } finally {
+      isPollingRef.current = false;
+    }
+  }, [jobId]);
+
   useEffect(() => {
     loadJobData();
   }, [loadJobData]);
@@ -185,8 +226,13 @@ export const JobDetailPage: React.FC = () => {
     try {
       setActionLoading('launch');
       const res = await jobsService.startJob(job.job_id);
-      await loadJobData();
-      navigate('/live');
+      const newAttemptId = res.data?.attempt_id;
+      if (newAttemptId) {
+        navigate(`/live?attempt_id=${encodeURIComponent(newAttemptId)}`);
+      } else {
+        await loadJobData();
+        navigate('/live');
+      }
     } catch (err: any) {
       alert(`Failed to launch training run: ${err?.message || 'Unknown error'}`);
     } finally {
@@ -198,9 +244,14 @@ export const JobDetailPage: React.FC = () => {
     if (!job) return;
     try {
       setActionLoading('retry');
-      await jobsService.retryJob(job.job_id, { note: 'Retry from job detail' });
-      await loadJobData();
-      navigate('/live');
+      const res = await jobsService.retryJob(job.job_id, { note: 'Retry from job detail' });
+      const newAttemptId = res.data?.attempt_id;
+      if (newAttemptId) {
+        navigate(`/live?attempt_id=${encodeURIComponent(newAttemptId)}`);
+      } else {
+        await loadJobData();
+        navigate('/live');
+      }
     } catch (err: any) {
       alert(`Failed to retry training run: ${err?.message || 'Unknown error'}`);
     } finally {
@@ -237,9 +288,28 @@ export const JobDetailPage: React.FC = () => {
 
   const req = job.requested_contract;
   const resv = job.resolved_contract;
-  const isRunning = attempts.some(a => a.state === 'RUNNING');
+
+  const activeAttempts = attempts.filter(a =>
+    ACTIVE_ATTEMPT_STATES.includes(a.state)
+  );
+  const hasActiveAttempt = activeAttempts.length > 0;
+  const hasMultipleActiveAttempts = activeAttempts.length > 1;
+  const primaryActiveAttempt = activeAttempts[0];
+
   const latestAttempt = attempts[0];
   const canRetry = latestAttempt && (latestAttempt.state === 'FAILED' || latestAttempt.state === 'ABORTED');
+
+  useEffect(() => {
+    if (!hasActiveAttempt) return;
+
+    const intervalId = setInterval(() => {
+      refreshDataSilently();
+    }, 3000);
+
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, [hasActiveAttempt, refreshDataSilently]);
 
   const handleOpenRawContract = () => {
     // Adapter to legacy format for modal view if requested
@@ -296,7 +366,7 @@ export const JobDetailPage: React.FC = () => {
 
         {/* Action hierarchy */}
         <div className="flex items-center gap-2 self-start sm:self-auto">
-          {(job.state === 'DRAFT' || job.state === 'READY') && !isRunning && (
+          {(job.state === 'DRAFT' || job.state === 'READY') && !hasActiveAttempt && (
             <button
               type="button"
               onClick={() => setShowEditModal(true)}
@@ -317,7 +387,7 @@ export const JobDetailPage: React.FC = () => {
             <span>{actionLoading === 'clone' ? 'Cloning...' : 'Clone'}</span>
           </button>
 
-          {canRetry && !isRunning && (
+          {canRetry && !hasActiveAttempt && (
             <button
               type="button"
               disabled={actionLoading === 'retry'}
@@ -329,22 +399,52 @@ export const JobDetailPage: React.FC = () => {
             </button>
           )}
 
-          {(job.state === 'READY' || job.state === 'DRAFT') && !isRunning && (
+          {hasActiveAttempt ? (
             <button
               type="button"
-              disabled={actionLoading === 'launch'}
               onClick={() => {
-                if (job.state === 'DRAFT') {
-                  setShowStartDraftConfirm(true);
-                } else {
-                  handleLaunch();
+                if (hasMultipleActiveAttempts) {
+                  alert(
+                    `Data anomaly: Multiple active attempts detected (${activeAttempts
+                      .map(a => a.attempt_id)
+                      .join(', ')}). Please inspect individual attempts from the table below.`
+                  );
+                  return;
                 }
+                if (!primaryActiveAttempt?.attempt_id) {
+                  alert('Data anomaly: Active attempt lacks a valid attempt identifier.');
+                  return;
+                }
+                navigate(`/live?attempt_id=${encodeURIComponent(primaryActiveAttempt.attempt_id)}`);
               }}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded bg-blue-600 hover:bg-blue-500 text-white transition-colors disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded bg-blue-600 hover:bg-blue-500 text-white transition-colors cursor-pointer"
+              title={
+                hasMultipleActiveAttempts
+                  ? 'Multiple active attempts detected for this job'
+                  : `Open Live Monitor for active attempt ${primaryActiveAttempt.attempt_id} (${primaryActiveAttempt.state})`
+              }
             >
-              <Play className="w-3.5 h-3.5" />
-              <span>{actionLoading === 'launch' ? 'Starting...' : 'Launch Run'}</span>
+              <Activity className="w-3.5 h-3.5" />
+              <span>View Run</span>
             </button>
+          ) : (
+            (job.state === 'READY' || job.state === 'DRAFT') && (
+              <button
+                type="button"
+                disabled={actionLoading === 'launch'}
+                onClick={() => {
+                  if (job.state === 'DRAFT') {
+                    setShowStartDraftConfirm(true);
+                  } else {
+                    handleLaunch();
+                  }
+                }}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded bg-blue-600 hover:bg-blue-500 text-white transition-colors disabled:opacity-50"
+              >
+                <Play className="w-3.5 h-3.5" />
+                <span>{actionLoading === 'launch' ? 'Starting...' : 'Launch Run'}</span>
+              </button>
+            )
           )}
 
           {job.state !== 'ARCHIVED' && (
@@ -360,6 +460,22 @@ export const JobDetailPage: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* Anomaly banner if multiple active attempts detected */}
+      {hasMultipleActiveAttempts && (
+        <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded flex items-center gap-2.5 text-xs text-amber-300">
+          <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
+          <div className="space-y-0.5">
+            <div className="font-semibold text-amber-200">
+              Data Anomaly: Multiple active execution attempts detected ({activeAttempts.length})
+            </div>
+            <div className="text-[11px] text-amber-300/80">
+              Active attempts: {activeAttempts.map(a => `${a.attempt_id} (${a.state})`).join(', ')}.
+              The system invariant allows at most one active attempt per job. Please inspect individual attempts in the history table below.
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Section: Configuration */}
       <div className="space-y-3">
@@ -537,7 +653,7 @@ export const JobDetailPage: React.FC = () => {
                     <tr key={att.attempt_id} className="hover:bg-[#171719] transition-colors">
                       <td className="py-2.5 px-3">
                         <Link
-                          to={`/live?attempt_id=${att.attempt_id}`}
+                          to={`/live?attempt_id=${encodeURIComponent(att.attempt_id)}`}
                           className="font-mono font-medium text-[#f3f3f4] hover:text-blue-400 transition-colors inline-flex items-center gap-1 group/att"
                           title="Open Attempt Live Inspector"
                         >
@@ -564,9 +680,9 @@ export const JobDetailPage: React.FC = () => {
                         {att.ended_at ? att.ended_at.slice(0, 19).replace('T', ' ') : '—'}
                       </td>
                       <td className="py-2.5 px-3 text-right">
-                        {att.state === 'RUNNING' || att.state === 'COMPLETING' || att.state === 'INITIALIZING' ? (
+                        {ACTIVE_ATTEMPT_STATES.includes(att.state) ? (
                           <Link
-                            to={`/live?attempt_id=${att.attempt_id}`}
+                            to={`/live?attempt_id=${encodeURIComponent(att.attempt_id)}`}
                             className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 text-xs font-medium transition-colors border border-blue-500/20"
                           >
                             <Activity className="w-3 h-3" />
@@ -574,7 +690,7 @@ export const JobDetailPage: React.FC = () => {
                           </Link>
                         ) : (
                           <Link
-                            to={`/live?attempt_id=${att.attempt_id}`}
+                            to={`/live?attempt_id=${encodeURIComponent(att.attempt_id)}`}
                             className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-[#171719] hover:bg-[#202024] text-[#a1a1a8] hover:text-[#f3f3f4] text-xs transition-colors border border-white/[0.07]"
                           >
                             <span>Inspect</span>
