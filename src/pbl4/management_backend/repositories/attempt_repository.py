@@ -18,6 +18,7 @@ ACTIVE_ATTEMPT_STATES = {
     "PROVISIONING",
     "INITIALIZING",
     "RUNNING",
+    "COMPLETING",
 }
 ABORTABLE_ATTEMPT_STATES = {
     "CREATED",
@@ -34,6 +35,7 @@ ATTEMPT_STATE_PROGRESSION: dict[str, int] = {
     "PROVISIONING": 2,
     "INITIALIZING": 3,
     "RUNNING": 4,
+    "COMPLETING": 5,
 }
 
 
@@ -217,7 +219,7 @@ def get_active_attempt(conn: psycopg.Connection) -> dict | None:
             SELECT * FROM attempts
             WHERE state IN (
                 'CREATED', 'WAITING_WORKERS', 'PROVISIONING',
-                'INITIALIZING', 'RUNNING'
+                'INITIALIZING', 'RUNNING', 'COMPLETING'
             )
             LIMIT 1
             """

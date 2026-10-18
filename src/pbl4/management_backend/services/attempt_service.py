@@ -346,6 +346,15 @@ def _preflight_job_and_select_placements(
     )
 
 
+def _is_active_attempt_conflict(exc: psycopg.errors.UniqueViolation) -> bool:
+    """Determine if a UniqueViolation was caused by the global single-active attempt constraint."""
+    diag = getattr(exc, "diag", None)
+    constraint = getattr(diag, "constraint_name", None)
+    if constraint:
+        return constraint == "uq_attempts__one_active"
+    return "uq_attempts__one_active" in str(exc)
+
+
 def start_job(
     conn: psycopg.Connection,
     job_id: str,
@@ -424,9 +433,11 @@ def start_job(
                 requested_at=now,
             )
     except psycopg.errors.UniqueViolation as exc:
-        raise AttemptConflictError(
-            f"Active attempt already running for job '{job_id}' (V1: only one active at a time)."
-        ) from exc
+        if _is_active_attempt_conflict(exc):
+            raise AttemptConflictError(
+                f"Active attempt already running for job '{job_id}' (V1: only one active at a time)."
+            ) from exc
+        raise
 
     logger.info("Attempt created: %s (job=%s, cmd=%s)", attempt_id, job_id, command_id)
     return attempt_row, cmd_row
@@ -493,9 +504,11 @@ def retry_job(conn: psycopg.Connection, job_id: str) -> tuple[dict, dict]:
                 requested_at=now,
             )
     except psycopg.errors.UniqueViolation as exc:
-        raise AttemptConflictError(
-            f"Active attempt already running for job '{job_id}' (V1: only one active at a time)."
-        ) from exc
+        if _is_active_attempt_conflict(exc):
+            raise AttemptConflictError(
+                f"Active attempt already running for job '{job_id}' (V1: only one active at a time)."
+            ) from exc
+        raise
 
     logger.info("Retry attempt created: %s (job=%s)", attempt_id, job_id)
     return attempt_row, cmd_row
@@ -606,9 +619,11 @@ def resume_job(conn: psycopg.Connection, job_id: str, checkpoint_id: str) -> tup
                 requested_at=now,
             )
     except psycopg.errors.UniqueViolation as exc:
-        raise AttemptConflictError(
-            f"Active attempt already running for job '{job_id}' (V1: only one active at a time)."
-        ) from exc
+        if _is_active_attempt_conflict(exc):
+            raise AttemptConflictError(
+                f"Active attempt already running for job '{job_id}' (V1: only one active at a time)."
+            ) from exc
+        raise
 
     logger.info("Resume attempt created: %s (job=%s, ckpt=%s)", attempt_id, job_id, checkpoint_id)
     return attempt_row, cmd_row

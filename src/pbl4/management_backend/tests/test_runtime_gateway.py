@@ -320,9 +320,9 @@ def test_attempt_state_changed_event_cleans_up_allocations() -> None:
 def test_attempt_state_changed_completed_projection_and_active_states() -> None:
     from pbl4.management_backend.repositories import attempt_repository, job_repository
 
-    # Verify single source of truth and no COMPLETING in active attempt states
-    assert "COMPLETING" not in attempt_repository.ACTIVE_ATTEMPT_STATES
-    assert "COMPLETING" not in job_repository.ACTIVE_ATTEMPT_STATES
+    # Verify single source of truth and COMPLETING in active attempt states
+    assert "COMPLETING" in attempt_repository.ACTIVE_ATTEMPT_STATES
+    assert "COMPLETING" in job_repository.ACTIVE_ATTEMPT_STATES
     assert job_repository.ACTIVE_ATTEMPT_STATES is attempt_repository.ACTIVE_ATTEMPT_STATES
 
     occurred_at = "2026-09-11T01:02:03+00:00"
