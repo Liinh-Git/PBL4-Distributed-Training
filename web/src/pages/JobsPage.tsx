@@ -12,12 +12,15 @@ import {
   AlertCircle,
   ChevronLeft,
   Square,
+  Activity,
+  ExternalLink,
 } from 'lucide-react';
+import { useApp } from '../context/AppContext';
 import { JobStateBadge, AttemptStateBadge } from '../components/common/Badge';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { EditJobModal } from '../components/common/EditJobModal';
 import { jobsService, attemptsService, datasetsService, datasetBuildsService } from '../api';
-import { JobListItemData, JobState } from '../types/api';
+import { JobListItemData, JobState, isActiveAttemptState } from '../types/api';
 
 const formatModelName = (modelId?: string | null): string => {
   if (!modelId) return 'ResNet-18';
@@ -31,6 +34,12 @@ const formatModelName = (modelId?: string | null): string => {
 
 export const JobsPage: React.FC = () => {
   const navigate = useNavigate();
+  const {
+    clusterActiveAttempt,
+    isClusterActiveLoading,
+    clusterActiveError,
+    refreshClusterActiveAttempt,
+  } = useApp();
 
   // API State
   const [jobs, setJobs] = useState<JobListItemData[]>([]);
@@ -157,11 +166,31 @@ export const JobsPage: React.FC = () => {
     try {
       setActionLoading(`launch_${jobId}`);
       const res = await jobsService.startJob(jobId);
-      const attemptId = res.data.attempt_id;
-      // Navigate to job detail or live attempt
-      navigate(`/jobs/${jobId}`);
+      const attemptId = res.data?.attempt_id;
+      await refreshClusterActiveAttempt();
+      if (attemptId) {
+        navigate(`/live?attempt_id=${encodeURIComponent(attemptId)}`);
+      } else {
+        navigate(`/jobs/${jobId}`);
+      }
     } catch (err: any) {
-      alert(`Failed to start job: ${err?.message || 'Unknown error'}`);
+      await refreshClusterActiveAttempt();
+      await fetchJobs();
+      const isConflict =
+        err?.status === 409 ||
+        err?.code === 'ACTIVE_ATTEMPT_EXISTS' ||
+        err?.isConflict ||
+        err?.message?.includes('ACTIVE_ATTEMPT_EXISTS');
+      if (isConflict) {
+        alert(
+          `Cannot launch training: ${
+            err?.message ||
+            'The cluster is currently busy with another active training attempt. Only one attempt can run globally at a time.'
+          }`
+        );
+      } else {
+        alert(`Failed to start job: ${err?.message || 'Unknown error'}`);
+      }
     } finally {
       setActionLoading(null);
     }
@@ -202,6 +231,7 @@ export const JobsPage: React.FC = () => {
         reason: 'Operator aborted attempt from jobs dashboard',
       });
       setAttemptToAbort(null);
+      await refreshClusterActiveAttempt();
       await fetchJobs();
     } catch (err: any) {
       alert(`Failed to abort attempt: ${err?.message || 'Unknown error'}`);
@@ -263,6 +293,51 @@ export const JobsPage: React.FC = () => {
             className="px-2 py-1 bg-rose-500/20 hover:bg-rose-500/30 rounded text-rose-200 transition-colors"
           >
             Retry
+          </button>
+        </div>
+      )}
+
+      {/* Cluster Busy Banner */}
+      {clusterActiveAttempt && (
+        <div className="p-3 bg-amber-500/10 border border-amber-500/25 rounded flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs text-amber-200">
+          <div className="flex items-center gap-2.5">
+            <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
+            <div className="space-y-0.5">
+              <div>
+                <span className="font-semibold text-amber-100">Cluster Busy:</span>{' '}
+                <span>
+                  Job <strong className="text-white">"{clusterActiveAttempt.job_name || clusterActiveAttempt.job_id}"</strong> is actively executing training attempt ({clusterActiveAttempt.attempt_id} · {clusterActiveAttempt.state}).
+                </span>
+              </div>
+              <div className="text-[11px] text-amber-300/80">
+                The cluster allows at most one active attempt across all jobs. Launching other jobs is disabled until this run completes.
+              </div>
+            </div>
+          </div>
+          <Link
+            to={`/live?attempt_id=${encodeURIComponent(clusterActiveAttempt.attempt_id)}`}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 border border-amber-500/30 text-xs font-medium transition-colors shrink-0 self-start sm:self-auto"
+          >
+            <Activity className="w-3.5 h-3.5 text-amber-300" />
+            <span>View Active Run</span>
+            <ExternalLink className="w-3 h-3 text-amber-300/70" />
+          </Link>
+        </div>
+      )}
+
+      {/* Cluster Status Unverified Banner */}
+      {clusterActiveError && (
+        <div className="p-3 bg-rose-500/10 border border-rose-500/20 rounded flex items-center justify-between gap-2 text-xs text-rose-300">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+            <span>Cluster status unverified: {clusterActiveError}. Launching new runs is disabled until cluster status is confirmed.</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => refreshClusterActiveAttempt()}
+            className="px-2 py-1 bg-rose-500/20 hover:bg-rose-500/30 rounded text-rose-200 transition-colors shrink-0"
+          >
+            Retry Verification
           </button>
         </div>
       )}
@@ -402,49 +477,126 @@ export const JobsPage: React.FC = () => {
                     <td className="py-2.5 px-3.5 text-left w-[190px] min-w-[190px] shrink-0">
                       <div className="flex items-center justify-start gap-1.5">
                         {/* Slot 1: Run or Abort */}
-                        {isAttemptAbortable(job.latest_attempt?.state) ? (
-                          <button
-                            type="button"
-                            disabled={actionLoading === `abort_${job.latest_attempt!.attempt_id}`}
-                            onClick={() => setAttemptToAbort({
-                              jobId: job.job_id,
-                              attemptId: job.latest_attempt!.attempt_id,
-                              displayName: job.display_name,
-                            })}
-                            className="inline-flex items-center justify-center gap-1 w-16 py-1 text-xs rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 transition-colors shrink-0"
-                            title="Abort running attempt"
-                          >
-                            <Square className="w-3 h-3 fill-rose-400 text-rose-400" />
-                            <span>{actionLoading === `abort_${job.latest_attempt!.attempt_id}` ? '...' : 'Abort'}</span>
-                          </button>
-                        ) : job.state === 'READY' || job.state === 'DRAFT' ? (
-                          <button
-                            type="button"
-                            disabled={actionLoading === `launch_${job.job_id}`}
-                            onClick={() => {
-                              if (job.state === 'DRAFT') {
-                                setJobToStart(job);
-                              } else {
-                                handleLaunch(job.job_id);
-                              }
-                            }}
-                            className="inline-flex items-center justify-center gap-1 w-16 py-1 text-xs rounded bg-[#171719] hover:bg-[#202024] text-[#f3f3f4] border border-white/[0.07] transition-colors disabled:opacity-50 shrink-0"
-                            title={job.state === 'DRAFT' ? "Start Training (freeze draft to READY)" : "Launch Training Run"}
-                          >
-                            <Play className="w-3 h-3 text-[#73737c]" />
-                            <span>{actionLoading === `launch_${job.job_id}` ? '...' : 'Run'}</span>
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            disabled
-                            className="inline-flex items-center justify-center gap-1 w-16 py-1 text-xs rounded bg-[#171719]/40 text-[#73737c]/30 border border-white/[0.03] cursor-not-allowed shrink-0"
-                            title="Archived jobs cannot be run"
-                          >
-                            <Play className="w-3 h-3 opacity-30" />
-                            <span>Run</span>
-                          </button>
-                        )}
+                        {(() => {
+                          const isThisJobActive = Boolean(
+                            (clusterActiveAttempt && clusterActiveAttempt.job_id === job.job_id) ||
+                            (job.latest_attempt && isActiveAttemptState(job.latest_attempt.state))
+                          );
+                          const isAnotherJobActive = Boolean(
+                            clusterActiveAttempt && clusterActiveAttempt.job_id !== job.job_id
+                          );
+                          const activeAttemptId =
+                            (clusterActiveAttempt && clusterActiveAttempt.job_id === job.job_id
+                              ? clusterActiveAttempt.attempt_id
+                              : null) || job.latest_attempt?.attempt_id;
+
+                          if (job.latest_attempt && isAttemptAbortable(job.latest_attempt.state)) {
+                            return (
+                              <button
+                                type="button"
+                                disabled={actionLoading === `abort_${job.latest_attempt.attempt_id}`}
+                                onClick={() => setAttemptToAbort({
+                                  jobId: job.job_id,
+                                  attemptId: job.latest_attempt!.attempt_id,
+                                  displayName: job.display_name,
+                                })}
+                                className="inline-flex items-center justify-center gap-1 w-16 py-1 text-xs rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 transition-colors shrink-0"
+                                title="Abort running attempt"
+                              >
+                                <Square className="w-3 h-3 fill-rose-400 text-rose-400" />
+                                <span>{actionLoading === `abort_${job.latest_attempt.attempt_id}` ? '...' : 'Abort'}</span>
+                              </button>
+                            );
+                          }
+
+                          if (isThisJobActive && activeAttemptId) {
+                            return (
+                              <Link
+                                to={`/live?attempt_id=${encodeURIComponent(activeAttemptId)}`}
+                                className="inline-flex items-center justify-center gap-1 w-16 py-1 text-xs rounded bg-blue-600 hover:bg-blue-500 text-white transition-colors shrink-0"
+                                title={`View active running attempt (${activeAttemptId})`}
+                              >
+                                <Activity className="w-3 h-3" />
+                                <span>View</span>
+                              </Link>
+                            );
+                          }
+
+                          if (job.state === 'READY' || job.state === 'DRAFT') {
+                            if (isAnotherJobActive) {
+                              return (
+                                <button
+                                  type="button"
+                                  disabled
+                                  className="inline-flex items-center justify-center gap-1 w-16 py-1 text-xs rounded bg-[#171719]/40 text-[#73737c]/50 border border-white/[0.04] cursor-not-allowed shrink-0"
+                                  title={`Cluster is busy: Job "${clusterActiveAttempt?.job_name || clusterActiveAttempt?.job_id}" currently has an active training attempt.`}
+                                >
+                                  <Play className="w-3 h-3 opacity-30" />
+                                  <span>Run</span>
+                                </button>
+                              );
+                            }
+
+                            if (isClusterActiveLoading) {
+                              return (
+                                <button
+                                  type="button"
+                                  disabled
+                                  className="inline-flex items-center justify-center gap-1 w-16 py-1 text-xs rounded bg-[#171719]/40 text-[#73737c]/50 border border-white/[0.04] cursor-wait shrink-0"
+                                  title="Checking cluster status..."
+                                >
+                                  <RefreshCw className="w-3 h-3 animate-spin text-blue-400/60" />
+                                  <span>Run</span>
+                                </button>
+                              );
+                            }
+
+                            if (clusterActiveError) {
+                              return (
+                                <button
+                                  type="button"
+                                  disabled
+                                  className="inline-flex items-center justify-center gap-1 w-16 py-1 text-xs rounded bg-[#171719]/40 text-rose-400/50 border border-rose-500/20 cursor-not-allowed shrink-0"
+                                  title={`Cluster status unverified: ${clusterActiveError}`}
+                                >
+                                  <AlertCircle className="w-3 h-3 opacity-40 text-rose-400" />
+                                  <span>Run</span>
+                                </button>
+                              );
+                            }
+
+                            return (
+                              <button
+                                type="button"
+                                disabled={actionLoading === `launch_${job.job_id}`}
+                                onClick={() => {
+                                  if (job.state === 'DRAFT') {
+                                    setJobToStart(job);
+                                  } else {
+                                    handleLaunch(job.job_id);
+                                  }
+                                }}
+                                className="inline-flex items-center justify-center gap-1 w-16 py-1 text-xs rounded bg-[#171719] hover:bg-[#202024] text-[#f3f3f4] border border-white/[0.07] transition-colors disabled:opacity-50 shrink-0"
+                                title={job.state === 'DRAFT' ? "Start Training (freeze draft to READY)" : "Launch Training Run"}
+                              >
+                                <Play className="w-3 h-3 text-[#73737c]" />
+                                <span>{actionLoading === `launch_${job.job_id}` ? '...' : 'Run'}</span>
+                              </button>
+                            );
+                          }
+
+                          return (
+                            <button
+                              type="button"
+                              disabled
+                              className="inline-flex items-center justify-center gap-1 w-16 py-1 text-xs rounded bg-[#171719]/40 text-[#73737c]/30 border border-white/[0.03] cursor-not-allowed shrink-0"
+                              title="Archived jobs cannot be run"
+                            >
+                              <Play className="w-3 h-3 opacity-30" />
+                              <span>Run</span>
+                            </button>
+                          );
+                        })()}
 
                         {/* Slot 2: Edit */}
                         {job.state === 'DRAFT' || job.state === 'READY' ? (

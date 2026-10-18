@@ -632,6 +632,17 @@ def resume_job(conn: psycopg.Connection, job_id: str, checkpoint_id: str) -> tup
 # ─── Query ───────────────────────────────────────────────────────────────────
 
 
+def get_global_active_attempt(conn: psycopg.Connection) -> dict | None:
+    """Return the global active attempt joined with job display_name, or None."""
+    active = attempt_repository.get_active_attempt(conn)
+    if active is None:
+        return None
+    job = job_repository.get_job(conn, active["job_id"])
+    active_copy = dict(active)
+    active_copy["job_name"] = job.get("display_name") if job else None
+    return active_copy
+
+
 def get_attempt(conn: psycopg.Connection, attempt_id: str) -> dict:
     row = attempt_repository.get_attempt(conn, attempt_id)
     if row is None:

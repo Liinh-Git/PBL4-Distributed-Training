@@ -20,6 +20,29 @@ export type AttemptState =
   | 'FAILED'
   | 'ABORTED';
 
+export const ACTIVE_ATTEMPT_STATES: readonly AttemptState[] = [
+  'CREATED',
+  'WAITING_WORKERS',
+  'PROVISIONING',
+  'INITIALIZING',
+  'RUNNING',
+  'COMPLETING',
+] as const;
+
+export function isActiveAttemptState(state: AttemptState | string | undefined | null): boolean {
+  return ACTIVE_ATTEMPT_STATES.includes(state as AttemptState);
+}
+
+export interface ActiveAttemptInfo {
+  attempt_id: string;
+  job_id: string;
+  job_name?: string | null;
+  state: AttemptState;
+  execution_mode: string;
+  created_at: string;
+  started_at?: string | null;
+}
+
 export type ExecutionMode = 'FRESH' | 'RETRY_FROM_START' | 'RESUME';
 
 export type CheckpointState = 'WRITING' | 'COMPLETE' | 'FAILED';

@@ -15,6 +15,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { datasetsService, datasetBuildsService, systemService, jobsService } from '../api';
+import { useApp } from '../context/AppContext';
 import {
   DatasetItemData,
   DatasetBuildListItemData,
@@ -26,6 +27,12 @@ import {
 
 export const NewTrainingFlowPage: React.FC = () => {
   const navigate = useNavigate();
+  const {
+    clusterActiveAttempt,
+    isClusterActiveLoading,
+    clusterActiveError,
+    refreshClusterActiveAttempt,
+  } = useApp();
   const [searchParams] = useSearchParams();
   const { jobId } = useParams<{ jobId?: string }>();
   const isEditMode = Boolean(jobId);
@@ -299,9 +306,25 @@ export const NewTrainingFlowPage: React.FC = () => {
         return;
       }
       // Navigate directly to live monitoring with explicit attempt_id
+      await refreshClusterActiveAttempt();
       navigate(`/live?attempt_id=${encodeURIComponent(attemptId)}`);
     } catch (err: any) {
-      setFormError(err?.message || 'Failed to start training attempt');
+      await refreshClusterActiveAttempt();
+      const isConflict =
+        err?.status === 409 ||
+        err?.code === 'ACTIVE_ATTEMPT_EXISTS' ||
+        err?.isConflict ||
+        err?.message?.includes('ACTIVE_ATTEMPT_EXISTS');
+      if (isConflict) {
+        setFormError(
+          `Cannot start training: ${
+            err?.message ||
+            'The cluster is currently busy with another active training attempt. Only one attempt can run globally at a time. You can save as draft now and start when the cluster is free.'
+          }`
+        );
+      } else {
+        setFormError(err?.message || 'Failed to start training attempt');
+      }
     } finally {
       setActionLoading(null);
     }
@@ -992,6 +1015,24 @@ export const NewTrainingFlowPage: React.FC = () => {
             </div>
           </div>
 
+          {/* Cluster Busy Banner on Review Step */}
+          {clusterActiveAttempt && (
+            <div className="p-3 bg-amber-500/10 border border-amber-500/25 rounded flex items-center gap-2.5 text-xs text-amber-200">
+              <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
+              <div className="space-y-0.5">
+                <div>
+                  <span className="font-semibold text-amber-100">Cluster Busy Notice:</span>{' '}
+                  <span>
+                    Job <strong className="text-white">"{clusterActiveAttempt.job_name || clusterActiveAttempt.job_id}"</strong> currently has an active training attempt ({clusterActiveAttempt.attempt_id} · {clusterActiveAttempt.state}).
+                  </span>
+                </div>
+                <div className="text-[11px] text-amber-300/80">
+                  Only one attempt can run globally at a time. You can save your training configuration as draft now and launch when the cluster becomes available.
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Review Actions */}
           <div className="flex items-center justify-between pt-2">
             <button
@@ -1013,12 +1054,37 @@ export const NewTrainingFlowPage: React.FC = () => {
               </button>
               <button
                 type="button"
-                disabled={hasValidationErrors || actionLoading === 'start'}
+                disabled={
+                  hasValidationErrors ||
+                  actionLoading === 'start' ||
+                  Boolean(clusterActiveAttempt) ||
+                  isClusterActiveLoading ||
+                  Boolean(clusterActiveError)
+                }
                 onClick={handleStartTraining}
                 className="px-4 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:pointer-events-none"
+                title={
+                  clusterActiveAttempt
+                    ? `Cluster is busy: Job "${clusterActiveAttempt.job_name || clusterActiveAttempt.job_id}" is currently running.`
+                    : isClusterActiveLoading
+                    ? 'Verifying cluster status...'
+                    : clusterActiveError
+                    ? `Cluster status unverified: ${clusterActiveError}`
+                    : undefined
+                }
               >
                 <Play className="w-3.5 h-3.5 fill-current" />
-                <span>{actionLoading === 'start' ? 'Starting...' : isEditMode ? 'Start Training' : 'Create & Start'}</span>
+                <span>
+                  {actionLoading === 'start'
+                    ? 'Starting...'
+                    : clusterActiveAttempt
+                    ? 'Cluster Busy'
+                    : isClusterActiveLoading
+                    ? 'Checking...'
+                    : isEditMode
+                    ? 'Start Training'
+                    : 'Create & Start'}
+                </span>
               </button>
             </div>
           </div>
@@ -1041,6 +1107,16 @@ export const NewTrainingFlowPage: React.FC = () => {
             </p>
           </div>
 
+          {/* Cluster Busy Banner on Step 5 */}
+          {clusterActiveAttempt && (
+            <div className="p-3 bg-amber-500/10 border border-amber-500/25 rounded text-left flex items-center gap-2.5 text-xs text-amber-200">
+              <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
+              <div className="text-[11px] text-amber-300/80">
+                Cluster is currently busy with Job <strong className="text-white">"{clusterActiveAttempt.job_name || clusterActiveAttempt.job_id}"</strong> ({clusterActiveAttempt.attempt_id}). Launching will be enabled once the active attempt completes.
+              </div>
+            </div>
+          )}
+
           <div className="flex items-center justify-center gap-3 pt-2">
             {(createdJob || jobId) && (
               <Link
@@ -1052,12 +1128,35 @@ export const NewTrainingFlowPage: React.FC = () => {
             )}
             <button
               type="button"
-              disabled={hasValidationErrors || actionLoading === 'start'}
+              disabled={
+                hasValidationErrors ||
+                actionLoading === 'start' ||
+                Boolean(clusterActiveAttempt) ||
+                isClusterActiveLoading ||
+                Boolean(clusterActiveError)
+              }
               onClick={handleStartTraining}
               className="px-4 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:pointer-events-none"
+              title={
+                clusterActiveAttempt
+                  ? `Cluster is busy: Job "${clusterActiveAttempt.job_name || clusterActiveAttempt.job_id}" is currently running.`
+                  : isClusterActiveLoading
+                  ? 'Verifying cluster status...'
+                  : clusterActiveError
+                  ? `Cluster status unverified: ${clusterActiveError}`
+                  : undefined
+              }
             >
               <Play className="w-3.5 h-3.5 fill-current" />
-              <span>{actionLoading === 'start' ? 'Starting...' : 'Start training'}</span>
+              <span>
+                {actionLoading === 'start'
+                  ? 'Starting...'
+                  : clusterActiveAttempt
+                  ? 'Cluster Busy'
+                  : isClusterActiveLoading
+                  ? 'Checking...'
+                  : 'Start training'}
+              </span>
             </button>
           </div>
         </div>

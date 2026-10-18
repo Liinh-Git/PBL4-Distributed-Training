@@ -8,6 +8,7 @@ import { apiClient, ApiClient, RequestOptions } from './client';
 import {
   AbortAttemptRequest,
   AbortAttemptResponseData,
+  ActiveAttemptInfo,
   ApiResponse,
   AttemptDetailData,
   AttemptListItemData,
@@ -54,6 +55,15 @@ export class AttemptsService {
         limit: params?.limit,
       },
     });
+  }
+
+  /**
+   * GET /api/v1/attempts/active — Get global active attempt across the cluster
+   */
+  async getActiveAttempt(
+    options?: RequestOptions
+  ): Promise<ApiResponse<ActiveAttemptInfo | null>> {
+    return this.client.get<ActiveAttemptInfo | null>('/api/v1/attempts/active', options);
   }
 
   /**

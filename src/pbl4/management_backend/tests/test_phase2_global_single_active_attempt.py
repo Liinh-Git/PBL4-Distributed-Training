@@ -392,3 +392,41 @@ def test_api_resume_job_returns_409_when_attempt_active():
             body = resp.json()
             assert "error" in body
             assert body["error"]["code"] == "ACTIVE_ATTEMPT_EXISTS"
+
+
+def test_api_get_active_attempt_idle_and_active():
+    """GET /api/v1/attempts/active returns data: null when idle, and ActiveAttemptResponse when active."""
+    app = create_app()
+
+    # Case 1: Idle cluster -> data is null
+    with patch("pbl4.management_backend.db.get_connection"), \
+         patch("pbl4.management_backend.services.attempt_service.get_global_active_attempt", return_value=None):
+        with TestClient(app, raise_server_exceptions=False) as client:
+            resp = client.get("/api/v1/attempts/active")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert "data" in body
+            assert body["data"] is None
+
+    # Case 2: Active cluster -> returns active attempt details and job_name
+    active_row = {
+        "attempt_id": "att-global-active-1",
+        "job_id": "job-test-1",
+        "job_name": "My Active Job",
+        "state": "RUNNING",
+        "execution_mode": "FRESH",
+        "created_at": datetime.now(UTC),
+        "started_at": datetime.now(UTC),
+    }
+    with patch("pbl4.management_backend.db.get_connection"), \
+         patch("pbl4.management_backend.services.attempt_service.get_global_active_attempt", return_value=active_row):
+        with TestClient(app, raise_server_exceptions=False) as client:
+            resp = client.get("/api/v1/attempts/active")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["data"] is not None
+            assert body["data"]["attempt_id"] == "att-global-active-1"
+            assert body["data"]["job_id"] == "job-test-1"
+            assert body["data"]["job_name"] == "My Active Job"
+            assert body["data"]["state"] == "RUNNING"
+

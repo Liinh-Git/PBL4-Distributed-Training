@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import {
   Job,
   DatasetBuild,
@@ -7,6 +7,8 @@ import {
   DiagnosticEvent,
   WorkerSession,
 } from '../types';
+import { ActiveAttemptInfo } from '../types/api';
+import { attemptsService } from '../api';
 
 export interface AppContextType {
   // Transient UI Inspector Drawers State
@@ -28,6 +30,12 @@ export interface AppContextType {
   setIsRuntimeStale: (stale: boolean) => void;
   hasEventHistoryGap: boolean;
   setHasEventHistoryGap: (gap: boolean) => void;
+
+  // Cluster-wide Active Attempt State
+  clusterActiveAttempt: ActiveAttemptInfo | null;
+  isClusterActiveLoading: boolean;
+  clusterActiveError: string | null;
+  refreshClusterActiveAttempt: () => Promise<ActiveAttemptInfo | null>;
 }
 
 export const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -44,6 +52,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Transient diagnostic flags (driven by live attempt event stream)
   const [isRuntimeStale, setIsRuntimeStale] = useState<boolean>(false);
   const [hasEventHistoryGap, setHasEventHistoryGap] = useState<boolean>(false);
+
+  // Cluster-wide Active Attempt
+  const [clusterActiveAttempt, setClusterActiveAttempt] = useState<ActiveAttemptInfo | null>(null);
+  const [isClusterActiveLoading, setIsClusterActiveLoading] = useState<boolean>(true);
+  const [clusterActiveError, setClusterActiveError] = useState<string | null>(null);
+  const latestActiveRef = useRef<ActiveAttemptInfo | null>(null);
+  const inFlightRef = useRef(false);
+
+  const refreshClusterActiveAttempt = useCallback(async (): Promise<ActiveAttemptInfo | null> => {
+    if (inFlightRef.current) return latestActiveRef.current;
+    inFlightRef.current = true;
+    try {
+      const res = await attemptsService.getActiveAttempt();
+      const active = res.data ?? null;
+      latestActiveRef.current = active;
+      setClusterActiveAttempt(active);
+      setClusterActiveError(null);
+      setIsClusterActiveLoading(false);
+      return active;
+    } catch (err: any) {
+      setClusterActiveError(err?.message || 'Failed to check cluster status');
+      setIsClusterActiveLoading(false);
+      return null;
+    } finally {
+      inFlightRef.current = false;
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshClusterActiveAttempt();
+    const intervalId = setInterval(() => {
+      refreshClusterActiveAttempt();
+    }, 4000);
+    return () => clearInterval(intervalId);
+  }, [refreshClusterActiveAttempt]);
 
   return (
     <AppContext.Provider
@@ -64,6 +107,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setIsRuntimeStale,
         hasEventHistoryGap,
         setHasEventHistoryGap,
+        clusterActiveAttempt,
+        isClusterActiveLoading,
+        clusterActiveError,
+        refreshClusterActiveAttempt,
       }}
     >
       {children}
