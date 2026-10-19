@@ -202,6 +202,12 @@ export const LiveTrainingPage: React.FC = () => {
   const isAbortable = attempt ? isAbortableAttemptState(attempt.state) : false;
   const isAborting = attempt ? isAttemptAborting(attempt.attempt_id) : false;
 
+  useEffect(() => {
+    if (attempt?.attempt_id && isTerminalAttemptState(attempt.state)) {
+      unmarkAttemptAborting(attempt.attempt_id);
+    }
+  }, [attempt?.attempt_id, attempt?.state, unmarkAttemptAborting]);
+
   const handleConfirmAbort = async () => {
     if (!attempt?.attempt_id) return;
     const attemptId = attempt.attempt_id;

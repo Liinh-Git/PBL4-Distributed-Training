@@ -98,14 +98,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setClusterActiveError(null);
       setIsClusterActiveLoading(false);
 
-      // Clean up aborting state for attempts that are confirmed terminal or no longer active
+      // Clean up aborting state only for attempts that are authoritatively confirmed terminal.
+      // Invariant: Do not clear abortingAttemptIds merely because cluster is idle (!active)
+      // without authoritative confirmation of termination.
       setAbortingAttemptIds(prev => {
         if (prev.length === 0) return prev;
-        if (!active) {
-          // No active attempt cluster-wide => any previously active attempt has completed or aborted
-          return [];
+        if (active && isTerminalAttemptState(active.state)) {
+          return prev.filter(id => id !== active.attempt_id);
         }
-        return prev.filter(id => id === active.attempt_id && !isTerminalAttemptState(active.state));
+        return prev;
       });
 
       return active;
