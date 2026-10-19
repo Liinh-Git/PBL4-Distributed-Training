@@ -186,8 +186,9 @@ def update_attempt_state(
         params.append(datetime.now(UTC))
 
     if ended_at is not None:
-        sets.append("ended_at = %s")
-        params.append(ended_at)
+        if current.get("ended_at") is None:
+            sets.append("ended_at = %s")
+            params.append(ended_at)
     elif new_state in TERMINAL_ATTEMPT_STATES and current.get("ended_at") is None:
         sets.append("ended_at = %s")
         params.append(datetime.now(UTC))

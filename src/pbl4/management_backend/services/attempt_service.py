@@ -195,8 +195,15 @@ def _handle_command_outcome(
             }
         }
         with db_module.transaction() as conn:
+            now = datetime.now(UTC)
+            command_repository.update_command_state(
+                conn,
+                command_id=command_id,
+                new_state=cmd_state,
+                completed_at=now,
+                result=res,
+            )
             if cleanup_failed_start:
-                now = datetime.now(UTC)
                 attempt_repository.update_attempt_state(
                     conn,
                     target_id,
@@ -204,13 +211,6 @@ def _handle_command_outcome(
                     ended_at=now,
                     failure_code=err_code,
                     failure_message=err_msg,
-                )
-                command_repository.update_command_state(
-                    conn,
-                    command_id=command_id,
-                    new_state=cmd_state,
-                    completed_at=now,
-                    result=res,
                 )
                 AllocationService.cleanup_allocations_for_attempt(
                     conn,
@@ -236,6 +236,14 @@ def _handle_command_outcome(
             raise CommandFailedError(err_msg, command_id=command_id, code=err_code, details=details)
 
     with db_module.transaction() as conn:
+        now = datetime.now(UTC)
+        command_repository.update_command_state(
+            conn,
+            command_id=command_id,
+            new_state=cmd_state,
+            completed_at=now,
+            result=cmd_result.get("result"),
+        )
         idempotency.complete_record(
             conn,
             endpoint_semantic_scope=scope,
