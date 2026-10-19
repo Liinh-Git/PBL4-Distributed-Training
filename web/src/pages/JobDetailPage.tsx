@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   Play,
@@ -14,6 +14,7 @@ import {
   RotateCcw,
   ExternalLink,
   ChevronRight,
+  Square,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { JobStateBadge, AttemptStateBadge } from '../components/common/Badge';
@@ -22,7 +23,13 @@ import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { EditJobModal } from '../components/common/EditJobModal';
 import { EmptyState } from '../components/common/EmptyState';
 import { jobsService, attemptsService, datasetsService, datasetBuildsService } from '../api';
-import { JobDetailData, AttemptListItemData } from '../types/api';
+import {
+  JobDetailData,
+  AttemptListItemData,
+  isActiveAttemptState,
+  isAbortableAttemptState,
+  isTerminalAttemptState,
+} from '../types/api';
 
 const formatModelName = (modelId?: string | null, archName?: string | null): string => {
   if (archName && archName !== 'resnet18' && archName !== 'neural_network') return archName;
@@ -57,11 +64,28 @@ const formatExecutionMode = (mode?: string | null): string => {
   if (mode === 'RESUME') return 'Resumed';
   return mode;
 };
+const ACTIVE_ATTEMPT_STATES: readonly string[] = [
+  'CREATED',
+  'WAITING_WORKERS',
+  'PROVISIONING',
+  'INITIALIZING',
+  'RUNNING',
+  'COMPLETING',
+];
 
 export const JobDetailPage: React.FC = () => {
   const { jobId } = useParams<{ jobId: string }>();
   const navigate = useNavigate();
-  const { setRawContractModalJob } = useApp();
+  const {
+    setRawContractModalJob,
+    clusterActiveAttempt,
+    isClusterActiveLoading,
+    clusterActiveError,
+    refreshClusterActiveAttempt,
+    isAttemptAborting,
+    markAttemptAborting,
+    unmarkAttemptAborting,
+  } = useApp();
 
   const [job, setJob] = useState<JobDetailData | null>(null);
   const [attempts, setAttempts] = useState<AttemptListItemData[]>([]);
@@ -73,6 +97,7 @@ export const JobDetailPage: React.FC = () => {
   const [showArchiveConfirm, setShowArchiveConfirm] = useState(false);
   const [showStartDraftConfirm, setShowStartDraftConfirm] = useState(false);
   const [showTechnicalDetails, setShowTechnicalDetails] = useState(false);
+  const [attemptToAbort, setAttemptToAbort] = useState<AttemptListItemData | null>(null);
   const [datasetInfo, setDatasetInfo] = useState<{
     datasetId: string;
     name: string;
@@ -141,7 +166,13 @@ export const JobDetailPage: React.FC = () => {
       }
 
       if (attemptsRes.status === 'fulfilled') {
-        setAttempts(attemptsRes.value.data || []);
+        const newAttempts = attemptsRes.value.data || [];
+        setAttempts(newAttempts);
+        for (const a of newAttempts) {
+          if (isTerminalAttemptState(a.state)) {
+            unmarkAttemptAborting(a.attempt_id);
+          }
+        }
       }
     } catch (err: any) {
       setError(err?.message || `Job specification "${jobId}" could not be loaded`);
@@ -149,6 +180,48 @@ export const JobDetailPage: React.FC = () => {
       setLoading(false);
     }
   }, [jobId]);
+
+  const isPollingRef = useRef<boolean>(false);
+
+  const refreshDataSilently = useCallback(async () => {
+    if (!jobId || isPollingRef.current) return;
+    try {
+      isPollingRef.current = true;
+      const [jobRes, attemptsRes] = await Promise.allSettled([
+        jobsService.getJob(jobId),
+        attemptsService.listAttempts({ job_id: jobId, limit: 50 }),
+      ]);
+      if (jobRes.status === 'fulfilled' && jobRes.value.data) {
+        setJob(prev => {
+          if (!prev) return jobRes.value.data;
+          if (
+            prev.state !== jobRes.value.data.state ||
+            prev.frozen_at !== jobRes.value.data.frozen_at
+          ) {
+            return { ...prev, ...jobRes.value.data };
+          }
+          return prev;
+        });
+      }
+      if (attemptsRes.status === 'fulfilled' && attemptsRes.value.data) {
+        const newAttempts = attemptsRes.value.data || [];
+        setAttempts(newAttempts);
+        for (const a of newAttempts) {
+          if (isTerminalAttemptState(a.state)) {
+            unmarkAttemptAborting(a.attempt_id);
+          }
+        }
+        const hasActiveLocally = newAttempts.some(a => isActiveAttemptState(a.state));
+        if (!hasActiveLocally) {
+          refreshClusterActiveAttempt();
+        }
+      }
+    } catch {
+      // Silently ignore background polling errors
+    } finally {
+      isPollingRef.current = false;
+    }
+  }, [jobId, refreshClusterActiveAttempt, unmarkAttemptAborting]);
 
   useEffect(() => {
     loadJobData();
@@ -185,10 +258,32 @@ export const JobDetailPage: React.FC = () => {
     try {
       setActionLoading('launch');
       const res = await jobsService.startJob(job.job_id);
-      await loadJobData();
-      navigate('/live');
+      const newAttemptId = res.data?.attempt_id;
+      await refreshClusterActiveAttempt();
+      if (newAttemptId) {
+        navigate(`/live?attempt_id=${encodeURIComponent(newAttemptId)}`);
+      } else {
+        await loadJobData();
+        navigate('/live');
+      }
     } catch (err: any) {
-      alert(`Failed to launch training run: ${err?.message || 'Unknown error'}`);
+      await refreshClusterActiveAttempt();
+      await loadJobData();
+      const isConflict =
+        err?.status === 409 ||
+        err?.code === 'ACTIVE_ATTEMPT_EXISTS' ||
+        err?.isConflict ||
+        err?.message?.includes('ACTIVE_ATTEMPT_EXISTS');
+      if (isConflict) {
+        alert(
+          `Cannot launch training: ${
+            err?.message ||
+            'The cluster is currently busy with another active training attempt. Only one attempt can run globally at a time.'
+          }`
+        );
+      } else {
+        alert(`Failed to launch training run: ${err?.message || 'Unknown error'}`);
+      }
     } finally {
       setActionLoading(null);
     }
@@ -198,11 +293,33 @@ export const JobDetailPage: React.FC = () => {
     if (!job) return;
     try {
       setActionLoading('retry');
-      await jobsService.retryJob(job.job_id, { note: 'Retry from job detail' });
-      await loadJobData();
-      navigate('/live');
+      const res = await jobsService.retryJob(job.job_id, { note: 'Retry from job detail' });
+      const newAttemptId = res.data?.attempt_id;
+      await refreshClusterActiveAttempt();
+      if (newAttemptId) {
+        navigate(`/live?attempt_id=${encodeURIComponent(newAttemptId)}`);
+      } else {
+        await loadJobData();
+        navigate('/live');
+      }
     } catch (err: any) {
-      alert(`Failed to retry training run: ${err?.message || 'Unknown error'}`);
+      await refreshClusterActiveAttempt();
+      await loadJobData();
+      const isConflict =
+        err?.status === 409 ||
+        err?.code === 'ACTIVE_ATTEMPT_EXISTS' ||
+        err?.isConflict ||
+        err?.message?.includes('ACTIVE_ATTEMPT_EXISTS');
+      if (isConflict) {
+        alert(
+          `Cannot retry training: ${
+            err?.message ||
+            'The cluster is currently busy with another active training attempt. Only one attempt can run globally at a time.'
+          }`
+        );
+      } else {
+        alert(`Failed to retry training run: ${err?.message || 'Unknown error'}`);
+      }
     } finally {
       setActionLoading(null);
     }
@@ -235,11 +352,84 @@ export const JobDetailPage: React.FC = () => {
     }
   };
 
+  const handleAbortConfirm = async () => {
+    if (!attemptToAbort) return;
+    const attemptId = attemptToAbort.attempt_id;
+    markAttemptAborting(attemptId);
+    setActionLoading(`abort_${attemptId}`);
+    try {
+      await attemptsService.abortAttempt(attemptId, {
+        reason: 'Operator aborted attempt from job detail',
+      });
+      // HTTP 202 Accepted indicates Runtime accepted the command.
+      setAttemptToAbort(null);
+      await refreshClusterActiveAttempt();
+      await refreshDataSilently();
+    } catch (err: any) {
+      unmarkAttemptAborting(attemptId);
+      const isConflict =
+        err?.status === 409 ||
+        err?.code === 'ATTEMPT_NOT_ABORTABLE' ||
+        err?.code === 'ATTEMPT_ALREADY_TERMINAL' ||
+        err?.message?.includes('409') ||
+        err?.message?.includes('conflict');
+      if (isConflict) {
+        alert(
+          `Cannot abort attempt: ${
+            err?.message ||
+            'Attempt is not in an abortable state or has already ended.'
+          }`
+        );
+      } else {
+        alert(`Failed to abort attempt: ${err?.message || 'Unknown error'}`);
+      }
+      await refreshClusterActiveAttempt();
+      await refreshDataSilently();
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   const req = job.requested_contract;
   const resv = job.resolved_contract;
-  const isRunning = attempts.some(a => a.state === 'RUNNING');
+
+  const localActiveAttempts = attempts.filter(a =>
+    isActiveAttemptState(a.state)
+  );
+  const hasLocalActiveAttempt = localActiveAttempts.length > 0;
+  const hasMultipleActiveAttempts = localActiveAttempts.length > 1;
+
+  // Global cluster active checks
+  const isThisJobActiveGlobally = Boolean(
+    clusterActiveAttempt && clusterActiveAttempt.job_id === job.job_id
+  );
+  const isAnotherJobActive = Boolean(
+    clusterActiveAttempt && clusterActiveAttempt.job_id !== job.job_id
+  );
+
+  const thisJobHasActiveAttempt = hasLocalActiveAttempt || isThisJobActiveGlobally;
+  const hasActiveAttempt = thisJobHasActiveAttempt;
+  const primaryActiveAttemptId =
+    (isThisJobActiveGlobally ? clusterActiveAttempt?.attempt_id : null) ||
+    localActiveAttempts[0]?.attempt_id;
+  const primaryActiveAttemptState =
+    (isThisJobActiveGlobally ? clusterActiveAttempt?.state : null) ||
+    localActiveAttempts[0]?.state;
+
   const latestAttempt = attempts[0];
   const canRetry = latestAttempt && (latestAttempt.state === 'FAILED' || latestAttempt.state === 'ABORTED');
+
+  useEffect(() => {
+    if (!thisJobHasActiveAttempt) return;
+
+    const intervalId = setInterval(() => {
+      refreshDataSilently();
+    }, 3000);
+
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, [thisJobHasActiveAttempt, refreshDataSilently]);
 
   const handleOpenRawContract = () => {
     // Adapter to legacy format for modal view if requested
@@ -296,7 +486,7 @@ export const JobDetailPage: React.FC = () => {
 
         {/* Action hierarchy */}
         <div className="flex items-center gap-2 self-start sm:self-auto">
-          {(job.state === 'DRAFT' || job.state === 'READY') && !isRunning && (
+          {(job.state === 'DRAFT' || job.state === 'READY') && !hasActiveAttempt && (
             <button
               type="button"
               onClick={() => setShowEditModal(true)}
@@ -317,34 +507,144 @@ export const JobDetailPage: React.FC = () => {
             <span>{actionLoading === 'clone' ? 'Cloning...' : 'Clone'}</span>
           </button>
 
-          {canRetry && !isRunning && (
+          {canRetry && !thisJobHasActiveAttempt && (
             <button
               type="button"
-              disabled={actionLoading === 'retry'}
+              disabled={
+                isAnotherJobActive ||
+                isClusterActiveLoading ||
+                Boolean(clusterActiveError) ||
+                actionLoading === 'retry'
+              }
               onClick={handleRetry}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-normal rounded bg-[#171719] hover:bg-[#202024] text-[#f3f3f4] transition-colors border border-white/[0.07] disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-normal rounded bg-[#171719] hover:bg-[#202024] text-[#f3f3f4] transition-colors border border-white/[0.07] disabled:opacity-50 disabled:cursor-not-allowed"
+              title={
+                isAnotherJobActive
+                  ? `Cluster is busy: Job "${clusterActiveAttempt?.job_name || clusterActiveAttempt?.job_id}" currently has an active training attempt.`
+                  : isClusterActiveLoading
+                  ? 'Checking cluster status before retry...'
+                  : clusterActiveError
+                  ? `Cluster status unverified: ${clusterActiveError}`
+                  : undefined
+              }
             >
               <RotateCcw className="w-3.5 h-3.5 text-[#73737c]" />
               <span>{actionLoading === 'retry' ? 'Retrying...' : 'Retry Run'}</span>
             </button>
           )}
 
-          {(job.state === 'READY' || job.state === 'DRAFT') && !isRunning && (
+          {thisJobHasActiveAttempt ? (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (hasMultipleActiveAttempts) {
+                    alert(
+                      `Data anomaly: Multiple active attempts detected (${localActiveAttempts
+                        .map(a => a.attempt_id)
+                        .join(', ')}). Please inspect individual attempts from the table below.`
+                    );
+                    return;
+                  }
+                  if (!primaryActiveAttemptId) {
+                    alert('Data anomaly: Active attempt lacks a valid attempt identifier.');
+                    return;
+                  }
+                  navigate(`/live?attempt_id=${encodeURIComponent(primaryActiveAttemptId)}`);
+                }}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded bg-blue-600 hover:bg-blue-500 text-white transition-colors cursor-pointer"
+                title={
+                  hasMultipleActiveAttempts
+                    ? 'Multiple active attempts detected for this job'
+                    : `Open Live Monitor for active attempt ${primaryActiveAttemptId} (${primaryActiveAttemptState})`
+                }
+              >
+                <Activity className="w-3.5 h-3.5" />
+                <span>View Run</span>
+              </button>
+
+              {primaryActiveAttemptId && isAbortableAttemptState(primaryActiveAttemptState) && (
+                isAttemptAborting(primaryActiveAttemptId) ? (
+                  <button
+                    type="button"
+                    disabled
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-normal rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 cursor-wait"
+                    title="Abort request accepted; waiting for attempt to terminate..."
+                  >
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                    <span>Aborting...</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={actionLoading === `abort_${primaryActiveAttemptId}`}
+                    onClick={() => {
+                      const targetAtt = attempts.find(a => a.attempt_id === primaryActiveAttemptId) || ({
+                        attempt_id: primaryActiveAttemptId,
+                        job_id: job.job_id,
+                        state: primaryActiveAttemptState,
+                        execution_mode: 'FRESH',
+                        created_at: new Date().toISOString(),
+                      } as AttemptListItemData);
+                      setAttemptToAbort(targetAtt);
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-normal rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 transition-colors"
+                    title="Abort active training run"
+                  >
+                    <Square className="w-3.5 h-3.5 fill-rose-400 text-rose-400" />
+                    <span>{actionLoading === `abort_${primaryActiveAttemptId}` ? '...' : 'Abort Run'}</span>
+                  </button>
+                )
+              )}
+            </div>
+          ) : isAnotherJobActive ? (
             <button
               type="button"
-              disabled={actionLoading === 'launch'}
-              onClick={() => {
-                if (job.state === 'DRAFT') {
-                  setShowStartDraftConfirm(true);
-                } else {
-                  handleLaunch();
-                }
-              }}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded bg-blue-600 hover:bg-blue-500 text-white transition-colors disabled:opacity-50"
+              disabled
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded bg-[#171719] text-[#73737c] border border-white/[0.07] cursor-not-allowed opacity-60"
+              title={`Cluster is busy: Job "${clusterActiveAttempt?.job_name || clusterActiveAttempt?.job_id}" currently has an active training attempt.`}
             >
-              <Play className="w-3.5 h-3.5" />
-              <span>{actionLoading === 'launch' ? 'Starting...' : 'Launch Run'}</span>
+              <Play className="w-3.5 h-3.5 opacity-40" />
+              <span>Cluster Busy</span>
             </button>
+          ) : isClusterActiveLoading ? (
+            <button
+              type="button"
+              disabled
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded bg-[#171719] text-[#73737c] border border-white/[0.07] cursor-wait opacity-60"
+              title="Verifying cluster status..."
+            >
+              <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-400" />
+              <span>Checking Cluster...</span>
+            </button>
+          ) : clusterActiveError ? (
+            <button
+              type="button"
+              disabled
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded bg-[#171719] text-rose-300 border border-rose-500/20 cursor-not-allowed opacity-70"
+              title={`Cluster status unverified: ${clusterActiveError}. Launch is disabled until cluster status is confirmed.`}
+            >
+              <AlertCircle className="w-3.5 h-3.5 text-rose-400" />
+              <span>Status Unverified</span>
+            </button>
+          ) : (
+            (job.state === 'READY' || job.state === 'DRAFT') && (
+              <button
+                type="button"
+                disabled={actionLoading === 'launch'}
+                onClick={() => {
+                  if (job.state === 'DRAFT') {
+                    setShowStartDraftConfirm(true);
+                  } else {
+                    handleLaunch();
+                  }
+                }}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded bg-blue-600 hover:bg-blue-500 text-white transition-colors disabled:opacity-50"
+              >
+                <Play className="w-3.5 h-3.5" />
+                <span>{actionLoading === 'launch' ? 'Starting...' : 'Launch Run'}</span>
+              </button>
+            )
           )}
 
           {job.state !== 'ARCHIVED' && (
@@ -360,6 +660,67 @@ export const JobDetailPage: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* Cluster Busy Banner when another job has active attempt */}
+      {isAnotherJobActive && clusterActiveAttempt && (
+        <div className="p-3 bg-amber-500/10 border border-amber-500/25 rounded flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs text-amber-200">
+          <div className="flex items-center gap-2.5">
+            <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
+            <div className="space-y-0.5">
+              <div>
+                <span className="font-semibold text-amber-100">Cluster is busy:</span>{' '}
+                <span>
+                  Job <strong className="text-white">"{clusterActiveAttempt.job_name || clusterActiveAttempt.job_id}"</strong> currently has an active training attempt ({clusterActiveAttempt.attempt_id} · {clusterActiveAttempt.state}).
+                </span>
+              </div>
+              <div className="text-[11px] text-amber-300/80">
+                The cluster allows at most one active attempt across all jobs. Launching a new run is disabled until the active attempt finishes.
+              </div>
+            </div>
+          </div>
+          <Link
+            to={`/live?attempt_id=${encodeURIComponent(clusterActiveAttempt.attempt_id)}`}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 border border-amber-500/30 text-xs font-medium transition-colors shrink-0 self-start sm:self-auto"
+          >
+            <Activity className="w-3.5 h-3.5 text-amber-300" />
+            <span>View Active Run</span>
+            <ExternalLink className="w-3 h-3 text-amber-300/70" />
+          </Link>
+        </div>
+      )}
+
+      {/* Cluster status unverified banner */}
+      {clusterActiveError && !thisJobHasActiveAttempt && (
+        <div className="p-3 bg-rose-500/10 border border-rose-500/20 rounded flex items-center justify-between gap-2 text-xs text-rose-300">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+            <span>Cluster status unverified: {clusterActiveError}. Launch operations are disabled until cluster status is confirmed.</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => refreshClusterActiveAttempt()}
+            className="px-2 py-1 bg-rose-500/20 hover:bg-rose-500/30 rounded text-rose-200 transition-colors shrink-0"
+          >
+            Retry Verification
+          </button>
+        </div>
+      )}
+
+      {/* Anomaly banner if multiple active attempts detected */}
+      {hasMultipleActiveAttempts && (
+        <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded flex items-center gap-2.5 text-xs text-amber-300">
+          <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
+          <div className="space-y-0.5">
+            <div className="font-semibold text-amber-200">
+              Data Anomaly: Multiple active execution attempts detected ({localActiveAttempts.length})
+            </div>
+            <div className="text-[11px] text-amber-300/80">
+              Active attempts: {localActiveAttempts.map(a => `${a.attempt_id} (${a.state})`).join(', ')}.
+              The system invariant allows at most one active attempt per job. Please inspect individual attempts in the history table below.
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Section: Configuration */}
       <div className="space-y-3">
@@ -537,7 +898,7 @@ export const JobDetailPage: React.FC = () => {
                     <tr key={att.attempt_id} className="hover:bg-[#171719] transition-colors">
                       <td className="py-2.5 px-3">
                         <Link
-                          to={`/live?attempt_id=${att.attempt_id}`}
+                          to={`/live?attempt_id=${encodeURIComponent(att.attempt_id)}`}
                           className="font-mono font-medium text-[#f3f3f4] hover:text-blue-400 transition-colors inline-flex items-center gap-1 group/att"
                           title="Open Attempt Live Inspector"
                         >
@@ -546,7 +907,10 @@ export const JobDetailPage: React.FC = () => {
                         </Link>
                       </td>
                       <td className="py-2.5 px-3">
-                        <AttemptStateBadge state={att.state} />
+                        <AttemptStateBadge
+                          state={att.state}
+                          isAborting={isAttemptAborting(att.attempt_id)}
+                        />
                       </td>
                       <td className="py-2.5 px-3 text-[#a1a1a8]">
                         {formatExecutionMode(att.execution_mode)}
@@ -564,23 +928,50 @@ export const JobDetailPage: React.FC = () => {
                         {att.ended_at ? att.ended_at.slice(0, 19).replace('T', ' ') : '—'}
                       </td>
                       <td className="py-2.5 px-3 text-right">
-                        {att.state === 'RUNNING' || att.state === 'COMPLETING' || att.state === 'INITIALIZING' ? (
-                          <Link
-                            to={`/live?attempt_id=${att.attempt_id}`}
-                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 text-xs font-medium transition-colors border border-blue-500/20"
-                          >
-                            <Activity className="w-3 h-3" />
-                            <span>Live Run</span>
-                          </Link>
-                        ) : (
-                          <Link
-                            to={`/live?attempt_id=${att.attempt_id}`}
-                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-[#171719] hover:bg-[#202024] text-[#a1a1a8] hover:text-[#f3f3f4] text-xs transition-colors border border-white/[0.07]"
-                          >
-                            <span>Inspect</span>
-                            <ChevronRight className="w-3 h-3" />
-                          </Link>
-                        )}
+                        <div className="flex items-center justify-end gap-1.5">
+                          {isActiveAttemptState(att.state) ? (
+                            <>
+                              <Link
+                                to={`/live?attempt_id=${encodeURIComponent(att.attempt_id)}`}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 text-xs font-medium transition-colors border border-blue-500/20"
+                              >
+                                <Activity className="w-3 h-3" />
+                                <span>Live Run</span>
+                              </Link>
+
+                              {isAttemptAborting(att.attempt_id) ? (
+                                <button
+                                  type="button"
+                                  disabled
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-xs cursor-wait"
+                                  title="Abort command accepted; waiting for attempt to terminate..."
+                                >
+                                  <RefreshCw className="w-3 h-3 animate-spin text-amber-400" />
+                                  <span>Aborting...</span>
+                                </button>
+                              ) : isAbortableAttemptState(att.state) ? (
+                                <button
+                                  type="button"
+                                  disabled={actionLoading === `abort_${att.attempt_id}`}
+                                  onClick={() => setAttemptToAbort(att)}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 hover:text-rose-200 text-xs transition-colors border border-rose-500/30"
+                                  title="Abort running attempt"
+                                >
+                                  <Square className="w-3 h-3 fill-rose-400 text-rose-400" />
+                                  <span>{actionLoading === `abort_${att.attempt_id}` ? '...' : 'Abort'}</span>
+                                </button>
+                              ) : null}
+                            </>
+                          ) : (
+                            <Link
+                              to={`/live?attempt_id=${encodeURIComponent(att.attempt_id)}`}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-[#171719] hover:bg-[#202024] text-[#a1a1a8] hover:text-[#f3f3f4] text-xs transition-colors border border-white/[0.07]"
+                            >
+                              <span>Inspect</span>
+                              <ChevronRight className="w-3 h-3" />
+                            </Link>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -590,6 +981,27 @@ export const JobDetailPage: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Abort Attempt Confirmation Modal */}
+      <ConfirmationModal
+        isOpen={Boolean(attemptToAbort)}
+        onClose={() => setAttemptToAbort(null)}
+        onConfirm={handleAbortConfirm}
+        isLoading={Boolean(attemptToAbort && actionLoading === `abort_${attemptToAbort.attempt_id}`)}
+        title="Abort Training Attempt"
+        confirmLabel="Abort Attempt"
+        isDestructive={true}
+        message={
+          <div className="space-y-2 text-xs text-[#a1a1a8]">
+            <p>
+              Are you sure you want to abort attempt <span className="font-mono text-[#f3f3f4]">{attemptToAbort?.attempt_id}</span>?
+            </p>
+            <p>
+              The coordinator will signal all participating workers to stop immediately. The attempt will finalize and transition to <span className="text-rose-400 font-mono">ABORTED</span>.
+            </p>
+          </div>
+        }
+      />
 
       {/* Start DRAFT Job Confirmation Modal */}
       <ConfirmationModal

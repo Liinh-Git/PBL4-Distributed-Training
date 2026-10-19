@@ -320,10 +320,11 @@ def test_attempt_state_changed_event_cleans_up_allocations() -> None:
 def test_attempt_state_changed_completed_projection_and_active_states() -> None:
     from pbl4.management_backend.repositories import attempt_repository, job_repository
 
-    # Verify single source of truth and no COMPLETING in active attempt states
-    assert "COMPLETING" not in attempt_repository.ACTIVE_ATTEMPT_STATES
-    assert "COMPLETING" not in job_repository.ACTIVE_ATTEMPT_STATES
+    # Verify single source of truth and defensive COMPLETING in active attempt states
+    assert "COMPLETING" in attempt_repository.ACTIVE_ATTEMPT_STATES
+    assert "COMPLETING" in job_repository.ACTIVE_ATTEMPT_STATES
     assert job_repository.ACTIVE_ATTEMPT_STATES is attempt_repository.ACTIVE_ATTEMPT_STATES
+    assert "COMPLETING" not in attempt_repository.ATTEMPT_STATE_PROGRESSION
 
     occurred_at = "2026-09-11T01:02:03+00:00"
     payload = {
@@ -1142,6 +1143,7 @@ def test_attempt_state_transition_validation() -> None:
     assert is_valid_attempt_transition("PROVISIONING", "INITIALIZING") is True
     assert is_valid_attempt_transition("INITIALIZING", "RUNNING") is True
     assert is_valid_attempt_transition("RUNNING", "COMPLETED") is True
+    assert is_valid_attempt_transition("RUNNING", "COMPLETING") is False
 
     # 4. Backward progression is rejected
     assert is_valid_attempt_transition("RUNNING", "WAITING_WORKERS") is False

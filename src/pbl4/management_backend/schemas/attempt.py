@@ -26,6 +26,16 @@ class AttemptListItem(BaseModel):
     failure_code: str | None = None
 
 
+class ActiveAttemptResponse(BaseModel):
+    attempt_id: str
+    job_id: str
+    job_name: str | None = None
+    state: str
+    execution_mode: str
+    created_at: datetime
+    started_at: datetime | None = None
+
+
 class MembershipInfo(BaseModel):
     active_workers: int
     expected_workers: int

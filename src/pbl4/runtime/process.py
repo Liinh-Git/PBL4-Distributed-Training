@@ -232,7 +232,8 @@ class _AttemptRunner:
         self._server: ParameterServer | None = None
         self._registry: WorkerRegistry | None = None
         self._coordinator: Coordinator | None = None
-        self._events: EventEmitter | None = None
+        self._events: EventEmitter | None = EventEmitter(self.attempt_id, self.job_id)
+        self._terminal_emitted = False
         self._dataset: PinnedDatasetManifest | None = None
         self._step_done = threading.Event()
         self._model_init = threading.Event()
@@ -257,10 +258,21 @@ class _AttemptRunner:
         self._event_thread.start()
 
     def join(self, timeout: float) -> None:
-        self._thread.join(timeout)
+        start_time = time.monotonic()
+        if self._thread._started.is_set():
+            self._thread.join(timeout)
+        elapsed = time.monotonic() - start_time
+        remaining = max(0.0, timeout - elapsed)
+        if self._event_thread._started.is_set():
+            self._event_thread.join(remaining)
 
     def abort(self) -> None:
         self._abort.set()
+        server = self._server
+        if server is not None:
+            server.abort()
+        self._model_init.set()
+        self._step_done.set()
         coordinator = self._coordinator
         if coordinator is not None:
             coordinator.abort()
@@ -271,6 +283,8 @@ class _AttemptRunner:
 
     def _run(self) -> None:
         try:
+            if self._abort.is_set():
+                raise RuntimeError("Attempt aborted")
             contract = self._validate_contract()
             expected_workers = int(contract["synchronization"]["expected_workers"])
             registry = WorkerRegistry(self.attempt_id, expected_workers)
@@ -293,8 +307,12 @@ class _AttemptRunner:
                 heartbeat_timeout_ms=int(self._process._heartbeat_timeout * 1000),
             )
             self._server = server
+            if self._abort.is_set():
+                raise RuntimeError("Attempt aborted")
             server.start()
             self._set_state("WAITING_WORKERS")
+            if self._abort.is_set():
+                raise RuntimeError("Attempt aborted")
 
             dataset_contract = contract["dataset"]
             resolved = self._management.resolve_dataset_build(
@@ -305,6 +323,8 @@ class _AttemptRunner:
                     "expected_dataset_manifest_hash": dataset_contract["dataset_manifest_hash"],
                 }
             )
+            if self._abort.is_set():
+                raise RuntimeError("Attempt aborted")
             artifact_base_url = str(resolved["artifact_base_url"])
             root_manifest_path = derive_root_manifest_path(
                 artifact_base_url,
@@ -317,12 +337,20 @@ class _AttemptRunner:
                 root_manifest_path=root_manifest_path,
             )
             self._dataset = dataset
+            if self._abort.is_set():
+                raise RuntimeError("Attempt aborted")
             if dataset.shard_count != expected_workers:
                 raise ValueError("Pinned Dataset Manifest shard count differs from membership")
             shard_manifests = self._fetch_shard_manifests(dataset)
+            if self._abort.is_set():
+                raise RuntimeError("Attempt aborted")
 
             if not server.wait_for_workers(expected_workers, 180.0):
+                if self._abort.is_set():
+                    raise RuntimeError("Attempt aborted")
                 raise TimeoutError("Timed out waiting for full DTP worker membership")
+            if self._abort.is_set():
+                raise RuntimeError("Attempt aborted")
             self._set_state("PROVISIONING")
             for worker_id in server.worker_ids():
                 server.send_dataset_assignment(
@@ -350,15 +378,27 @@ class _AttemptRunner:
                 600.0,
                 "verified worker shards",
             )
+            if self._abort.is_set():
+                raise RuntimeError("Attempt aborted")
             self._set_state("INITIALIZING")
             if not server.wait_for_manifests(120.0):
+                if self._abort.is_set():
+                    raise RuntimeError("Attempt aborted")
                 raise TimeoutError("Timed out waiting for Parameter Manifests")
+            if self._abort.is_set():
+                raise RuntimeError("Attempt aborted")
             execution_mode = str(self._payload["execution_mode"])
             if execution_mode == "RESUME":
                 initial = np.zeros(self._manifest.total_numel, dtype=np.float32)
             else:
-                if not self._model_init.wait(120.0):
-                    raise TimeoutError("Timed out waiting for worker-0 canonical initialization")
+                deadline = time.monotonic() + 120.0
+                while not self._model_init.wait(0.2):
+                    if self._abort.is_set():
+                        raise RuntimeError("Attempt aborted")
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("Timed out waiting for worker-0 canonical initialization")
+                if self._abort.is_set():
+                    raise RuntimeError("Attempt aborted")
                 transfer = self._model_init_transfer
                 if transfer is None:
                     raise ValueError("Canonical initialization transfer is unavailable")
@@ -413,8 +453,10 @@ class _AttemptRunner:
                 worker_ids=worker_ids,
                 work_units_per_step=work_units_per_step,
             )
-            events = EventEmitter(self.attempt_id, self.job_id)
-            self._events = events
+            events = self._events
+            if events is None:
+                events = EventEmitter(self.attempt_id, self.job_id)
+                self._events = events
             checkpoint_template = CheckpointSnapshot(
                 checkpoint_id="pending",
                 checkpoint_schema_version=int(contract["checkpoint_policy"]["schema_version"]),
@@ -495,6 +537,9 @@ class _AttemptRunner:
                 workload_scheduler=workload_scheduler,
             )
             self._coordinator = coordinator
+            if self._abort.is_set():
+                coordinator.abort()
+                raise RuntimeError("Attempt aborted")
             coordinator.advance_initialization()
             coordinator.advance_initialization()
             coordinator.advance_initialization()
@@ -511,6 +556,9 @@ class _AttemptRunner:
                 120.0,
                 "model-ready workers",
             )
+            if self._abort.is_set():
+                coordinator.abort()
+                raise RuntimeError("Attempt aborted")
             coordinator.advance_initialization()
             self._set_state("RUNNING")
             self._training_loop(coordinator, server)
@@ -530,25 +578,79 @@ class _AttemptRunner:
             )
             time.sleep(1.0)
         except Exception as exc:
-            logger.exception("Attempt %s failed", self.attempt_id)
-            self._failure = str(exc)
+            is_abort = self._abort.is_set() or (
+                isinstance(exc, RuntimeError) and str(exc) == "Attempt aborted"
+            )
+            if is_abort:
+                logger.info("Attempt %s aborted by operator", self.attempt_id)
+                self._failure = "Attempt aborted by operator"
+            else:
+                logger.exception("Attempt %s failed", self.attempt_id)
+                self._failure = str(exc)
+
             coordinator = self._coordinator
-            if coordinator is not None and coordinator.snapshot()["state"] not in {
-                "FAILED",
-                "ABORTED",
-            }:
-                if self._abort.is_set():
-                    coordinator.abort()
-                else:
-                    coordinator.fail(self._failure or "Runtime failure")
-            self._set_state("ABORTED" if self._abort.is_set() else "FAILED")
+            if coordinator is not None:
+                if coordinator.snapshot()["state"] not in {
+                    "FAILED",
+                    "ABORTED",
+                }:
+                    if is_abort:
+                        coordinator.abort()
+                    else:
+                        coordinator.fail(self._failure or "Runtime failure")
+                self._set_state(str(coordinator.snapshot()["state"]))
+            else:
+                with self._state_lock:
+                    previous = self._state
+                    terminal_state = "ABORTED" if is_abort else "FAILED"
+                    self._state = terminal_state
+                if self._events is not None and not self._terminal_emitted:
+                    self._terminal_emitted = True
+                    if is_abort:
+                        self._events.emit(
+                            "attempt.state_changed",
+                            {
+                                "previous_state": previous,
+                                "state": "ABORTED",
+                                "failure_code": "OPERATOR_ABORTED",
+                                "failure_message": "Attempt aborted by operator",
+                            },
+                            _now(),
+                            "runtime",
+                            "INFO",
+                        )
+                    else:
+                        failure_code = (
+                            "WORKER_TIMEOUT"
+                            if isinstance(exc, TimeoutError)
+                            else "STARTUP_FAILED"
+                        )
+                        self._events.emit(
+                            "attempt.state_changed",
+                            {
+                                "previous_state": previous,
+                                "state": "FAILED",
+                                "failure_code": failure_code,
+                                "failure_message": self._failure or "Runtime failure",
+                            },
+                            _now(),
+                            "runtime",
+                            "ERROR",
+                        )
+                        self._events.emit(
+                            "attempt.failed",
+                            {"reason": self._failure or "Runtime failure"},
+                            _now(),
+                            "runtime",
+                            "ERROR",
+                        )
             server = self._server
             if server is not None:
                 self._final_workers = server.worker_snapshots()
                 server.send_stop(
                     attempt_state=self._state,
-                    reason_code="ATTEMPT_FAILED",
-                    reason=self._failure or "Runtime failure",
+                    reason_code="ATTEMPT_ABORTED" if is_abort else "ATTEMPT_FAILED",
+                    reason="Attempt aborted by operator." if is_abort else (self._failure or "Runtime failure"),
                 )
         finally:
             if self._server is not None:
@@ -708,8 +810,13 @@ class _AttemptRunner:
             model_version = 0
             checkpoint_state = None
             latest_checkpoint = None
-            last_seq = 0
-            gap_count = 0
+            if self._events is not None:
+                ev_snap = self._events.snapshot()
+                last_seq = int(ev_snap["last_runtime_event_seq"])
+                gap_count = int(ev_snap["dropped_event_count"])
+            else:
+                last_seq = 0
+                gap_count = 0
         server = self._server
         if self.terminal and self._final_workers:
             raw_workers = self._final_workers
@@ -882,7 +989,8 @@ class _AttemptRunner:
                 raise RuntimeError("Attempt aborted")
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"Timed out waiting for {description}")
-            time.sleep(0.05)
+            if self._abort.wait(0.05):
+                raise RuntimeError("Attempt aborted")
 
 
 def load_parameter_manifest(path: Path) -> ParameterManifest:

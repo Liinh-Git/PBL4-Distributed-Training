@@ -15,6 +15,7 @@ import {
   WifiOff,
 } from 'lucide-react';
 import { useAttemptStream } from '../hooks/useAttemptStream';
+import { useApp } from '../context/AppContext';
 import { attemptsService, workersService, stepsService, systemService, jobsService } from '../api';
 import {
   MetricItemData,
@@ -22,6 +23,8 @@ import {
   StepListItemData,
   CapabilitiesData,
   StepDetailData,
+  isAbortableAttemptState,
+  isTerminalAttemptState,
 } from '../types/api';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { LiveActivityConsole } from '../components/live/LiveActivityConsole';
@@ -79,6 +82,13 @@ export const LiveTrainingPage: React.FC = () => {
 
   // Realtime stream hook
   const stream = useAttemptStream(resolvedAttemptId);
+  const {
+    isAttemptAborting,
+    markAttemptAborting,
+    unmarkAttemptAborting,
+    refreshClusterActiveAttempt,
+  } = useApp();
+  const [abortLoading, setAbortLoading] = useState(false);
 
   // System capabilities (protocol versions, runtime instance, supported models, feature flags)
   const [capabilities, setCapabilities] = useState<CapabilitiesData | null>(null);
@@ -188,18 +198,49 @@ export const LiveTrainingPage: React.FC = () => {
     }
   };
 
-  const TERMINAL_STATES = new Set(['COMPLETED', 'FAILED', 'ABORTED', 'CANCELLED']);
-  const isTerminal = attempt ? TERMINAL_STATES.has(attempt.state) : false;
+  const isTerminal = attempt ? isTerminalAttemptState(attempt.state) : false;
+  const isAbortable = attempt ? isAbortableAttemptState(attempt.state) : false;
+  const isAborting = attempt ? isAttemptAborting(attempt.attempt_id) : false;
+
+  useEffect(() => {
+    if (attempt?.attempt_id && isTerminalAttemptState(attempt.state)) {
+      unmarkAttemptAborting(attempt.attempt_id);
+    }
+  }, [attempt?.attempt_id, attempt?.state, unmarkAttemptAborting]);
 
   const handleConfirmAbort = async () => {
+    if (!attempt?.attempt_id) return;
+    const attemptId = attempt.attempt_id;
+    setAbortLoading(true);
+    markAttemptAborting(attemptId);
     try {
       await stream.abortAttempt('Operator aborted training run');
       setIsAbortModalOpen(false);
-      // Force a REST refresh so UI reflects the new state immediately,
-      // without depending on a WebSocket push (WS closes quickly on CREATED attempts).
+      // HTTP 202 Accepted indicates Runtime accepted the command.
+      // Do not mark ABORTED immediately; refresh snapshot to track active shutdown.
       await stream.refreshSnapshot();
+      await refreshClusterActiveAttempt();
     } catch (err: any) {
-      alert(`Failed to abort attempt: ${err?.message || 'Unknown error'}`);
+      unmarkAttemptAborting(attemptId);
+      const isConflict =
+        err?.status === 409 ||
+        err?.code === 'ATTEMPT_NOT_ABORTABLE' ||
+        err?.code === 'ATTEMPT_ALREADY_TERMINAL' ||
+        err?.message?.includes('409') ||
+        err?.message?.includes('conflict');
+      if (isConflict) {
+        alert(
+          `Cannot abort run: ${
+            err?.message ||
+            'Attempt is not in an abortable state or has already ended.'
+          }`
+        );
+      } else {
+        alert(`Failed to abort attempt: ${err?.message || 'Unknown error'}`);
+      }
+      await refreshClusterActiveAttempt();
+    } finally {
+      setAbortLoading(false);
     }
   };
 
@@ -407,6 +448,19 @@ export const LiveTrainingPage: React.FC = () => {
         </div>
       )}
 
+      {/* Aborting In-Flight Notification Banner */}
+      {isAborting && (
+        <div className="p-3 bg-amber-500/10 border border-amber-500/25 rounded flex items-center justify-between gap-2 text-xs text-amber-200">
+          <div className="flex items-center gap-2">
+            <RefreshCw className="w-4 h-4 text-amber-400 animate-spin shrink-0" />
+            <span>
+              Abort command accepted by coordinator. Finalizing worker sessions and awaiting terminal state confirmation...
+            </span>
+          </div>
+          <span className="font-mono text-[11px] text-amber-300/80">Pending Finalization</span>
+        </div>
+      )}
+
       {/* Page Header */}
       <div className="space-y-2 pb-3 border-b border-white/[0.07]">
         <div className="flex items-center justify-between">
@@ -459,7 +513,7 @@ export const LiveTrainingPage: React.FC = () => {
               <h1 className="text-base font-semibold text-[#f3f3f4]">
                 {jobDisplayName || attempt.job_id}
               </h1>
-              <AttemptStateBadge state={attempt.state} />
+              <AttemptStateBadge state={attempt.state} isAborting={isAborting} />
             </div>
 
             {(() => {
@@ -560,15 +614,31 @@ export const LiveTrainingPage: React.FC = () => {
                   <div className="h-px bg-white/[0.07] my-1" />
                   <button
                     type="button"
-                    disabled={isTerminal}
+                    disabled={!isAbortable || isAborting}
                     onClick={() => {
                       setIsOverflowOpen(false);
                       setIsAbortModalOpen(true);
                     }}
                     className="w-full text-left px-3 py-1.5 text-rose-400 hover:bg-rose-500/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
-                    title={isTerminal ? `Attempt already ${attempt?.state}` : 'Abort this training run'}
+                    title={
+                      isAborting
+                        ? 'Abort in progress...'
+                        : isTerminal
+                        ? `Attempt already ${attempt?.state?.toLowerCase()}`
+                        : attempt?.state === 'COMPLETING'
+                        ? 'Attempt is completing and cannot be aborted'
+                        : !isAbortable
+                        ? `Cannot abort attempt in ${attempt?.state}`
+                        : 'Abort this training run'
+                    }
                   >
-                    {isTerminal ? `Already ${attempt?.state?.toLowerCase()}` : 'Abort training'}
+                    {isAborting
+                      ? 'Aborting run...'
+                      : isTerminal
+                      ? `Already ${attempt?.state?.toLowerCase()}`
+                      : attempt?.state === 'COMPLETING'
+                      ? 'Completing (cannot abort)'
+                      : 'Abort training'}
                   </button>
                 </div>
               )}
@@ -1095,8 +1165,9 @@ export const LiveTrainingPage: React.FC = () => {
         message="Are you sure you want to abort this training attempt? The coordinator will signal all participating workers to halt gradient computations immediately."
         confirmLabel="Abort Run"
         isDestructive={true}
+        isLoading={abortLoading}
         onConfirm={handleConfirmAbort}
-        onCancel={() => setIsAbortModalOpen(false)}
+        onClose={() => setIsAbortModalOpen(false)}
       />
 
       {/* Drawers */}

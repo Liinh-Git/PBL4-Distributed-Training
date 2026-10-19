@@ -15,9 +15,55 @@ export type AttemptState =
   | 'PROVISIONING'
   | 'INITIALIZING'
   | 'RUNNING'
+  | 'COMPLETING'
   | 'COMPLETED'
   | 'FAILED'
   | 'ABORTED';
+
+export const ACTIVE_ATTEMPT_STATES: readonly AttemptState[] = [
+  'CREATED',
+  'WAITING_WORKERS',
+  'PROVISIONING',
+  'INITIALIZING',
+  'RUNNING',
+  'COMPLETING',
+] as const;
+
+export function isActiveAttemptState(state: AttemptState | string | undefined | null): boolean {
+  return ACTIVE_ATTEMPT_STATES.includes(state as AttemptState);
+}
+
+export const ABORTABLE_ATTEMPT_STATES: readonly AttemptState[] = [
+  'CREATED',
+  'WAITING_WORKERS',
+  'PROVISIONING',
+  'INITIALIZING',
+  'RUNNING',
+] as const;
+
+export function isAbortableAttemptState(state: AttemptState | string | undefined | null): boolean {
+  return ABORTABLE_ATTEMPT_STATES.includes(state as AttemptState);
+}
+
+export const TERMINAL_ATTEMPT_STATES: readonly AttemptState[] = [
+  'COMPLETED',
+  'FAILED',
+  'ABORTED',
+] as const;
+
+export function isTerminalAttemptState(state: AttemptState | string | undefined | null): boolean {
+  return TERMINAL_ATTEMPT_STATES.includes(state as AttemptState);
+}
+
+export interface ActiveAttemptInfo {
+  attempt_id: string;
+  job_id: string;
+  job_name?: string | null;
+  state: AttemptState;
+  execution_mode: string;
+  created_at: string;
+  started_at?: string | null;
+}
 
 export type ExecutionMode = 'FRESH' | 'RETRY_FROM_START' | 'RESUME';
 

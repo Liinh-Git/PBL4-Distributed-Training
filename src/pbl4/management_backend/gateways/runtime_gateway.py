@@ -864,6 +864,23 @@ class RuntimeGateway:
         from pbl4.management_backend.repositories import attempt_repository
         from pbl4.management_backend.services import allocation_service
 
+        if hasattr(conn, "cursor"):
+            try:
+                current = attempt_repository.get_attempt(conn, attempt_id)
+                if current is None:
+                    return None
+                current_state = current.get("state")
+                if current_state in attempt_repository.TERMINAL_ATTEMPT_STATES:
+                    logger.info(
+                        "Attempt %s is already in terminal state '%s'; ignoring duplicate transition to '%s'",
+                        attempt_id,
+                        current_state,
+                        new_state,
+                    )
+                    return current
+            except Exception:
+                pass
+
         updated = attempt_repository.update_attempt_state(
             conn,
             attempt_id,

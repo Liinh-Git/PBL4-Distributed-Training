@@ -195,8 +195,15 @@ def _handle_command_outcome(
             }
         }
         with db_module.transaction() as conn:
+            now = datetime.now(UTC)
+            command_repository.update_command_state(
+                conn,
+                command_id=command_id,
+                new_state=cmd_state,
+                completed_at=now,
+                result=res,
+            )
             if cleanup_failed_start:
-                now = datetime.now(UTC)
                 attempt_repository.update_attempt_state(
                     conn,
                     target_id,
@@ -204,13 +211,6 @@ def _handle_command_outcome(
                     ended_at=now,
                     failure_code=err_code,
                     failure_message=err_msg,
-                )
-                command_repository.update_command_state(
-                    conn,
-                    command_id=command_id,
-                    new_state=cmd_state,
-                    completed_at=now,
-                    result=res,
                 )
                 AllocationService.cleanup_allocations_for_attempt(
                     conn,
@@ -236,6 +236,14 @@ def _handle_command_outcome(
             raise CommandFailedError(err_msg, command_id=command_id, code=err_code, details=details)
 
     with db_module.transaction() as conn:
+        now = datetime.now(UTC)
+        command_repository.update_command_state(
+            conn,
+            command_id=command_id,
+            new_state=cmd_state,
+            completed_at=now,
+            result=cmd_result.get("result"),
+        )
         idempotency.complete_record(
             conn,
             endpoint_semantic_scope=scope,
@@ -346,6 +354,15 @@ def _preflight_job_and_select_placements(
     )
 
 
+def _is_active_attempt_conflict(exc: psycopg.errors.UniqueViolation) -> bool:
+    """Determine if a UniqueViolation was caused by the global single-active attempt constraint."""
+    diag = getattr(exc, "diag", None)
+    constraint = getattr(diag, "constraint_name", None)
+    if constraint:
+        return constraint == "uq_attempts__one_active"
+    return "uq_attempts__one_active" in str(exc)
+
+
 def start_job(
     conn: psycopg.Connection,
     job_id: str,
@@ -424,9 +441,11 @@ def start_job(
                 requested_at=now,
             )
     except psycopg.errors.UniqueViolation as exc:
-        raise AttemptConflictError(
-            f"Active attempt already running for job '{job_id}' (V1: only one active at a time)."
-        ) from exc
+        if _is_active_attempt_conflict(exc):
+            raise AttemptConflictError(
+                f"Active attempt already running for job '{job_id}' (V1: only one active at a time)."
+            ) from exc
+        raise
 
     logger.info("Attempt created: %s (job=%s, cmd=%s)", attempt_id, job_id, command_id)
     return attempt_row, cmd_row
@@ -493,9 +512,11 @@ def retry_job(conn: psycopg.Connection, job_id: str) -> tuple[dict, dict]:
                 requested_at=now,
             )
     except psycopg.errors.UniqueViolation as exc:
-        raise AttemptConflictError(
-            f"Active attempt already running for job '{job_id}' (V1: only one active at a time)."
-        ) from exc
+        if _is_active_attempt_conflict(exc):
+            raise AttemptConflictError(
+                f"Active attempt already running for job '{job_id}' (V1: only one active at a time)."
+            ) from exc
+        raise
 
     logger.info("Retry attempt created: %s (job=%s)", attempt_id, job_id)
     return attempt_row, cmd_row
@@ -606,15 +627,28 @@ def resume_job(conn: psycopg.Connection, job_id: str, checkpoint_id: str) -> tup
                 requested_at=now,
             )
     except psycopg.errors.UniqueViolation as exc:
-        raise AttemptConflictError(
-            f"Active attempt already running for job '{job_id}' (V1: only one active at a time)."
-        ) from exc
+        if _is_active_attempt_conflict(exc):
+            raise AttemptConflictError(
+                f"Active attempt already running for job '{job_id}' (V1: only one active at a time)."
+            ) from exc
+        raise
 
     logger.info("Resume attempt created: %s (job=%s, ckpt=%s)", attempt_id, job_id, checkpoint_id)
     return attempt_row, cmd_row
 
 
 # ─── Query ───────────────────────────────────────────────────────────────────
+
+
+def get_global_active_attempt(conn: psycopg.Connection) -> dict | None:
+    """Return the global active attempt joined with job display_name, or None."""
+    active = attempt_repository.get_active_attempt(conn)
+    if active is None:
+        return None
+    job = job_repository.get_job(conn, active["job_id"])
+    active_copy = dict(active)
+    active_copy["job_name"] = job.get("display_name") if job else None
+    return active_copy
 
 
 def get_attempt(conn: psycopg.Connection, attempt_id: str) -> dict:

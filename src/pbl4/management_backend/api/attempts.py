@@ -24,6 +24,7 @@ from pbl4.management_backend import db
 from pbl4.management_backend.schemas.attempt import (
     AbortAttemptRequest,
     AbortAttemptResponse,
+    ActiveAttemptResponse,
     AttemptDetail,
     AttemptLinks,
     AttemptListItem,
@@ -116,6 +117,31 @@ def list_attempts(
         last = rows[limit - 1]
         next_cursor = attempt_service.encode_cursor(last["created_at"], last["attempt_id"])
     return ListResponse(data=items, page=PageInfo(next_cursor=next_cursor))
+
+
+@router.get(
+    "/api/v1/attempts/active",
+    response_model=ItemResponse[ActiveAttemptResponse | None],
+    status_code=status.HTTP_200_OK,
+    summary="Get global active attempt",
+)
+def get_active_attempt():
+    """Return the currently active attempt across the cluster, or null if idle."""
+    with db.get_connection() as conn:
+        row = attempt_service.get_global_active_attempt(conn)
+    if not row:
+        return ItemResponse(data=None)
+    return ItemResponse(
+        data=ActiveAttemptResponse(
+            attempt_id=row["attempt_id"],
+            job_id=row["job_id"],
+            job_name=row.get("job_name"),
+            state=row["state"],
+            execution_mode=row.get("execution_mode", "FRESH"),
+            created_at=row["created_at"],
+            started_at=row.get("started_at"),
+        )
+    )
 
 
 @router.get(

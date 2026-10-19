@@ -100,10 +100,20 @@ export const JobStateBadge: React.FC<{ state: JobState }> = ({ state }) => {
   }
 };
 
-export const AttemptStateBadge: React.FC<{ state: AttemptState; pulse?: boolean }> = ({
-  state,
-  pulse = true,
-}) => {
+export const AttemptStateBadge: React.FC<{
+  state: AttemptState;
+  isAborting?: boolean;
+  pulse?: boolean;
+}> = ({ state, isAborting = false, pulse = true }) => {
+  if (isAborting) {
+    return (
+      <Badge variant="warning">
+        <StatusDot status="warning" pulse />
+        Aborting...
+      </Badge>
+    );
+  }
+
   switch (state) {
     case 'RUNNING':
       return (
