@@ -6,9 +6,19 @@ export type AttemptState =
   | 'PROVISIONING'
   | 'INITIALIZING'
   | 'RUNNING'
+  | 'COMPLETING'
   | 'COMPLETED'
   | 'FAILED'
   | 'ABORTED';
+
+export {
+  ACTIVE_ATTEMPT_STATES,
+  isActiveAttemptState,
+  ABORTABLE_ATTEMPT_STATES,
+  isAbortableAttemptState,
+  TERMINAL_ATTEMPT_STATES,
+  isTerminalAttemptState,
+} from './api';
 
 export type CheckpointState = 'WRITING' | 'COMPLETE' | 'FAILED';
 

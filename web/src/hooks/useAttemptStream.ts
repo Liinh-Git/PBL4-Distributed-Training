@@ -20,6 +20,7 @@ import {
   StepListItemData,
   WorkerSessionItemData,
   WsFrameData,
+  isTerminalAttemptState,
 } from '../types/api';
 
 export type StreamConnectionState =
@@ -117,6 +118,10 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
             ...(snap.strategy_state ? { strategy_state: snap.strategy_state } : {}),
           };
         });
+        if (snap.state && isTerminalAttemptState(snap.state)) {
+          appContext?.unmarkAttemptAborting(attemptId);
+          appContext?.refreshClusterActiveAttempt();
+        }
       }
 
       if (workersRes.status === 'fulfilled') {
@@ -298,11 +303,14 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
               return [newEventItem, ...prev];
             });
 
-            // Reactively update attempt state on critical events
             if (frame.payload.event_type === 'attempt.state_changed') {
               const nextState = frame.payload.details?.state as AttemptState;
               if (nextState) {
                 setAttempt(prev => (prev ? { ...prev, state: nextState } : prev));
+                if (isTerminalAttemptState(nextState)) {
+                  appContext?.unmarkAttemptAborting(frame.attempt_id || attemptId);
+                  appContext?.refreshClusterActiveAttempt();
+                }
               }
             } else if (frame.payload.event_type === 'model.updated') {
               const newModelVer = frame.payload.details?.output_model_version;
@@ -334,9 +342,14 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
                 ...snapPayload.state,
               }));
               if (snapPayload.state.state) {
+                const nextState = snapPayload.state.state;
                 setAttempt(prev =>
-                  prev ? { ...prev, state: snapPayload.state.state } : prev
+                  prev ? { ...prev, state: nextState } : prev
                 );
+                if (isTerminalAttemptState(nextState)) {
+                  appContext?.unmarkAttemptAborting(attemptId);
+                  appContext?.refreshClusterActiveAttempt();
+                }
               }
               if (typeof snapPayload.state.stale === 'boolean') {
                 setIsStale(snapPayload.state.stale);
@@ -453,7 +466,13 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
    */
   const abortAttemptAction = async (reason = 'Operator aborted attempt') => {
     if (!attemptId) return;
-    await attemptsService.abortAttempt(attemptId, { reason });
+    appContext?.markAttemptAborting(attemptId);
+    try {
+      await attemptsService.abortAttempt(attemptId, { reason });
+    } catch (err: any) {
+      appContext?.unmarkAttemptAborting(attemptId);
+      throw err;
+    }
   };
 
   return {

@@ -7,7 +7,7 @@ import {
   DiagnosticEvent,
   WorkerSession,
 } from '../types';
-import { ActiveAttemptInfo } from '../types/api';
+import { ActiveAttemptInfo, isTerminalAttemptState } from '../types/api';
 import { attemptsService } from '../api';
 
 export interface AppContextType {
@@ -36,6 +36,12 @@ export interface AppContextType {
   isClusterActiveLoading: boolean;
   clusterActiveError: string | null;
   refreshClusterActiveAttempt: () => Promise<ActiveAttemptInfo | null>;
+
+  // Abort In-Flight Tracking
+  abortingAttemptIds: string[];
+  markAttemptAborting: (attemptId: string) => void;
+  unmarkAttemptAborting: (attemptId: string) => void;
+  isAttemptAborting: (attemptId?: string | null) => boolean;
 }
 
 export const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -60,6 +66,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const latestActiveRef = useRef<ActiveAttemptInfo | null>(null);
   const inFlightRef = useRef(false);
 
+  // Cross-page In-Flight Abort Tracking
+  const [abortingAttemptIds, setAbortingAttemptIds] = useState<string[]>([]);
+
+  const markAttemptAborting = useCallback((attemptId: string) => {
+    if (!attemptId) return;
+    setAbortingAttemptIds(prev => (prev.includes(attemptId) ? prev : [...prev, attemptId]));
+  }, []);
+
+  const unmarkAttemptAborting = useCallback((attemptId: string) => {
+    if (!attemptId) return;
+    setAbortingAttemptIds(prev => prev.filter(id => id !== attemptId));
+  }, []);
+
+  const isAttemptAborting = useCallback(
+    (attemptId?: string | null) => {
+      if (!attemptId) return false;
+      return abortingAttemptIds.includes(attemptId);
+    },
+    [abortingAttemptIds]
+  );
+
   const refreshClusterActiveAttempt = useCallback(async (): Promise<ActiveAttemptInfo | null> => {
     if (inFlightRef.current) return latestActiveRef.current;
     inFlightRef.current = true;
@@ -70,6 +97,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setClusterActiveAttempt(active);
       setClusterActiveError(null);
       setIsClusterActiveLoading(false);
+
+      // Clean up aborting state for attempts that are confirmed terminal or no longer active
+      setAbortingAttemptIds(prev => {
+        if (prev.length === 0) return prev;
+        if (!active) {
+          // No active attempt cluster-wide => any previously active attempt has completed or aborted
+          return [];
+        }
+        return prev.filter(id => id === active.attempt_id && !isTerminalAttemptState(active.state));
+      });
+
       return active;
     } catch (err: any) {
       setClusterActiveError(err?.message || 'Failed to check cluster status');
@@ -111,6 +149,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isClusterActiveLoading,
         clusterActiveError,
         refreshClusterActiveAttempt,
+        abortingAttemptIds,
+        markAttemptAborting,
+        unmarkAttemptAborting,
+        isAttemptAborting,
       }}
     >
       {children}

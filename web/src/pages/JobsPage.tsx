@@ -20,7 +20,13 @@ import { JobStateBadge, AttemptStateBadge } from '../components/common/Badge';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { EditJobModal } from '../components/common/EditJobModal';
 import { jobsService, attemptsService, datasetsService, datasetBuildsService } from '../api';
-import { JobListItemData, JobState, isActiveAttemptState } from '../types/api';
+import {
+  JobListItemData,
+  JobState,
+  isActiveAttemptState,
+  isAbortableAttemptState,
+  isTerminalAttemptState,
+} from '../types/api';
 
 const formatModelName = (modelId?: string | null): string => {
   if (!modelId) return 'ResNet-18';
@@ -39,6 +45,9 @@ export const JobsPage: React.FC = () => {
     isClusterActiveLoading,
     clusterActiveError,
     refreshClusterActiveAttempt,
+    isAttemptAborting,
+    markAttemptAborting,
+    unmarkAttemptAborting,
   } = useApp();
 
   // API State
@@ -116,9 +125,7 @@ export const JobsPage: React.FC = () => {
     };
   };
 
-  const isAttemptAbortable = (state?: string | null) => {
-    return state === 'RUNNING' || state === 'CREATED' || state === 'INITIALIZING' || state === 'RESUMING';
-  };
+
 
   const fetchJobs = useCallback(async (cursor?: string | null) => {
     try {
@@ -133,14 +140,22 @@ export const JobsPage: React.FC = () => {
       };
 
       const res = await jobsService.listJobs(params);
-      setJobs(res.data || []);
+      const jobsList = res.data || [];
+      setJobs(jobsList);
       setNextCursor(res.page?.next_cursor || null);
+
+      // Clean up aborting state for attempts that have reached a terminal state
+      for (const j of jobsList) {
+        if (j.latest_attempt && isTerminalAttemptState(j.latest_attempt.state)) {
+          unmarkAttemptAborting(j.latest_attempt.attempt_id);
+        }
+      }
     } catch (err: any) {
       setError(err?.message || 'Failed to load training jobs');
     } finally {
       setLoading(false);
     }
-  }, [stateFilter, searchQuery]);
+  }, [stateFilter, searchQuery, unmarkAttemptAborting]);
 
   useEffect(() => {
     setCursorHistory([]);
@@ -225,16 +240,38 @@ export const JobsPage: React.FC = () => {
 
   const handleAbortConfirm = async () => {
     if (!attemptToAbort) return;
+    const attemptId = attemptToAbort.attemptId;
+    markAttemptAborting(attemptId);
+    setActionLoading(`abort_${attemptId}`);
     try {
-      setActionLoading(`abort_${attemptToAbort.attemptId}`);
-      await attemptsService.abortAttempt(attemptToAbort.attemptId, {
+      await attemptsService.abortAttempt(attemptId, {
         reason: 'Operator aborted attempt from jobs dashboard',
       });
+      // HTTP 202 Accepted means the abort request was accepted by Runtime.
+      // Do NOT set ABORTED state immediately; the attempt is shutting down.
       setAttemptToAbort(null);
       await refreshClusterActiveAttempt();
       await fetchJobs();
     } catch (err: any) {
-      alert(`Failed to abort attempt: ${err?.message || 'Unknown error'}`);
+      unmarkAttemptAborting(attemptId);
+      const isConflict =
+        err?.status === 409 ||
+        err?.code === 'ATTEMPT_NOT_ABORTABLE' ||
+        err?.code === 'ATTEMPT_ALREADY_TERMINAL' ||
+        err?.message?.includes('409') ||
+        err?.message?.includes('conflict');
+      if (isConflict) {
+        alert(
+          `Cannot abort attempt: ${
+            err?.message ||
+            'Attempt is not in an abortable state or has already ended.'
+          }`
+        );
+      } else {
+        alert(`Failed to abort attempt: ${err?.message || 'Unknown error'}`);
+      }
+      await refreshClusterActiveAttempt();
+      await fetchJobs();
     } finally {
       setActionLoading(null);
     }
@@ -463,7 +500,10 @@ export const JobsPage: React.FC = () => {
                           title="Inspect live training attempt"
                           className="hover:opacity-85 transition-opacity inline-flex items-center"
                         >
-                          <AttemptStateBadge state={job.latest_attempt.state} />
+                          <AttemptStateBadge
+                            state={job.latest_attempt.state}
+                            isAborting={isAttemptAborting(job.latest_attempt.attempt_id)}
+                          />
                         </Link>
                       ) : (
                         <span className="text-[#73737c]">None</span>
@@ -490,7 +530,21 @@ export const JobsPage: React.FC = () => {
                               ? clusterActiveAttempt.attempt_id
                               : null) || job.latest_attempt?.attempt_id;
 
-                          if (job.latest_attempt && isAttemptAbortable(job.latest_attempt.state)) {
+                          if (job.latest_attempt && isAttemptAborting(job.latest_attempt.attempt_id)) {
+                            return (
+                              <button
+                                type="button"
+                                disabled
+                                className="inline-flex items-center justify-center gap-1 w-20 py-1 text-xs rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 cursor-wait shrink-0"
+                                title="Abort request accepted; waiting for attempt to terminate..."
+                              >
+                                <RefreshCw className="w-3 h-3 animate-spin text-amber-400" />
+                                <span>Aborting...</span>
+                              </button>
+                            );
+                          }
+
+                          if (job.latest_attempt && isAbortableAttemptState(job.latest_attempt.state)) {
                             return (
                               <button
                                 type="button"
@@ -729,6 +783,7 @@ export const JobsPage: React.FC = () => {
         isOpen={!!attemptToAbort}
         onClose={() => setAttemptToAbort(null)}
         onConfirm={handleAbortConfirm}
+        isLoading={Boolean(attemptToAbort && actionLoading === `abort_${attemptToAbort.attemptId}`)}
         title="Abort Training Attempt"
         confirmLabel="Abort Attempt"
         isDestructive={true}
@@ -738,7 +793,7 @@ export const JobsPage: React.FC = () => {
               Are you sure you want to abort the active training attempt for job <strong className="text-[#f3f3f4]">{attemptToAbort?.displayName}</strong>?
             </p>
             <p>
-              All active worker tasks will be stopped immediately and the attempt will transition to <span className="text-rose-400 font-mono">ABORTED</span>.
+              The coordinator will signal all participating workers to stop immediately. The attempt will finalize and transition to <span className="text-rose-400 font-mono">ABORTED</span>.
             </p>
           </div>
         }
