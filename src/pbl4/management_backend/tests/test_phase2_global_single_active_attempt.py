@@ -172,18 +172,29 @@ def test_active_attempt_states_prevent_start_job(pg_conn, active_state: str):
 
 
 def test_completing_state_lifecycle_transitions():
-    """Verify state machine transitions for COMPLETING state."""
-    assert "COMPLETING" in attempt_repository.ACTIVE_ATTEMPT_STATES
-    assert attempt_repository.ATTEMPT_STATE_PROGRESSION.get("COMPLETING") == 5
+    """Verify state machine transitions regarding legacy COMPLETING state.
 
-    # RUNNING -> COMPLETING is valid
-    assert attempt_repository.is_valid_attempt_transition("RUNNING", "COMPLETING") is True
-    # COMPLETING -> COMPLETED is valid (terminal)
+    COMPLETING is NOT part of ATTEMPT_STATE_PROGRESSION and RUNNING -> COMPLETING is rejected.
+    Active attempts transition directly from RUNNING to COMPLETED (or FAILED/ABORTED).
+    Legacy attempts in COMPLETING in the database can still transition to terminal states.
+    """
+    assert "COMPLETING" in attempt_repository.ACTIVE_ATTEMPT_STATES
+    assert "COMPLETING" not in attempt_repository.ATTEMPT_STATE_PROGRESSION
+    assert attempt_repository.ATTEMPT_STATE_PROGRESSION.get("COMPLETING") is None
+
+    # RUNNING -> COMPLETING is strictly rejected
+    assert attempt_repository.is_valid_attempt_transition("RUNNING", "COMPLETING") is False
+
+    # RUNNING transitions directly to COMPLETED or other terminal states
+    assert attempt_repository.is_valid_attempt_transition("RUNNING", "COMPLETED") is True
+    assert attempt_repository.is_valid_attempt_transition("RUNNING", "FAILED") is True
+    assert attempt_repository.is_valid_attempt_transition("RUNNING", "ABORTED") is True
+
+    # Legacy rows in COMPLETING can only transition to terminal states
     assert attempt_repository.is_valid_attempt_transition("COMPLETING", "COMPLETED") is True
-    # COMPLETING -> FAILED is valid (terminal)
     assert attempt_repository.is_valid_attempt_transition("COMPLETING", "FAILED") is True
-    # COMPLETING -> ABORTED is valid (terminal)
     assert attempt_repository.is_valid_attempt_transition("COMPLETING", "ABORTED") is True
+
     # Terminal -> COMPLETING is invalid
     assert attempt_repository.is_valid_attempt_transition("COMPLETED", "COMPLETING") is False
     # Backward transition COMPLETING -> RUNNING is invalid

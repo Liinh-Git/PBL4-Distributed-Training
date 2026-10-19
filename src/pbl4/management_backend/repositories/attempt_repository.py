@@ -12,6 +12,11 @@ from psycopg.rows import dict_row
 
 logger = logging.getLogger(__name__)
 
+# Active attempt states.
+# NOTE: 'COMPLETING' is retained defensively to remain compatible with legacy database
+# schema constraints (ck_attempts__state and uq_attempts__one_active in migration 0001).
+# It is NOT a standard attempt lifecycle state in runtime training and MUST NOT be part
+# of ATTEMPT_STATE_PROGRESSION.
 ACTIVE_ATTEMPT_STATES = {
     "CREATED",
     "WAITING_WORKERS",
@@ -35,7 +40,6 @@ ATTEMPT_STATE_PROGRESSION: dict[str, int] = {
     "PROVISIONING": 2,
     "INITIALIZING": 3,
     "RUNNING": 4,
-    "COMPLETING": 5,
 }
 
 
@@ -213,7 +217,11 @@ def update_attempt_state(
 
 
 def get_active_attempt(conn: psycopg.Connection) -> dict | None:
-    """Return the single active attempt if one exists, else None."""
+    """Return the single active attempt if one exists, else None.
+
+    NOTE: 'COMPLETING' is included defensively to align with the uq_attempts__one_active
+    partial unique index in migration 0001 until a schema migration cleans it up.
+    """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """

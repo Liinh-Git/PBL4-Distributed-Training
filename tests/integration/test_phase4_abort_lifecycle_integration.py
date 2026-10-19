@@ -498,7 +498,10 @@ def test_5_abort_rejected_in_completing(pg_conn):
         execution_mode="FRESH",
         created_at=datetime.now(UTC),
     )
-    attempt_repository.update_attempt_state(pg_conn, attempt_id, "COMPLETING")
+    # Simulate legacy row in database directly without state machine transition
+    with pg_conn.cursor() as cur:
+        cur.execute("UPDATE attempts SET state = 'COMPLETING' WHERE attempt_id = %s", (attempt_id,))
+    pg_conn.commit()
 
     with pytest.raises(AttemptNotAbortableError) as exc_info:
         attempt_service.abort_attempt(pg_conn, attempt_id=attempt_id, reason="Should fail")
