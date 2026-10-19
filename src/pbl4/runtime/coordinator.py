@@ -96,10 +96,20 @@ class Coordinator:
     def _event(self, event_type: str, details: dict[str, object], severity: str = "INFO") -> None:
         self._events.emit(event_type, details, _now(), "coordinator", severity)
 
-    def _transition(self, state: str) -> None:
+    def _transition(
+        self,
+        state: str,
+        failure_code: str | None = None,
+        failure_message: str | None = None,
+    ) -> None:
         previous = self._state
         self._state = state
-        self._event("attempt.state_changed", {"previous_state": previous, "state": state})
+        details: dict[str, object] = {"previous_state": previous, "state": state}
+        if failure_code is not None:
+            details["failure_code"] = failure_code
+        if failure_message is not None:
+            details["failure_message"] = failure_message
+        self._event("attempt.state_changed", details)
 
     def advance_initialization(self) -> str:
         """Advance only the next startup phase whose observed prerequisites hold."""
@@ -398,7 +408,11 @@ class Coordinator:
         self._policy.cleanup()
         if self._operation:
             self._store.discard(self._context.attempt_id, self._operation.operation_id)
-        self._transition("FAILED")
+        self._transition(
+            "FAILED",
+            failure_code="RUNTIME_FAILURE",
+            failure_message=reason,
+        )
         self._event("attempt.failed", {"reason": reason}, "ERROR")
 
     def worker_failed(self, worker_id: int, session_id: int) -> None:
@@ -423,7 +437,11 @@ class Coordinator:
             self._policy.cleanup()
             if self._operation:
                 self._store.discard(self._context.attempt_id, self._operation.operation_id)
-            self._transition("ABORTED")
+            self._transition(
+                "ABORTED",
+                failure_code="OPERATOR_ABORTED",
+                failure_message="Attempt aborted by operator",
+            )
 
     def heartbeat(self, worker_id: int, session_id: int, now: float) -> None:
         with self._lock:

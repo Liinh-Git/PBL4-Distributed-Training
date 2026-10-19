@@ -152,6 +152,7 @@ class ParameterServer:
         self._manifest_workers: set[int] = set()
         self._next_session_id = 1
         self._membership_changed = threading.Condition(self._lock)
+        self._aborted = False
 
     @property
     def bound_address(self) -> tuple[str, int] | None:
@@ -163,15 +164,27 @@ class ParameterServer:
     def stop(self) -> None:
         self._server.stop()
 
+    def abort(self) -> None:
+        """Abort pending worker/manifest waits, stop connected workers, and reject new admissions."""
+        with self._membership_changed:
+            self._aborted = True
+            self._membership_changed.notify_all()
+        with contextlib.suppress(Exception):
+            self.send_stop(
+                attempt_state="ABORTED",
+                reason_code="ATTEMPT_ABORTED",
+                reason="Attempt aborted by operator.",
+            )
+
     def wait_for_workers(self, count: int, timeout: float) -> bool:
         deadline = time.monotonic() + timeout
         with self._membership_changed:
-            while len(self._connections) < count:
+            while len(self._connections) < count and not self._aborted:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return False
                 self._membership_changed.wait(remaining)
-            return True
+            return len(self._connections) >= count and not self._aborted
 
     def worker_ids(self) -> tuple[int, ...]:
         with self._lock:
@@ -221,12 +234,12 @@ class ParameterServer:
     def wait_for_manifests(self, timeout: float) -> bool:
         deadline = time.monotonic() + timeout
         with self._membership_changed:
-            while len(self._manifest_workers) < self.expected_workers:
+            while len(self._manifest_workers) < self.expected_workers and not self._aborted:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return False
                 self._membership_changed.wait(remaining)
-            return True
+            return len(self._manifest_workers) >= self.expected_workers and not self._aborted
 
     def _serve_connection(self, sock: socket.socket, _address: tuple[str, int]) -> None:
         connection: _Connection | None = None
@@ -283,6 +296,14 @@ class ParameterServer:
 
             duplicate_admission = False
             with self._membership_changed:
+                if self._aborted:
+                    self._send_admission_error(
+                        sock,
+                        ERROR_CODE_WORKER_ADMISSION_INVALID,
+                        "Attempt has been aborted",
+                    )
+                    sock.close()
+                    return
                 if is_managed and hello.allocation_id in self._admitted_allocation_ids:
                     duplicate_admission = True
                     registered = None
@@ -303,6 +324,9 @@ class ParameterServer:
                 return
 
             with self._membership_changed:
+                if self._aborted:
+                    sock.close()
+                    return
                 self.registry.transition(
                     registered.worker_id,
                     session_id,
