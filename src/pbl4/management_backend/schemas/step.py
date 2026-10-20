@@ -10,6 +10,11 @@ from datetime import datetime
 from pydantic import BaseModel
 
 
+class StepMetrics(BaseModel):
+    loss: float | None = None
+    accuracy: float | None = None
+
+
 class StepListItem(BaseModel):
     step_id: int
     operation_id: int
@@ -20,6 +25,7 @@ class StepListItem(BaseModel):
     batch_ordinal: int
     total_sample_count: int | None = None
     committed_at: datetime | None = None
+    metrics: StepMetrics | None = None
 
 
 class StepTiming(BaseModel):
@@ -28,11 +34,6 @@ class StepTiming(BaseModel):
     synchronization_completed_at: datetime | None = None
     checkpoint_completed_at: datetime | None = None
     committed_at: datetime | None = None
-
-
-class StepMetrics(BaseModel):
-    loss: float | None = None
-    accuracy: float | None = None
 
 
 class WorkerStepItem(BaseModel):

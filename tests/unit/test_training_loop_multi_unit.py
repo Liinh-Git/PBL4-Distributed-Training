@@ -4,6 +4,7 @@ and FP64 gradient accumulation (Task T4.2).
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -53,7 +54,11 @@ def create_adapter(seed: int = 42) -> PyTorchAdapter:
     from torch.nn import functional
 
     model = build_resnet18_groupnorm(initialization_seed=seed, device="cpu")
-    return PyTorchAdapter(model, functional.cross_entropy, local_gradient_reduction="mean")
+    return PyTorchAdapter(
+        model,
+        functional.cross_entropy,
+        local_gradient_reduction="mean",
+    )
 
 
 def test_single_unit_matches_adapter_direct_call(multi_shard_setup):
@@ -240,3 +245,62 @@ def test_validation_errors(multi_shard_setup):
     )
     with pytest.raises(ValueError, match="wrong local model version"):
         loop.compute(step_wrong_version)
+
+
+def test_multi_unit_sums_correct_count(multi_shard_setup):
+    _, _, dataset_cache = multi_shard_setup
+    adapter = create_adapter(seed=42)
+    loop = TrainingLoop(adapter, dataset_cache, model_version=0)
+
+    u1 = WorkUnitRef(shard_id=0, batch_id=0, sample_count=4)
+    u2 = WorkUnitRef(shard_id=0, batch_id=1, sample_count=4)
+
+    # Compute directly on each unit to obtain individual correct_count
+    adapter_direct = create_adapter(seed=42)
+    x1, y1, _ = dataset_cache.load_work_unit(u1)
+    g1 = adapter_direct.compute_loss_and_gradients(x1, y1)
+    x2, y2, _ = dataset_cache.load_work_unit(u2)
+    g2 = adapter_direct.compute_loss_and_gradients(x2, y2)
+
+    step = StepAssignment(
+        attempt_id="att-1",
+        session_id=1,
+        worker_id=0,
+        operation_id=1,
+        step_id=0,
+        input_model_version=0,
+        batch_ordinal=0,
+        work_units=(u1, u2),
+        expected_sample_count=8,
+    )
+    computed = loop.compute(step)
+    grad = computed.local_gradient
+
+    assert grad.sample_count == 8
+    assert grad.correct_count == g1.correct_count + g2.correct_count
+
+
+def test_multi_unit_missing_count_yields_none(multi_shard_setup, monkeypatch):
+    _, _, dataset_cache = multi_shard_setup
+    adapter = create_adapter(seed=42)
+    compute = adapter.compute_loss_and_gradients
+    monkeypatch.setattr(adapter, "compute_loss_and_gradients",
+                        lambda x, y: replace(compute(x, y), correct_count=None))
+    loop = TrainingLoop(adapter, dataset_cache, model_version=0)
+
+    u1 = WorkUnitRef(shard_id=0, batch_id=0, sample_count=4)
+    u2 = WorkUnitRef(shard_id=0, batch_id=1, sample_count=4)
+
+    step = StepAssignment(
+        attempt_id="att-1",
+        session_id=1,
+        worker_id=0,
+        operation_id=1,
+        step_id=0,
+        input_model_version=0,
+        batch_ordinal=0,
+        work_units=(u1, u2),
+        expected_sample_count=8,
+    )
+    computed = loop.compute(step)
+    assert computed.local_gradient.correct_count is None

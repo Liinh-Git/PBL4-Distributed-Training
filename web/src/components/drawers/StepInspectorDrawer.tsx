@@ -104,10 +104,6 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
   const totalSamples = detail?.total_sample_count ?? step.totalSampleCount ?? 0;
   const trainingStrategy = detail?.training_strategy || step.trainingStrategy || 'strict_bsp';
 
-  // Metrics (Loss & Accuracy)
-  const loss = detail?.metrics?.loss ?? step.loss ?? step.metrics?.loss;
-  const accuracy = detail?.metrics?.accuracy ?? step.accuracy ?? step.metrics?.accuracy;
-
   // Timings
   const timing = detail?.timing;
   const timingsFallback = step.timings;
@@ -170,8 +166,8 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
           </div>
         )}
 
-        {/* Overview & Metrics KPIs */}
-        <div className="p-4 bg-[#171719] rounded-lg border border-white/[0.04] grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-4 text-xs">
+        {/* Overview KPIs */}
+        <div className="p-4 bg-[#171719] rounded-lg border border-white/[0.04] grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
           <div>
             <div className="text-[#73737c]">Step State</div>
             <div className="mt-1.5">
@@ -194,24 +190,6 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
             <div className="text-[#73737c]">Total Samples</div>
             <div className="text-[#f3f3f4] font-semibold mt-1.5">
               {totalSamples != null ? totalSamples.toLocaleString() : '—'}
-            </div>
-          </div>
-          <div>
-            <div className="text-[#73737c] flex items-center gap-1">
-              <TrendingDown className="w-3 h-3 text-amber-400" />
-              <span>Loss</span>
-            </div>
-            <div className="text-amber-400 font-mono font-semibold mt-1.5">
-              {loss !== undefined && loss !== null ? Number(loss).toFixed(4) : '—'}
-            </div>
-          </div>
-          <div>
-            <div className="text-[#73737c] flex items-center gap-1">
-              <TrendingUp className="w-3 h-3 text-emerald-400" />
-              <span>Accuracy</span>
-            </div>
-            <div className="text-emerald-400 font-mono font-semibold mt-1.5">
-              {accuracy !== undefined && accuracy !== null ? `${Number(accuracy).toFixed(2)}%` : '—'}
             </div>
           </div>
         </div>
@@ -320,7 +298,6 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
                   <th className="py-2.5 px-3 font-medium text-right">Training Time</th>
                   <th className="py-2.5 px-3 font-medium text-right">Pushing Time</th>
                   <th className="py-2.5 px-3 font-medium text-right">Apply Time</th>
-                  <th className="py-2.5 px-3 font-medium text-right">Loss / Acc</th>
                   <th className="py-2.5 px-3 font-medium text-right">Network I/O</th>
                   <th className="py-2.5 px-3 font-medium text-right">Gates</th>
                 </tr>
@@ -349,19 +326,6 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
                       </td>
                       <td className="py-2.5 px-3 text-right font-mono text-[#a1a1a8]">
                         {formatMs(ws.parameter_apply_ms)}
-                      </td>
-                      <td className="py-2.5 px-3 text-right font-mono text-[11px]">
-                        {ws.loss !== undefined && ws.loss !== null ? (
-                          <span className="text-amber-300">{Number(ws.loss).toFixed(2)}</span>
-                        ) : (
-                          '—'
-                        )}
-                        {' / '}
-                        {ws.accuracy !== undefined && ws.accuracy !== null ? (
-                          <span className="text-emerald-300">{Number(ws.accuracy).toFixed(1)}%</span>
-                        ) : (
-                          '—'
-                        )}
                       </td>
                       <td className="py-2.5 px-3 text-right font-mono text-[11px] text-[#73737c]">
                         ↑{formatBytes(ws.bytes_sent)} ↓{formatBytes(ws.bytes_received)}
@@ -427,10 +391,6 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
                       <td className="py-2.5 px-3 text-right font-mono text-[#a1a1a8]">
                         {formatMs(w.parameterApplyMs)}
                       </td>
-                      <td className="py-2.5 px-3 text-right font-mono text-[11px]">
-                        {w.loss !== undefined && w.loss !== null ? w.loss.toFixed(2) : '—'} /{' '}
-                        {w.accuracy !== undefined && w.accuracy !== null ? `${w.accuracy.toFixed(1)}%` : '—'}
-                      </td>
                       <td className="py-2.5 px-3 text-right font-mono text-[11px] text-[#73737c]">
                         ↑{formatBytes(w.bytesSent)} ↓{formatBytes(w.bytesReceived)}
                       </td>
@@ -447,12 +407,20 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
                           </span>
                           <span
                             className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-sm ${
-                              w.parameterApplied
+                              w.parameterApplied === true
                                 ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                                : w.parameterApplied === false
+                                ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
                                 : 'bg-zinc-800 text-zinc-400 border border-zinc-700/30'
                             }`}
                           >
-                            <span>{w.parameterApplied ? 'APPLIED' : 'WAITING'}</span>
+                            <span>
+                              {w.parameterApplied === true
+                                ? 'APPLIED'
+                                : w.parameterApplied === false
+                                ? 'WAITING'
+                                : 'UNKNOWN'}
+                            </span>
                           </span>
                         </div>
                       </td>

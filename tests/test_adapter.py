@@ -7,7 +7,7 @@ import pytest
 import torch
 from torch.nn import functional as functional
 
-from pbl4.adapter.base import TensorBundle
+from pbl4.adapter.base import LocalGradient, TensorBundle
 from pbl4.adapter.models.small_cnn import SmallCNN
 from pbl4.adapter.pytorch_adapter import PyTorchAdapter
 from pbl4.common.hashing import sha256_bytes
@@ -279,3 +279,85 @@ def test_d3_weighted_aggregation_equivalence():
 
     for actual, reference in zip(agg, ref_grads, strict=True):
         np.testing.assert_allclose(actual, reference, rtol=1e-4, atol=1e-5)
+
+
+def test_local_gradient_validation():
+    bundle = adapter().export_parameters()
+    # Valid
+    lg_none = LocalGradient(loss=1.0, bundle=bundle, sample_count=4, correct_count=None)
+    assert lg_none.correct_count is None
+    lg_val = LocalGradient(loss=1.0, bundle=bundle, sample_count=4, correct_count=2)
+    assert lg_val.correct_count == 2
+    lg_zero = LocalGradient(loss=1.0, bundle=bundle, sample_count=4, correct_count=0)
+    assert lg_zero.correct_count == 0
+    lg_all = LocalGradient(loss=1.0, bundle=bundle, sample_count=4, correct_count=4)
+    assert lg_all.correct_count == 4
+
+    # Invalid
+    with pytest.raises(ValueError, match="correct_count"):
+        LocalGradient(loss=1.0, bundle=bundle, sample_count=4, correct_count=True)
+    with pytest.raises(ValueError, match="correct_count"):
+        LocalGradient(loss=1.0, bundle=bundle, sample_count=4, correct_count=-1)
+    with pytest.raises(ValueError, match="correct_count"):
+        LocalGradient(loss=1.0, bundle=bundle, sample_count=4, correct_count=5)
+    with pytest.raises(ValueError, match="correct_count"):
+        LocalGradient(loss=1.0, bundle=bundle, sample_count=4, correct_count=2.5)
+
+
+@pytest.mark.parametrize("loss", [F.cross_entropy, lambda x, y: F.cross_entropy(x, y)])
+def test_pytorch_adapter_single_forward_and_numerical_invariance(loss):
+    torch.manual_seed(42)
+    model1 = SmallCNN()
+    torch.manual_seed(42)
+    model2 = SmallCNN()
+
+    model_adapter = PyTorchAdapter(
+        model2,
+        loss,
+        local_gradient_reduction="mean",
+    )
+
+    x, y = batch()
+
+    # Track forward call count
+    forward_calls = 0
+    orig_forward = model2.forward
+
+    def spy_forward(*args, **kwargs):
+        nonlocal forward_calls
+        forward_calls += 1
+        return orig_forward(*args, **kwargs)
+
+    model2.forward = spy_forward
+
+    logits = model1(torch.from_numpy(x))
+    labels = torch.from_numpy(y)
+    ref_loss = F.cross_entropy(logits, labels)
+    ref_loss.backward()
+    result = model_adapter.compute_loss_and_gradients(x, y)
+
+    assert forward_calls == 1, "Must perform exactly one forward pass"
+    assert result.correct_count == int((logits.argmax(dim=1) == labels).sum())
+
+    # Numerical invariance: loss and gradient tensors must be identical
+    assert result.loss == pytest.approx(ref_loss.item(), abs=1e-7)
+    for actual, parameter in zip(result.bundle.tensors, model1.parameters(), strict=True):
+        np.testing.assert_allclose(actual, parameter.grad.numpy(), atol=0, rtol=0)
+
+
+def test_pytorch_adapter_rejects_invalid_labels_before_backward():
+    torch.manual_seed(42)
+    model = SmallCNN()
+    model_adapter = PyTorchAdapter(
+        model,
+        F.cross_entropy,
+        local_gradient_reduction="mean",
+    )
+    x, _ = batch()
+    y_out_of_range = np.array([1, 4, 10], dtype=np.int64)  # 10 is >= num_classes (10)
+    with pytest.raises(ValueError, match="range"):
+        model_adapter.compute_loss_and_gradients(x, y_out_of_range)
+
+    y_negative = np.array([1, -1, 2], dtype=np.int64)
+    with pytest.raises(ValueError, match="range"):
+        model_adapter.compute_loss_and_gradients(x, y_negative)

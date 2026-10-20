@@ -1426,6 +1426,42 @@ class RuntimeSeamTest(unittest.TestCase):
         with self.assertRaises(ProtocolError):
             GradientMeta.from_dict({**data, "compute_ms": -1.5})
 
+    def test_gradient_meta_correct_count(self) -> None:
+        data = {
+            "attempt_id": "attempt-1",
+            "model_version": 2,
+            "shard_id": 0,
+            "batch_id": 1,
+            "batch_ordinal": 0,
+            "sample_count": 16,
+            "parameter_manifest_hash": "b" * 64,
+            "tensor_encoding": "fp32_le_v1",
+            "total_numel": 3,
+            "total_bytes": 12,
+            "chunk_count": 2,
+            "correct_count": 12,
+        }
+        msg = GradientMeta.from_dict(data)
+        self.assertEqual(msg.correct_count, 12)
+
+        decoded = decode_control_message(GradientMeta.MESSAGE_TYPE, msg.to_bytes())
+        self.assertEqual(decoded, msg)
+
+        # Without correct_count defaults to None
+        no_count = {k: v for k, v in data.items() if k != "correct_count"}
+        msg_no_count = GradientMeta.from_dict(no_count)
+        self.assertIsNone(msg_no_count.correct_count)
+
+        # Rejection of invalid correct_count values
+        with self.assertRaises(ProtocolError):
+            GradientMeta.from_dict({**data, "correct_count": -1})
+        with self.assertRaises(ProtocolError):
+            GradientMeta.from_dict({**data, "correct_count": 17})  # > sample_count
+        with self.assertRaises(ProtocolError):
+            GradientMeta.from_dict({**data, "correct_count": True})  # bool
+        with self.assertRaises(ProtocolError):
+            GradientMeta.from_dict({**data, "correct_count": 10.5})  # float
+
 
 if __name__ == "__main__":
     unittest.main()

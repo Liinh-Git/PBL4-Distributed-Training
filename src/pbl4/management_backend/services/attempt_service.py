@@ -808,45 +808,18 @@ def list_attempt_steps(
     limit: int = 50,
     cursor: str | None = None,
 ) -> list[dict]:
-    _ = get_attempt(conn, attempt_id)
+    get_attempt(conn, attempt_id)
     return step_repository.list_steps(conn, attempt_id, limit=limit, cursor=cursor)
 
 
 def get_step(conn: psycopg.Connection, attempt_id: str, step_id: int) -> dict:
-    _ = get_attempt(conn, attempt_id)
+    get_attempt(conn, attempt_id)
     step = step_repository.get_step(conn, attempt_id, step_id)
     if step is None:
         raise AttemptNotFoundError(f"Step {step_id} not found for attempt '{attempt_id}'.")
     worker_steps = step_repository.get_worker_steps(conn, attempt_id, step_id)
 
-    metrics = step.get("metrics")
-    if metrics is None:
-        loss = step.get("loss")
-        accuracy = step.get("accuracy")
-        if loss is None and worker_steps:
-            valid_losses = [
-                (float(ws["loss"]), int(ws["sample_count"]))
-                for ws in worker_steps
-                if ws.get("loss") is not None
-            ]
-            if valid_losses:
-                total_s = sum(s for _, s in valid_losses)
-                if total_s > 0:
-                    loss = round(sum(val * s for val, s in valid_losses) / total_s, 4)
-        if accuracy is None and worker_steps:
-            valid_accs = [
-                (float(ws["accuracy"]), int(ws["sample_count"]))
-                for ws in worker_steps
-                if ws.get("accuracy") is not None
-            ]
-            if valid_accs:
-                total_s = sum(s for _, s in valid_accs)
-                if total_s > 0:
-                    accuracy = round(sum(acc * s for acc, s in valid_accs) / total_s, 4)
-        if loss is not None or accuracy is not None:
-            metrics = {"loss": loss, "accuracy": accuracy}
-
-    return {**step, "metrics": metrics, "worker_steps": worker_steps}
+    return {**step, "worker_steps": worker_steps}
 
 
 # ─── Commands ────────────────────────────────────────────────────────────────

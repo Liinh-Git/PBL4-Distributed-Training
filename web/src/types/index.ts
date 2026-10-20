@@ -132,9 +132,9 @@ export interface TrainingStep {
   totalSampleCount: number;
   timings: StepTimings;
   workerContributions: WorkerContribution[];
-  loss?: number;
-  accuracy?: number;
-  metrics?: { loss?: number | null; accuracy?: number | null; [key: string]: any };
+  loss?: number | null;
+  accuracy?: number | null;
+  metrics?: { loss?: number | null; accuracy?: number | null; [key: string]: any } | null;
 }
 
 export interface DatasetShard {

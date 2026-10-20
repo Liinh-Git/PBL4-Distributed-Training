@@ -141,6 +141,7 @@ def _run_step(coordinator, op=None):
             parameter_manifest_hash="hash-param",
             tensor_id=1,
             loss=1.0,
+            correct_count=16,
             compute_ms=10.0,
         )
         dec, _ = coordinator.admit(c)

@@ -90,7 +90,20 @@ class PyTorchAdapter(ModelAdapter):
         device = next(self._model.parameters()).device
         inputs = torch.from_numpy(np.ascontiguousarray(x)).to(device)
         labels = torch.from_numpy(np.ascontiguousarray(y)).to(device)
-        value = self._loss(self._model(inputs), labels)
+        logits = self._model(inputs)
+
+        if logits.ndim != 2 or logits.shape[0] != len(x):
+            raise ValueError("Logits must have shape (N, C)")
+        num_classes = logits.shape[1]
+        if num_classes <= 0:
+            raise ValueError("Logits must have at least one class")
+        if (labels < 0).any() or (labels >= num_classes).any():
+            raise ValueError("Labels out of valid range [0, C)")
+        with torch.no_grad():
+            preds = torch.argmax(logits.detach(), dim=1)
+            correct_count = int((preds == labels).sum().item())
+
+        value = self._loss(logits, labels)
         if value.ndim != 0 or not torch.isfinite(value):
             raise ValueError("Loss must be one finite scalar")
         value.backward()
@@ -102,7 +115,12 @@ class PyTorchAdapter(ModelAdapter):
         loss_value = float(value.detach().cpu())
         if not math.isfinite(loss_value):
             raise ValueError("Nonfinite loss")
-        return LocalGradient(loss_value, self._bundle(gradients), len(x))
+        return LocalGradient(
+            loss_value,
+            self._bundle(gradients),
+            len(x),
+            correct_count=correct_count,
+        )
 
     def _validate_bundle(self, bundle: TensorBundle) -> tuple[torch.Tensor, ...]:
         if bundle.parameter_manifest_hash != self.manifest.parameter_manifest_hash or len(

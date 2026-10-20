@@ -163,3 +163,157 @@ def test_parameter_server_to_contribution_with_compute_ms() -> None:
         )
         with pytest.raises(ValueError, match="positive and finite"):
             ps._to_contribution(invalid_transfer)
+
+
+def test_contribution_correct_count_validation() -> None:
+    grad = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+
+    # Valid correct_count
+    c = Contribution.from_gradient(
+        grad,
+        attempt_id="att-1",
+        session_id=1,
+        worker_id=0,
+        operation_id=1,
+        step_id=1,
+        model_version=0,
+        shard_id=0,
+        batch_id=1,
+        batch_ordinal=0,
+        sample_count=32,
+        parameter_manifest_hash="hash1",
+        tensor_id=1,
+        correct_count=20,
+    )
+    assert c.correct_count == 20
+
+    # Default is None
+    c_default = Contribution.from_gradient(
+        grad,
+        attempt_id="att-1",
+        session_id=1,
+        worker_id=0,
+        operation_id=1,
+        step_id=1,
+        model_version=0,
+        shard_id=0,
+        batch_id=1,
+        batch_ordinal=0,
+        sample_count=32,
+        parameter_manifest_hash="hash1",
+        tensor_id=1,
+    )
+    assert c_default.correct_count is None
+
+    # Invalid: bool
+    with pytest.raises(ValueError, match="correct_count"):
+        Contribution.from_gradient(
+            grad,
+            attempt_id="att-1",
+            session_id=1,
+            worker_id=0,
+            operation_id=1,
+            step_id=1,
+            model_version=0,
+            shard_id=0,
+            batch_id=1,
+            batch_ordinal=0,
+            sample_count=32,
+            parameter_manifest_hash="hash1",
+            tensor_id=1,
+            correct_count=True,
+        )
+
+    # Invalid: negative
+    with pytest.raises(ValueError, match="correct_count"):
+        Contribution.from_gradient(
+            grad,
+            attempt_id="att-1",
+            session_id=1,
+            worker_id=0,
+            operation_id=1,
+            step_id=1,
+            model_version=0,
+            shard_id=0,
+            batch_id=1,
+            batch_ordinal=0,
+            sample_count=32,
+            parameter_manifest_hash="hash1",
+            tensor_id=1,
+            correct_count=-1,
+        )
+
+    # Invalid: > sample_count
+    with pytest.raises(ValueError, match="correct_count"):
+        Contribution.from_gradient(
+            grad,
+            attempt_id="att-1",
+            session_id=1,
+            worker_id=0,
+            operation_id=1,
+            step_id=1,
+            model_version=0,
+            shard_id=0,
+            batch_id=1,
+            batch_ordinal=0,
+            sample_count=32,
+            parameter_manifest_hash="hash1",
+            tensor_id=1,
+            correct_count=33,
+        )
+
+
+def test_parameter_server_to_contribution_with_correct_count() -> None:
+    manifest = _sample_manifest()
+    registry = WorkerRegistry("att-1", 1)
+    ps = ParameterServer(
+        "127.0.0.1",
+        0,
+        attempt_id="att-1",
+        job_id="job-1",
+        expected_workers=1,
+        manifest=manifest,
+        registry=registry,
+        gradient_handler=lambda c: None,
+        parameter_applied_handler=lambda a: None,
+        model_init_handler=lambda t: None,
+        disconnect_handler=lambda w, s: None,
+    )
+
+    grad = np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32)
+    identity = TransferIdentity(
+        operation_id=1,
+        tensor_id=1,
+        session_id=10,
+        worker_id=0,
+    )
+    meta = {
+        "attempt_id": "att-1",
+        "model_version": 0,
+        "shard_id": 0,
+        "batch_id": 5,
+        "batch_ordinal": 0,
+        "sample_count": 32,
+        "parameter_manifest_hash": manifest.parameter_manifest_hash,
+        "compute_ms": 100.0,
+        "correct_count": 28,
+    }
+    transfer = CompletedTensorTransfer(
+        kind="GRADIENT",
+        identity=identity,
+        metadata=meta,
+        data=grad.tobytes(),
+    )
+
+    contribution = ps._to_contribution(transfer)
+    assert contribution.correct_count == 28
+
+    meta_no_count = {k: v for k, v in meta.items() if k != "correct_count"}
+    transfer_no_count = CompletedTensorTransfer(
+        kind="GRADIENT",
+        identity=identity,
+        metadata=meta_no_count,
+        data=grad.tobytes(),
+    )
+    contribution_no_count = ps._to_contribution(transfer_no_count)
+    assert contribution_no_count.correct_count is None

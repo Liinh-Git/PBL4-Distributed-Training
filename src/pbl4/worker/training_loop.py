@@ -224,6 +224,7 @@ class TrainingLoop:
 
             total_samples = 0
             accum_loss = 0.0
+            accum_correct: int | None = 0
             accum_tensors: list[np.ndarray] | None = None
             manifest_hash: str | None = None
 
@@ -248,6 +249,11 @@ class TrainingLoop:
                 n_u = unit.sample_count
                 total_samples += n_u
                 accum_loss += float(grad.loss) * n_u
+                if accum_correct is not None:
+                    if grad.correct_count is None:
+                        accum_correct = None
+                    else:
+                        accum_correct += grad.correct_count
 
                 if accum_tensors is None:
                     manifest_hash = grad.bundle.parameter_manifest_hash
@@ -269,7 +275,12 @@ class TrainingLoop:
                 manifest_hash or self._adapter.manifest.parameter_manifest_hash,
                 mean_tensors,
             )
-            local_grad = LocalGradient(loss=mean_loss, bundle=bundle, sample_count=total_samples)
+            local_grad = LocalGradient(
+                loss=mean_loss,
+                bundle=bundle,
+                sample_count=total_samples,
+                correct_count=accum_correct,
+            )
 
             self._pending = assignment
             self._eligibility = None

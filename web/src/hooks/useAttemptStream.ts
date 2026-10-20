@@ -399,6 +399,13 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
     }
 
     if (attemptId) {
+      setAttempt(null);
+      setSnapshot(null);
+      setWorkers([]);
+      setSteps([]);
+      setEvents([]);
+      setIsStale(false);
+      setGapDetected(false);
       loadInitialRestState().then(() => {
         if (isMountedRef.current) {
           connectWebSocket();

@@ -32,6 +32,7 @@ export interface ListAttemptsParams {
 export interface CatchUpEventsParams {
   after_seq?: number;
   limit?: number;
+  event_type?: string;
 }
 
 export class AttemptsService {
@@ -136,15 +137,19 @@ export class AttemptsService {
     params?: CatchUpEventsParams,
     options?: RequestOptions
   ): Promise<RuntimeEventsResponseData> {
+    const queryParams: Record<string, string | number> = {
+      after_seq: params?.after_seq ?? 0,
+      limit: params?.limit ?? 50,
+    };
+    if (params?.event_type) {
+      queryParams.event_type = params.event_type;
+    }
     return this.client.request<RuntimeEventsResponseData>(
       `/api/v1/attempts/${encodeURIComponent(attemptId)}/events`,
       {
         ...options,
         method: 'GET',
-        params: {
-          after_seq: params?.after_seq ?? 0,
-          limit: params?.limit ?? 50,
-        },
+        params: queryParams,
       }
     );
   }

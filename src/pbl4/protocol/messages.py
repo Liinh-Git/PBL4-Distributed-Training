@@ -468,7 +468,7 @@ class GradientMeta(DtpControlMessage):
         "total_bytes": "positive_int",
         "chunk_count": "positive_int",
     }
-    OPTIONAL = {"loss": "number", "compute_ms": "number"}
+    OPTIONAL = {"loss": "number", "compute_ms": "number", "correct_count": "nonnegative_int"}
 
     def _validate(self, data: dict[str, object]) -> None:
         if data["tensor_encoding"] != TENSOR_ENCODING_FP32_LE_V1:
@@ -481,11 +481,26 @@ class GradientMeta(DtpControlMessage):
                 or not math.isfinite(compute_ms)
             ):
                 raise ProtocolError("GRADIENT_META compute_ms must be a positive finite number")
+        if "correct_count" in data:
+            correct_count = data["correct_count"]
+            if (
+                type(correct_count) is not int
+                or correct_count < 0
+                or correct_count > data["sample_count"]  # type: ignore[operator]
+            ):
+                raise ProtocolError(
+                    "GRADIENT_META correct_count must be an integer between 0 and sample_count"
+                )
 
     @property
     def compute_ms(self) -> float:
         val = self.values.get("compute_ms")
         return float(val) if val is not None else 0.0
+
+    @property
+    def correct_count(self) -> int | None:
+        val = self.values.get("correct_count")
+        return int(val) if val is not None else None
 
 
 class GradientEnd(DtpControlMessage):

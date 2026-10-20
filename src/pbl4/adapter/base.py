@@ -36,6 +36,7 @@ class LocalGradient:
     loss: float
     bundle: TensorBundle
     sample_count: int
+    correct_count: int | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -44,6 +45,13 @@ class LocalGradient:
             or self.sample_count <= 0
         ):
             raise ValueError("Invalid local gradient metadata")
+        if self.correct_count is not None:
+            if (
+                type(self.correct_count) is not int
+                or self.correct_count < 0
+                or self.correct_count > self.sample_count
+            ):
+                raise ValueError("Invalid local gradient correct_count")
 
 
 class ModelAdapter(ABC):

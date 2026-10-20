@@ -71,7 +71,7 @@ def running(tmp_path):
     return coordinator, manager
 
 
-def contribution(op, w):
+def contribution(op, w, loss: float | None = None, correct_count: int | None = None):
     assigned = op.assignments[w]
     return Contribution.from_gradient(
         np.array([[1, 1], [3, 3], [5, 5]][w], dtype=np.float32),
@@ -87,6 +87,8 @@ def contribution(op, w):
         sample_count=assigned.sample_count,
         parameter_manifest_hash="manifest",
         tensor_id=w,
+        loss=loss,
+        correct_count=correct_count,
     )
 
 
@@ -467,6 +469,54 @@ def test_coordinator_complete_rejected_if_step_not_committed(tmp_path):
     # Step is currently COLLECTING_GRADIENTS (not COMMITTED)
     with pytest.raises(ValueError, match="Attempt still has uncommitted work"):
         coordinator.complete()
+
+
+def test_model_updated_event_contains_metrics(tmp_path):
+    coordinator, _ = running(tmp_path)
+    coordinator._events.drain()
+    op = coordinator.open_step()
+    # BatchAssignment has samples [1, 2, 1] for workers [0, 1, 2] -> total 4 samples
+    # Worker 0: n=1, loss=2.0, correct=1
+    # Worker 1: n=2, loss=3.0, correct=1
+    # Worker 2: n=1, loss=4.0, correct=0
+    # Step 0: loss-sum = 2 + 6 + 4 = 12, correct = 2, samples = 4
+    coordinator.admit(contribution(op, 0, loss=2.0, correct_count=1))
+    coordinator.admit(contribution(op, 1, loss=3.0, correct_count=1))
+    _, output = coordinator.admit(contribution(op, 2, loss=4.0, correct_count=0))
+    assert output is not None
+
+    events = coordinator._events.drain()
+    updated_events = [e for e in events if e.event_type == "model.updated"]
+    assert len(updated_events) == 1
+    details = updated_events[0].details
+    assert "metrics" not in details
+    assert len(details["contributions"]) == 3
+    assert details["contributions"][0]["correct_count"] == 1
+    assert details["contributions"][1]["correct_count"] == 1
+    assert details["contributions"][2]["correct_count"] == 0
+
+    applied(coordinator, op)
+    coordinator.commit_synchronized_step()
+
+    # Step 1: completes epoch 0 (2 steps per epoch)
+    op1 = coordinator.open_step()
+    coordinator.admit(contribution(op1, 0, loss=1.0, correct_count=1))
+    coordinator.admit(contribution(op1, 1, loss=2.0, correct_count=2))
+    coordinator.admit(contribution(op1, 2, loss=3.0, correct_count=1))
+    applied(coordinator, op1)
+    coordinator.commit_synchronized_step()
+
+    all_events = coordinator._events.drain()
+    epoch_events = [e for e in all_events if e.event_type == "epoch.metrics.finalized"]
+    assert len(epoch_events) == 1
+    epoch_details = epoch_events[0].details
+    assert set(epoch_details.keys()) == {"epoch_index", "sample_count", "training_loss", "training_accuracy"}
+    assert epoch_details["epoch_index"] == 0
+    assert epoch_details["sample_count"] == 8
+    # (12 + (1*1 + 2*2 + 1*3)) / 8 = 20 / 8 = 2.5
+    assert epoch_details["training_loss"] == pytest.approx(2.5)
+    # (2 + 4) / 8 * 100 = 75.0%
+    assert epoch_details["training_accuracy"] == pytest.approx(75.0)
 
 
 def test_commit_synchronized_step_advances_cursor_without_disk_io(tmp_path, monkeypatch):

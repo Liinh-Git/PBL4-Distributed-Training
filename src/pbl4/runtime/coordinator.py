@@ -1,9 +1,11 @@
 """Attempt/Step progression with separate synchronization and durability gates."""
 
 import logging
+import math
 from dataclasses import replace
 from datetime import UTC, datetime
 from threading import RLock
+from typing import Any
 from uuid import uuid4
 
 from pbl4.runtime.aggregator import GradientAggregator
@@ -33,6 +35,38 @@ logger = logging.getLogger(__name__)
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _accumulate_epoch_contributions(
+    acc: dict[str, Any],
+    contributions: tuple[Contribution, ...] | list[Contribution],
+) -> None:
+    for c in contributions:
+        if c.sample_count <= 0:
+            continue
+        acc["sample_count"] += c.sample_count
+        if (
+            c.loss is None
+            or not math.isfinite(float(c.loss))
+            or c.correct_count is None
+            or type(c.correct_count) is not int
+            or not (0 <= c.correct_count <= c.sample_count)
+        ):
+            acc["valid"] = False
+        else:
+            acc["weighted_loss_sum"] += float(c.loss) * c.sample_count
+            acc["correct_count"] += c.correct_count
+
+
+def _compute_epoch_metrics_payload(acc: dict[str, Any], epoch_index: int) -> dict[str, Any]:
+    n = acc["sample_count"]
+    ok = n > 0 and acc["valid"]
+    return {
+        "epoch_index": epoch_index,
+        "sample_count": n,
+        "training_loss": (acc["weighted_loss_sum"] / n) if ok else None,
+        "training_accuracy": (100.0 * acc["correct_count"] / n) if ok else None,
+    }
 
 
 class Coordinator:
@@ -94,6 +128,12 @@ class Coordinator:
         self._latest: CompleteCheckpoint | None = latest_checkpoint
         self._checkpoint_state: str | None = "COMPLETE" if latest_checkpoint is not None else None
         self._milestones: dict[str, str] = {}
+        self._epoch_accumulator = {
+            "sample_count": 0,
+            "weighted_loss_sum": 0.0,
+            "correct_count": 0,
+            "valid": True,
+        }
 
     @property
     def cursor(self) -> RecoveryCursor:
@@ -245,6 +285,7 @@ class Coordinator:
                                 "parameter_manifest_hash": item.parameter_manifest_hash,
                                 "loss": item.loss,
                                 "compute_ms": item.compute_ms,
+                                "correct_count": item.correct_count,
                             }
                             for item in plan.contributions
                         ],
@@ -298,6 +339,9 @@ class Coordinator:
             self._milestones["committed_at"] = _now()
             self._last_committed_operation = operation
 
+            if self._plan is not None:
+                _accumulate_epoch_contributions(self._epoch_accumulator, self._plan.contributions)
+
             if self._workload_scheduler is not None and self._plan is not None:
                 self._workload_scheduler.record_committed(
                     self._plan.contributions,
@@ -344,6 +388,18 @@ class Coordinator:
                     },
                 },
             )
+
+            if next_cursor.epoch > operation.epoch:
+                self._event(
+                    "epoch.metrics.finalized",
+                    _compute_epoch_metrics_payload(self._epoch_accumulator, operation.epoch),
+                )
+                self._epoch_accumulator = {
+                    "sample_count": 0,
+                    "weighted_loss_sum": 0.0,
+                    "correct_count": 0,
+                    "valid": True,
+                }
 
             return next_cursor
 

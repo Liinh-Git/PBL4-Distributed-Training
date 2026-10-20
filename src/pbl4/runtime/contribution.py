@@ -22,6 +22,7 @@ class Contribution:
     _gradient_bytes: bytes = field(repr=False)
     compute_ms: float = 0.0
     loss: float | None = None
+    correct_count: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_gradient_bytes", bytes(self._gradient_bytes))
@@ -37,6 +38,13 @@ class Contribution:
             raise ValueError("compute_ms must be non-negative and finite")
         if self.loss is not None and not np.isfinite(self.loss):
             raise ValueError("loss must be finite when supplied")
+        if self.correct_count is not None:
+            if (
+                type(self.correct_count) is not int
+                or self.correct_count < 0
+                or self.correct_count > self.sample_count
+            ):
+                raise ValueError("correct_count must be an integer between 0 and sample_count")
 
     @classmethod
     def from_gradient(cls, gradient: np.ndarray, **identity: object) -> "Contribution":

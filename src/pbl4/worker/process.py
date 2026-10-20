@@ -312,6 +312,7 @@ class WorkerProcess:
                 tensor_id=self._client.worker_id,
                 loss=computed.local_gradient.loss,
                 compute_ms=compute_ms,
+                correct_count=computed.local_gradient.correct_count,
             )
         except Exception:
             self._busy.clear()

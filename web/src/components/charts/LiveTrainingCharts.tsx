@@ -23,10 +23,34 @@ import {
 } from 'lucide-react';
 import { TrainingStep } from '../../types';
 
+export interface EpochMetricData {
+  epoch_index: number;
+  sample_count: number;
+  training_loss?: number | null;
+  training_accuracy?: number | null;
+}
+
 export interface LiveTrainingChartsProps {
   steps: TrainingStep[];
   expectedWorkers?: number;
   onViewAllMetrics?: () => void;
+  epochMetrics?: EpochMetricData[];
+}
+
+export function computeEpochMetricsData(epochMetrics: EpochMetricData[] | undefined) {
+  if (!epochMetrics || epochMetrics.length === 0) {
+    return [];
+  }
+  return [...epochMetrics]
+    .sort((a, b) => a.epoch_index - b.epoch_index)
+    .map((em) => ({
+      epochIndex: em.epoch_index,
+      displayEpoch: `Epoch ${em.epoch_index + 1}`,
+      epochNum: em.epoch_index + 1,
+      loss: em.training_loss != null ? Number(em.training_loss.toFixed(4)) : null,
+      accuracy: em.training_accuracy != null ? Number(em.training_accuracy.toFixed(2)) : null,
+      sampleCount: em.sample_count,
+    }));
 }
 
 /**
@@ -138,22 +162,31 @@ export const ScrollableChartWrapper: React.FC<ScrollableChartWrapperProps> = ({
 };
 
 // Missing telemetry remains null; charts must never fabricate training results.
+// Only COMMITTED steps are included in the training trajectory.
 export function computeStepMetrics(steps: TrainingStep[]) {
-  return [...steps].sort((a, b) => (a.stepId ?? a.operationId) - (b.stepId ?? b.operationId)).map((st, idx) => {
-    const durationMs = st.timings.totalDurationMs;
-    const samples = st.totalSampleCount;
-    return {
-      step: st, operationId: st.operationId, opNumber: `#${st.operationId}`,
-      normalizedStep: idx, stepLabel: `Step ${st.stepId ?? st.operationId}`, displayStep: `${st.stepId ?? st.operationId}`,
-      loss: st.loss ?? st.metrics?.loss ?? null,
-      accuracy: st.accuracy ?? st.metrics?.accuracy ?? null,
-      avgSamplesPerSec: durationMs != null && durationMs > 0 && samples != null
-        ? Math.round(samples * 10000 / durationMs) / 10 : null,
-      durationMs,
-      acceptedWorkers: (st.workerContributions || []).filter(c => c.contributionAccepted).length,
-      timeLabel: st.timings.committedAt ?? '—',
-    };
-  });
+  return [...steps]
+    .filter((st) => st.state === 'COMMITTED')
+    .sort((a, b) => (a.stepId ?? a.operationId) - (b.stepId ?? b.operationId))
+    .map((st, idx) => {
+      const durationMs = st.timings?.totalDurationMs;
+      const samples = st.totalSampleCount;
+      return {
+        step: st,
+        operationId: st.operationId,
+        opNumber: `#${st.operationId}`,
+        normalizedStep: idx,
+        stepLabel: `Step ${st.stepId ?? st.operationId}`,
+        displayStep: `${st.stepId ?? st.operationId}`,
+        inputModelVersion: st.inputModelVersion,
+        loss: st.loss ?? st.metrics?.loss ?? null,
+        accuracy: st.accuracy ?? st.metrics?.accuracy ?? null,
+        avgSamplesPerSec: durationMs != null && durationMs > 0 && samples != null
+          ? Math.round(samples * 10000 / durationMs) / 10 : null,
+        durationMs,
+        acceptedWorkers: (st.workerContributions || []).filter(c => c.contributionAccepted).length,
+        timeLabel: st.timings?.committedAt ?? '—',
+      };
+    });
 }
 
 export function computeWorkerBreakdown(step: TrainingStep | undefined, _stepIndex = 1) {
@@ -432,8 +465,12 @@ export const LiveTrainingCharts: React.FC<LiveTrainingChartsProps> = ({
   steps,
   expectedWorkers = 0,
   onViewAllMetrics,
+  epochMetrics,
 }) => {
   const chartData = useMemo(() => computeStepMetrics(steps), [steps]);
+  const epochChartData = useMemo(() => computeEpochMetricsData(epochMetrics), [epochMetrics]);
+  const latestEpochMetric = epochChartData[epochChartData.length - 1];
+
   const [selectedStepIdx, setSelectedStepIdx] = useState<number>(() => {
     return chartData.length > 0 ? chartData.length - 1 : 0;
   });
@@ -485,86 +522,90 @@ export const LiveTrainingCharts: React.FC<LiveTrainingChartsProps> = ({
 
       {/* 4 PRIMARY CHARTS IN 2x2 GRID */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 min-w-0">
-        {/* 1. TOP-LEFT: GLOBAL LOSS */}
+        {/* 1. TOP-LEFT: ONLINE EPOCH TRAINING LOSS */}
         <div className="bg-[#121214] border border-white/[0.07] rounded p-3.5 space-y-2 flex flex-col justify-between min-w-0 overflow-hidden">
           <div className="flex items-center justify-between">
             <div className="space-y-0.5 min-w-0">
               <div className="flex items-center gap-1.5">
                 <TrendingDown className="w-3.5 h-3.5 text-blue-400 shrink-0" />
                 <h4 className="text-xs font-semibold text-[#f3f3f4] truncate">
-                  Global Loss
+                  Online Epoch Training Loss
                 </h4>
               </div>
               <p className="text-[11px] text-[#73737c] truncate">
-                Cross-entropy loss convergence across global steps
+                Cross-entropy loss convergence across completed epochs
               </p>
             </div>
             <div className="text-right shrink-0">
               <span className="text-xs font-mono font-semibold text-blue-400">
-                {latestItem?.loss ?? '—'}
+                {latestEpochMetric?.loss ?? '—'}
               </span>
-              <div className="text-[10px] text-[#73737c]">Latest Loss</div>
+              <div className="text-[10px] text-[#73737c]">
+                {latestEpochMetric ? latestEpochMetric.displayEpoch : 'Latest Loss'}
+              </div>
             </div>
           </div>
 
           <div className="w-full pt-1 min-w-0">
-            <ScrollableChartWrapper totalSteps={totalSteps} height={176}>
-              <LineChart
-                data={chartData}
-                margin={{ top: 16, right: 18, left: -20, bottom: 4 }}
-              >
-                <CartesianGrid strokeDasharray="3 3" stroke="#1f1f23" vertical={false} />
-                <XAxis
-                  dataKey="displayStep"
-                  tick={{ fill: '#73737c', fontSize: 10 }}
-                  axisLine={{ stroke: '#27272a' }}
-                  tickLine={false}
-                  interval="preserveStartEnd"
-                  minTickGap={28}
-                />
-                <YAxis
-                  domain={[0, 'auto']}
-                  tick={{ fill: '#73737c', fontSize: 10 }}
-                  axisLine={{ stroke: '#27272a' }}
-                  tickLine={false}
-                />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: '#121214',
-                    borderColor: '#27272a',
-                    borderRadius: '4px',
-                    fontSize: '11px',
-                    color: '#f3f3f4',
-                  }}
-                  formatter={(val: any) => [`${val}`, 'Global Loss']}
-                  labelFormatter={(lbl) => `Global Step: ${lbl}`}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="loss"
-                  name="Global Loss"
-                  stroke="#3b82f6"
-                  strokeWidth={1.25}
-                  dot={getLineDot(totalSteps, '#1d4ed8', '#3b82f6')}
-                  activeDot={{ r: 4, stroke: '#121214', strokeWidth: 1.5 }}
-                  label={totalSteps <= 10 ? renderLossLabel : undefined}
-                />
-              </LineChart>
-            </ScrollableChartWrapper>
+            {epochChartData.length === 0 ? (
+              <div className="h-[176px] flex flex-col items-center justify-center text-center p-4 border border-dashed border-white/[0.08] rounded bg-white/[0.02]">
+                <Clock className="w-5 h-5 text-[#73737c] mb-1.5 animate-pulse" />
+                <span className="text-xs text-[#a1a1a8] font-medium">Chưa có Training Metrics; chờ hoàn thành Epoch 1</span>
+                <span className="text-[11px] text-[#73737c] mt-0.5">Metrics được tính và chốt chính xác khi kết thúc mỗi Epoch</span>
+              </div>
+            ) : (
+              <ScrollableChartWrapper totalSteps={epochChartData.length} height={176}>
+                <LineChart
+                  data={epochChartData}
+                  margin={{ top: 16, right: 18, left: -20, bottom: 4 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1f1f23" vertical={false} />
+                  <XAxis
+                    dataKey="displayEpoch"
+                    tick={{ fill: '#73737c', fontSize: 10 }}
+                    axisLine={{ stroke: '#27272a' }}
+                    tickLine={false}
+                  />
+                  <YAxis
+                    domain={[0, 'auto']}
+                    tick={{ fill: '#73737c', fontSize: 10 }}
+                    axisLine={{ stroke: '#27272a' }}
+                    tickLine={false}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: '#121214',
+                      borderColor: '#27272a',
+                      borderRadius: '4px',
+                      fontSize: '11px',
+                      color: '#f3f3f4',
+                    }}
+                    formatter={(val: any) => [val != null ? `${val}` : 'UNAVAILABLE', 'Epoch Loss']}
+                    labelFormatter={(lbl) => `${lbl}`}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="loss"
+                    name="Epoch Loss"
+                    stroke="#3b82f6"
+                    strokeWidth={1.25}
+                    dot={{ r: 3, fill: '#3b82f6' }}
+                    activeDot={{ r: 5, stroke: '#121214', strokeWidth: 1.5 }}
+                    connectNulls={false}
+                  />
+                </LineChart>
+              </ScrollableChartWrapper>
+            )}
           </div>
 
           <div className="flex items-center justify-between pt-2 border-t border-white/[0.04] text-[11px] text-[#73737c]">
             <span>
-              {isScrollable ? (
-                <span className="text-[#a1a1a8]">Showing all {totalSteps} steps (scroll)</span>
-              ) : (
-                'X: Global Step (0, 1, 2, 3...)'
-              )}
+              {epochChartData.length > 0 ? `Completed Epochs: ${epochChartData.length}` : 'X: Completed Epochs'}
             </span>
             <span className="text-[#a1a1a8]">
-              {totalSteps > 1
-                ? `Step 1: ${chartData[0]?.loss ?? '—'} → Step ${totalSteps}: ${latestItem?.loss ?? '—'}`
-                : 'No loss telemetry'}
+              {epochChartData.length > 0 && latestEpochMetric?.loss != null
+                ? `${latestEpochMetric.displayEpoch}: ${latestEpochMetric.loss}`
+                : 'Chờ Epoch 1 hoàn tất'}
             </span>
           </div>
         </div>
@@ -606,87 +647,91 @@ export const LiveTrainingCharts: React.FC<LiveTrainingChartsProps> = ({
           </div>
         </div>
 
-        {/* 3. BOTTOM-LEFT: ACCURACY */}
+        {/* 3. BOTTOM-LEFT: ONLINE EPOCH TRAINING ACCURACY */}
         <div className="bg-[#121214] border border-white/[0.07] rounded p-3.5 space-y-2 flex flex-col justify-between min-w-0 overflow-hidden">
           <div className="flex items-center justify-between">
             <div className="space-y-0.5 min-w-0">
               <div className="flex items-center gap-1.5">
                 <TrendingUp className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                 <h4 className="text-xs font-semibold text-[#f3f3f4] truncate">
-                  Accuracy
+                  Online Epoch Training Accuracy
                 </h4>
               </div>
               <p className="text-[11px] text-[#73737c] truncate">
-                Reported training accuracy progression across global steps
+                Reported training accuracy progression across completed epochs
               </p>
             </div>
             <div className="text-right shrink-0">
               <span className="text-xs font-mono font-semibold text-emerald-400">
-                {latestItem?.accuracy ?? '—'}%
+                {latestEpochMetric?.accuracy != null ? `${latestEpochMetric.accuracy}%` : '—'}
               </span>
-              <div className="text-[10px] text-[#73737c]">Latest Accuracy</div>
+              <div className="text-[10px] text-[#73737c]">
+                {latestEpochMetric ? latestEpochMetric.displayEpoch : 'Latest Accuracy'}
+              </div>
             </div>
           </div>
 
           <div className="w-full pt-1 min-w-0">
-            <ScrollableChartWrapper totalSteps={totalSteps} height={176}>
-              <LineChart
-                data={chartData}
-                margin={{ top: 16, right: 18, left: -20, bottom: 4 }}
-              >
-                <CartesianGrid strokeDasharray="3 3" stroke="#1f1f23" vertical={false} />
-                <XAxis
-                  dataKey="displayStep"
-                  tick={{ fill: '#73737c', fontSize: 10 }}
-                  axisLine={{ stroke: '#27272a' }}
-                  tickLine={false}
-                  interval="preserveStartEnd"
-                  minTickGap={28}
-                />
-                <YAxis
-                  domain={[0, 100]}
-                  unit="%"
-                  tick={{ fill: '#73737c', fontSize: 10 }}
-                  axisLine={{ stroke: '#27272a' }}
-                  tickLine={false}
-                />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: '#121214',
-                    borderColor: '#27272a',
-                    borderRadius: '4px',
-                    fontSize: '11px',
-                    color: '#f3f3f4',
-                  }}
-                  formatter={(val: any) => [`${val}%`, 'Accuracy']}
-                  labelFormatter={(lbl) => `Global Step: ${lbl}`}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="accuracy"
-                  name="Accuracy"
-                  stroke="#10b981"
-                  strokeWidth={1.25}
-                  dot={getLineDot(totalSteps, '#047857', '#10b981')}
-                  activeDot={{ r: 4, stroke: '#121214', strokeWidth: 1.5 }}
-                  label={totalSteps <= 10 ? renderAccuracyLabel : undefined}
-                />
-              </LineChart>
-            </ScrollableChartWrapper>
+            {epochChartData.length === 0 ? (
+              <div className="h-[176px] flex flex-col items-center justify-center text-center p-4 border border-dashed border-white/[0.08] rounded bg-white/[0.02]">
+                <Clock className="w-5 h-5 text-[#73737c] mb-1.5 animate-pulse" />
+                <span className="text-xs text-[#a1a1a8] font-medium">Chưa có Training Metrics; chờ hoàn thành Epoch 1</span>
+                <span className="text-[11px] text-[#73737c] mt-0.5">Metrics được tính và chốt chính xác khi kết thúc mỗi Epoch</span>
+              </div>
+            ) : (
+              <ScrollableChartWrapper totalSteps={epochChartData.length} height={176}>
+                <LineChart
+                  data={epochChartData}
+                  margin={{ top: 16, right: 18, left: -20, bottom: 4 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1f1f23" vertical={false} />
+                  <XAxis
+                    dataKey="displayEpoch"
+                    tick={{ fill: '#73737c', fontSize: 10 }}
+                    axisLine={{ stroke: '#27272a' }}
+                    tickLine={false}
+                  />
+                  <YAxis
+                    domain={[0, 100]}
+                    unit="%"
+                    tick={{ fill: '#73737c', fontSize: 10 }}
+                    axisLine={{ stroke: '#27272a' }}
+                    tickLine={false}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: '#121214',
+                      borderColor: '#27272a',
+                      borderRadius: '4px',
+                      fontSize: '11px',
+                      color: '#f3f3f4',
+                    }}
+                    formatter={(val: any) => [val != null ? `${val}%` : 'UNAVAILABLE', 'Epoch Accuracy']}
+                    labelFormatter={(lbl) => `${lbl}`}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="accuracy"
+                    name="Epoch Accuracy"
+                    stroke="#10b981"
+                    strokeWidth={1.25}
+                    dot={{ r: 3, fill: '#10b981' }}
+                    activeDot={{ r: 5, stroke: '#121214', strokeWidth: 1.5 }}
+                    connectNulls={false}
+                  />
+                </LineChart>
+              </ScrollableChartWrapper>
+            )}
           </div>
 
           <div className="flex items-center justify-between pt-2 border-t border-white/[0.04] text-[11px] text-[#73737c]">
             <span>
-              {isScrollable ? (
-                <span className="text-[#a1a1a8]">Showing all {totalSteps} steps (scroll)</span>
-              ) : (
-                'X: Global Step (0, 1, 2, 3...)'
-              )}
+              {epochChartData.length > 0 ? `Completed Epochs: ${epochChartData.length}` : 'X: Completed Epochs'}
             </span>
             <span className="text-[#a1a1a8]">
-              {totalSteps > 1
-                ? `Latest: ${latestItem?.accuracy ?? '—'}%`
-                : 'No accuracy telemetry'}
+              {epochChartData.length > 0 && latestEpochMetric?.accuracy != null
+                ? `${latestEpochMetric.displayEpoch}: ${latestEpochMetric.accuracy}%`
+                : 'Chờ Epoch 1 hoàn tất'}
             </span>
           </div>
         </div>
@@ -783,13 +828,18 @@ export const LiveTrainingCharts: React.FC<LiveTrainingChartsProps> = ({
 export interface FullMetricsDashboardProps {
   steps: TrainingStep[];
   expectedWorkers?: number;
+  epochMetrics?: EpochMetricData[];
 }
 
 export const FullMetricsDashboard: React.FC<FullMetricsDashboardProps> = ({
   steps,
   expectedWorkers = 0,
+  epochMetrics,
 }) => {
   const chartData = useMemo(() => computeStepMetrics(steps), [steps]);
+  const epochChartData = useMemo(() => computeEpochMetricsData(epochMetrics), [epochMetrics]);
+  const latestEpochMetric = epochChartData[epochChartData.length - 1];
+
   const [selectedStepIdx, setSelectedStepIdx] = useState<number>(() => {
     return chartData.length > 0 ? chartData.length - 1 : 0;
   });
@@ -857,15 +907,15 @@ export const FullMetricsDashboard: React.FC<FullMetricsDashboardProps> = ({
         <div className="bg-[#121214] border border-white/[0.07] rounded p-3 space-y-1 min-w-0">
           <div className="text-[11px] text-[#73737c] flex items-center gap-1.5 truncate">
             <TrendingDown className="w-3.5 h-3.5 text-blue-400 shrink-0" />
-            <span>Global Loss</span>
+            <span>Online Epoch Training Loss</span>
           </div>
           <div className="text-xl font-mono font-semibold text-[#f3f3f4] truncate">
-            {latestItem?.loss ?? '—'}
+            {latestEpochMetric?.loss ?? '—'}
           </div>
           <div className="text-[10px] text-blue-400/90 font-medium truncate">
-            {totalSteps > 1
-              ? `Step 1: ${chartData[0]?.loss ?? '—'} → Step ${totalSteps}: ${latestItem?.loss ?? '—'}`
-              : 'No loss telemetry'}
+            {epochChartData.length > 0
+              ? `${latestEpochMetric?.displayEpoch ?? 'Latest'}: ${latestEpochMetric?.loss ?? '—'}`
+              : 'Chờ hoàn thành Epoch 1'}
           </div>
         </div>
 
@@ -885,13 +935,15 @@ export const FullMetricsDashboard: React.FC<FullMetricsDashboardProps> = ({
         <div className="bg-[#121214] border border-white/[0.07] rounded p-3 space-y-1 min-w-0">
           <div className="text-[11px] text-[#73737c] flex items-center gap-1.5 truncate">
             <TrendingUp className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-            <span>Model Accuracy</span>
+            <span>Online Epoch Training Accuracy</span>
           </div>
           <div className="text-xl font-mono font-semibold text-[#f3f3f4] truncate">
-            {latestItem?.accuracy ?? '—'}%
+            {latestEpochMetric?.accuracy != null ? `${latestEpochMetric.accuracy}%` : '—'}
           </div>
           <div className="text-[10px] text-emerald-400/90 font-medium truncate">
-            {totalSteps > 1 ? `Latest: ${latestItem?.accuracy}% (Step ${totalSteps})` : 'Baseline accuracy'}
+            {epochChartData.length > 0
+              ? `${latestEpochMetric?.displayEpoch ?? 'Latest'}: ${latestEpochMetric?.accuracy != null ? `${latestEpochMetric.accuracy}%` : '—'}`
+              : 'Chờ hoàn thành Epoch 1'}
           </div>
         </div>
 
@@ -921,80 +973,85 @@ export const FullMetricsDashboard: React.FC<FullMetricsDashboardProps> = ({
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 min-w-0">
-          {/* 1. TOP-LEFT: GLOBAL LOSS */}
+          {/* 1. TOP-LEFT: ONLINE EPOCH TRAINING LOSS */}
           <div className="bg-[#121214] border border-white/[0.07] rounded p-4 space-y-2 flex flex-col justify-between min-w-0 overflow-hidden">
             <div className="flex items-center justify-between">
               <div className="space-y-0.5 min-w-0">
                 <div className="flex items-center gap-2">
                   <TrendingDown className="w-4 h-4 text-blue-400 shrink-0" />
                   <h4 className="text-xs font-semibold text-[#f3f3f4] truncate">
-                    Global Loss
+                    Online Epoch Training Loss
                   </h4>
                 </div>
                 <p className="text-[11px] text-[#73737c] truncate">
-                  Y: Global Loss vs X: Global Step (Convergence rate)
+                  Y: Training Loss vs X: Completed Epoch
                 </p>
               </div>
               <div className="px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20 text-xs font-mono font-semibold shrink-0">
-                Loss: {latestItem?.loss}
+                Loss: {latestEpochMetric?.loss ?? '—'}
               </div>
             </div>
 
             <div className="w-full pt-2 min-w-0">
-              <ScrollableChartWrapper totalSteps={totalSteps} height={208}>
-                <LineChart
-                  data={chartData}
-                  margin={{ top: 18, right: 18, left: -20, bottom: 4 }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1f1f23" vertical={false} />
-                  <XAxis
-                    dataKey={xAxisMode === 'normalized' ? 'displayStep' : 'opNumber'}
-                    tick={{ fill: '#73737c', fontSize: 10 }}
-                    axisLine={{ stroke: '#27272a' }}
-                    tickLine={false}
-                    interval="preserveStartEnd"
-                    minTickGap={28}
-                  />
-                  <YAxis
-                    domain={[0, 'auto']}
-                    tick={{ fill: '#73737c', fontSize: 10 }}
-                    axisLine={{ stroke: '#27272a' }}
-                    tickLine={false}
-                  />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: '#121214',
-                      borderColor: '#27272a',
-                      borderRadius: '4px',
-                      fontSize: '11px',
-                      color: '#f3f3f4',
-                    }}
-                    formatter={(val: any) => [`${val}`, 'Global Loss']}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="loss"
-                    name="Global Loss"
-                    stroke="#3b82f6"
-                    strokeWidth={1.25}
-                    dot={getLineDot(totalSteps, '#1d4ed8', '#3b82f6')}
-                    activeDot={{ r: 4, stroke: '#121214', strokeWidth: 1.5 }}
-                    label={totalSteps <= 10 ? renderLossLabel : undefined}
-                  />
-                </LineChart>
-              </ScrollableChartWrapper>
+              {epochChartData.length === 0 ? (
+                <div className="h-[208px] flex flex-col items-center justify-center text-center p-4 border border-dashed border-white/[0.08] rounded bg-white/[0.02]">
+                  <Clock className="w-5 h-5 text-[#73737c] mb-1.5 animate-pulse" />
+                  <span className="text-xs text-[#a1a1a8] font-medium">Chưa có Training Metrics; chờ hoàn thành Epoch 1</span>
+                  <span className="text-[11px] text-[#73737c] mt-0.5">Metrics được tính và chốt chính xác khi kết thúc mỗi Epoch</span>
+                </div>
+              ) : (
+                <ScrollableChartWrapper totalSteps={epochChartData.length} height={208}>
+                  <LineChart
+                    data={epochChartData}
+                    margin={{ top: 18, right: 18, left: -20, bottom: 4 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1f1f23" vertical={false} />
+                    <XAxis
+                      dataKey="displayEpoch"
+                      tick={{ fill: '#73737c', fontSize: 10 }}
+                      axisLine={{ stroke: '#27272a' }}
+                      tickLine={false}
+                    />
+                    <YAxis
+                      domain={[0, 'auto']}
+                      tick={{ fill: '#73737c', fontSize: 10 }}
+                      axisLine={{ stroke: '#27272a' }}
+                      tickLine={false}
+                    />
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: '#121214',
+                        borderColor: '#27272a',
+                        borderRadius: '4px',
+                        fontSize: '11px',
+                        color: '#f3f3f4',
+                      }}
+                      formatter={(val: any) => [val != null ? `${val}` : 'UNAVAILABLE', 'Epoch Loss']}
+                      labelFormatter={(lbl) => `${lbl}`}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="loss"
+                      name="Epoch Loss"
+                      stroke="#3b82f6"
+                      strokeWidth={1.25}
+                      dot={{ r: 3, fill: '#3b82f6' }}
+                      activeDot={{ r: 5, stroke: '#121214', strokeWidth: 1.5 }}
+                      connectNulls={false}
+                    />
+                  </LineChart>
+                </ScrollableChartWrapper>
+              )}
             </div>
 
             <div className="flex items-center justify-between pt-2 border-t border-white/[0.04] text-[11px] text-[#73737c]">
               <span>
-                {isScrollable ? (
-                  <span className="text-[#a1a1a8]">Showing all {totalSteps} steps (scroll)</span>
-                ) : (
-                  'Axis: Global Step 0, 1, 2, 3...'
-                )}
+                {epochChartData.length > 0 ? `Completed Epochs: ${epochChartData.length}` : 'Axis: Completed Epochs'}
               </span>
               <span className="text-blue-400 font-mono">
-                {chartData[0]?.loss ?? '—'} (Step 1) → {latestItem?.loss ?? '—'} (Step {totalSteps})
+                {epochChartData.length > 0 && latestEpochMetric?.loss != null
+                  ? `${epochChartData[0]?.displayEpoch}: ${epochChartData[0]?.loss ?? '—'} → ${latestEpochMetric.displayEpoch}: ${latestEpochMetric.loss}`
+                  : 'Chờ hoàn thành Epoch 1'}
               </span>
             </div>
           </div>
@@ -1033,81 +1090,86 @@ export const FullMetricsDashboard: React.FC<FullMetricsDashboardProps> = ({
             </div>
           </div>
 
-          {/* 3. BOTTOM-LEFT: ACCURACY */}
+          {/* 3. BOTTOM-LEFT: ONLINE EPOCH TRAINING ACCURACY */}
           <div className="bg-[#121214] border border-white/[0.07] rounded p-4 space-y-2 flex flex-col justify-between min-w-0 overflow-hidden">
             <div className="flex items-center justify-between">
               <div className="space-y-0.5 min-w-0">
                 <div className="flex items-center gap-2">
                   <TrendingUp className="w-4 h-4 text-emerald-400 shrink-0" />
                   <h4 className="text-xs font-semibold text-[#f3f3f4] truncate">
-                    Accuracy
+                    Online Epoch Training Accuracy
                   </h4>
                 </div>
                 <p className="text-[11px] text-[#73737c] truncate">
-                  Y: Accuracy (%) vs X: Global Step
+                  Y: Accuracy (%) vs X: Completed Epoch
                 </p>
               </div>
               <div className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-xs font-mono font-semibold shrink-0">
-                Score: {latestItem?.accuracy}%
+                Score: {latestEpochMetric?.accuracy != null ? `${latestEpochMetric.accuracy}%` : '—'}
               </div>
             </div>
 
             <div className="w-full pt-2 min-w-0">
-              <ScrollableChartWrapper totalSteps={totalSteps} height={208}>
-                <LineChart
-                  data={chartData}
-                  margin={{ top: 18, right: 18, left: -20, bottom: 4 }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1f1f23" vertical={false} />
-                  <XAxis
-                    dataKey={xAxisMode === 'normalized' ? 'displayStep' : 'opNumber'}
-                    tick={{ fill: '#73737c', fontSize: 10 }}
-                    axisLine={{ stroke: '#27272a' }}
-                    tickLine={false}
-                    interval="preserveStartEnd"
-                    minTickGap={28}
-                  />
-                  <YAxis
-                    domain={[0, 100]}
-                    unit="%"
-                    tick={{ fill: '#73737c', fontSize: 10 }}
-                    axisLine={{ stroke: '#27272a' }}
-                    tickLine={false}
-                  />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: '#121214',
-                      borderColor: '#27272a',
-                      borderRadius: '4px',
-                      fontSize: '11px',
-                      color: '#f3f3f4',
-                    }}
-                    formatter={(val: any) => [`${val}%`, 'Accuracy']}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="accuracy"
-                    name="Accuracy"
-                    stroke="#10b981"
-                    strokeWidth={1.25}
-                    dot={getLineDot(totalSteps, '#047857', '#10b981')}
-                    activeDot={{ r: 4, stroke: '#121214', strokeWidth: 1.5 }}
-                    label={totalSteps <= 10 ? renderAccuracyLabel : undefined}
-                  />
-                </LineChart>
-              </ScrollableChartWrapper>
+              {epochChartData.length === 0 ? (
+                <div className="h-[208px] flex flex-col items-center justify-center text-center p-4 border border-dashed border-white/[0.08] rounded bg-white/[0.02]">
+                  <Clock className="w-5 h-5 text-[#73737c] mb-1.5 animate-pulse" />
+                  <span className="text-xs text-[#a1a1a8] font-medium">Chưa có Training Metrics; chờ hoàn thành Epoch 1</span>
+                  <span className="text-[11px] text-[#73737c] mt-0.5">Metrics được tính và chốt chính xác khi kết thúc mỗi Epoch</span>
+                </div>
+              ) : (
+                <ScrollableChartWrapper totalSteps={epochChartData.length} height={208}>
+                  <LineChart
+                    data={epochChartData}
+                    margin={{ top: 18, right: 18, left: -20, bottom: 4 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1f1f23" vertical={false} />
+                    <XAxis
+                      dataKey="displayEpoch"
+                      tick={{ fill: '#73737c', fontSize: 10 }}
+                      axisLine={{ stroke: '#27272a' }}
+                      tickLine={false}
+                    />
+                    <YAxis
+                      domain={[0, 100]}
+                      unit="%"
+                      tick={{ fill: '#73737c', fontSize: 10 }}
+                      axisLine={{ stroke: '#27272a' }}
+                      tickLine={false}
+                    />
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: '#121214',
+                        borderColor: '#27272a',
+                        borderRadius: '4px',
+                        fontSize: '11px',
+                        color: '#f3f3f4',
+                      }}
+                      formatter={(val: any) => [val != null ? `${val}%` : 'UNAVAILABLE', 'Epoch Accuracy']}
+                      labelFormatter={(lbl) => `${lbl}`}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="accuracy"
+                      name="Epoch Accuracy"
+                      stroke="#10b981"
+                      strokeWidth={1.25}
+                      dot={{ r: 3, fill: '#10b981' }}
+                      activeDot={{ r: 5, stroke: '#121214', strokeWidth: 1.5 }}
+                      connectNulls={false}
+                    />
+                  </LineChart>
+                </ScrollableChartWrapper>
+              )}
             </div>
 
             <div className="flex items-center justify-between pt-2 border-t border-white/[0.04] text-[11px] text-[#73737c]">
               <span>
-                {isScrollable ? (
-                  <span className="text-[#a1a1a8]">Showing all {totalSteps} steps (scroll)</span>
-                ) : (
-                  'Axis: Global Step 0, 1, 2, 3...'
-                )}
+                {epochChartData.length > 0 ? `Completed Epochs: ${epochChartData.length}` : 'Axis: Completed Epochs'}
               </span>
               <span className="text-emerald-400 font-mono">
-                {totalSteps > 1 ? `Latest: ${latestItem?.accuracy}%` : 'No accuracy telemetry'}
+                {epochChartData.length > 0 && latestEpochMetric?.accuracy != null
+                  ? `${latestEpochMetric.displayEpoch}: ${latestEpochMetric.accuracy}%`
+                  : 'Chờ hoàn thành Epoch 1'}
               </span>
             </div>
           </div>

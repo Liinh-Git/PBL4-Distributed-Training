@@ -585,6 +585,7 @@ class ParameterServer:
             tensor_id=identity.tensor_id,
             compute_ms=compute_ms,
             loss=meta.get("loss"),
+            correct_count=meta.get("correct_count"),
         )
 
     @staticmethod

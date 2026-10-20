@@ -28,7 +28,7 @@ import { LiveActivityConsole } from '../components/live/LiveActivityConsole';
 import { CompactSyncViz } from '../components/training/CompactSyncViz';
 import { DistributedTrainingFlowViz } from '../components/training/DistributedTrainingFlowViz';
 import { TrainingTopologyVisualizer } from '../components/training/TrainingTopologyVisualizer';
-import { LiveTrainingCharts, FullMetricsDashboard } from '../components/charts/LiveTrainingCharts';
+import { LiveTrainingCharts, FullMetricsDashboard, EpochMetricData } from '../components/charts/LiveTrainingCharts';
 import { TechnicalDetailsDrawer } from '../components/drawers/TechnicalDetailsDrawer';
 import { EventDetailDrawer } from '../components/drawers/EventDetailDrawer';
 import { WorkerDetailDrawer } from '../components/drawers/WorkerDetailDrawer';
@@ -96,44 +96,96 @@ export const LiveTrainingPage: React.FC = () => {
     };
   }, []);
 
-  // Step Details cache (authoritative worker telemetry: compute_ms, upload_ms, loss, accuracy, timings)
+  // Drawer selected items
+  const [selectedWorker, setSelectedWorker] = useState<any>(null);
+  const [selectedStep, setSelectedStep] = useState<any>(null);
+  const [selectedEvent, setSelectedEvent] = useState<any>(null);
+
+  // Step Details cache for inspected step (authoritative worker telemetry: compute_ms, upload_ms, loss, accuracy, timings)
   const [stepDetailsMap, setStepDetailsMap] = useState<Record<number, StepDetailData>>({});
 
-  useEffect(() => { setStepDetailsMap({}); }, [resolvedAttemptId]);
-
   useEffect(() => {
-    if (!resolvedAttemptId || stream.steps.length === 0) return;
+    setStepDetailsMap({});
+  }, [resolvedAttemptId]);
+
+  const inspectedStepId = selectedStep?.stepId ?? selectedStep?.operationId;
+  useEffect(() => {
+    if (!resolvedAttemptId || inspectedStepId === undefined) return;
     let isMounted = true;
 
-    const fetchStepDetails = async () => {
-      const neededSteps = stream.steps.filter((st) => !stepDetailsMap[st.step_id] || stepDetailsMap[st.step_id].state !== st.state);
-      if (neededSteps.length === 0) return;
-
-      const batchSize = 6;
-      for (let i = 0; i < neededSteps.length; i += batchSize) {
-        if (!isMounted) break;
-        const batch = neededSteps.slice(i, i + batchSize);
-        await Promise.all(
-          batch.map(async (st) => {
-            try {
-              const res = await stepsService.getStep(resolvedAttemptId, st.step_id);
-              if (isMounted && res.data) {
-                setStepDetailsMap((prev) => ({ ...prev, [st.step_id]: res.data }));
-              }
-            } catch {
-              // Ignore background step fetch error
-            }
-          })
-        );
-      }
-    };
-
-    fetchStepDetails();
+    stepsService
+      .getStep(resolvedAttemptId, inspectedStepId)
+      .then((res) => {
+        if (isMounted && res.data) {
+          setStepDetailsMap((prev) => ({ ...prev, [inspectedStepId]: res.data }));
+        }
+      })
+      .catch(() => {});
 
     return () => {
       isMounted = false;
     };
-  }, [resolvedAttemptId, stream.steps.map((s) => `${s.step_id}:${s.state}`).join(',')]);
+  }, [resolvedAttemptId, inspectedStepId, stream.lastReceivedSeq]);
+
+  // Epoch metrics
+  const [epochMetrics, setEpochMetrics] = useState<EpochMetricData[]>([]);
+
+  // Track latest sequence of epoch.metrics.finalized from WS events to trigger refresh
+  const latestEpochEventSeq = useMemo(() => stream.events.reduce(
+    (seq, event) => event.event_type === 'epoch.metrics.finalized'
+      ? Math.max(seq, event.runtime_event_seq) : seq,
+    0,
+  ), [stream.events]);
+
+  useEffect(() => { setEpochMetrics([]); }, [resolvedAttemptId]);
+
+  const fetchEpochMetrics = useCallback(async (signal: AbortSignal) => {
+    if (!resolvedAttemptId) {
+      setEpochMetrics([]);
+      return;
+    }
+    try {
+      const allEvents: any[] = [];
+      let afterSeq = 0;
+      while (true) {
+        const res = await attemptsService.getCatchUpEvents(resolvedAttemptId, {
+          event_type: 'epoch.metrics.finalized',
+          after_seq: afterSeq,
+          limit: 100,
+        }, { signal });
+        const items = res.data || [];
+        if (items.length === 0) break;
+        allEvents.push(...items);
+        const lastItem = items[items.length - 1];
+        if (lastItem.runtime_event_seq <= afterSeq) break;
+        afterSeq = lastItem.runtime_event_seq;
+        if (items.length < 100) break;
+      }
+      const epochMap = new Map<number, EpochMetricData>();
+      for (const ev of allEvents) {
+        const d = ev.details as any;
+        if (d && typeof d.epoch_index === 'number') {
+          epochMap.set(d.epoch_index, {
+            epoch_index: d.epoch_index,
+            sample_count: d.sample_count ?? 0,
+            training_loss: d.training_loss ?? null,
+            training_accuracy: d.training_accuracy ?? null,
+          });
+        }
+      }
+      if (!signal.aborted) {
+        setEpochMetrics(Array.from(epochMap.values()).sort((a, b) => a.epoch_index - b.epoch_index));
+      }
+    } catch {
+      // Graceful fallback
+    }
+  }, [resolvedAttemptId]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchEpochMetrics(controller.signal);
+    return () => controller.abort();
+  }, [fetchEpochMetrics, latestEpochEventSeq, stream.connectionState]);
 
   // UI state
   const [activeTab, setActiveTab] = useState<'live' | 'metrics' | 'technical'>('live');
@@ -143,11 +195,6 @@ export const LiveTrainingPage: React.FC = () => {
   const [isOverflowOpen, setIsOverflowOpen] = useState(false);
   const [jobDetail, setJobDetail] = useState<import('../types/api').JobDetailData | null>(null);
   const [jobDisplayName, setJobDisplayName] = useState<string | null>(null);
-
-  // Drawer selected items
-  const [selectedWorker, setSelectedWorker] = useState<any>(null);
-  const [selectedStep, setSelectedStep] = useState<any>(null);
-  const [selectedEvent, setSelectedEvent] = useState<any>(null);
 
   const [recoveryInfo, setRecoveryInfo] = useState<{
     status: 'idle' | 'checking' | 'verified_final' | 'final_failed' | 'no_checkpoint' | 'unverified';
@@ -436,9 +483,9 @@ export const LiveTrainingPage: React.FC = () => {
       inputModelVersion: st.input_model_version,
       outputModelVersion: st.output_model_version,
       totalSampleCount: st.total_sample_count,
-      loss: detail?.metrics?.loss,
-      accuracy: detail?.metrics?.accuracy,
-      metrics: detail?.metrics,
+      loss: st.metrics?.loss ?? detail?.metrics?.loss ?? null,
+      accuracy: st.metrics?.accuracy ?? detail?.metrics?.accuracy ?? null,
+      metrics: st.metrics ?? detail?.metrics ?? null,
       timings: {
         startedAt: timing?.started_at || (st.committed_at ? 'Committed' : 'In progress'),
         committedAt: timing?.committed_at || st.committed_at || undefined,
@@ -944,30 +991,6 @@ export const LiveTrainingPage: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Real Step Metrics if available */}
-                  {stepDetailsMap[activeStep.step_id]?.metrics && (
-                    <div className="grid grid-cols-2 divide-x divide-white/[0.04] py-1 text-xs border-t border-white/[0.04]">
-                      <div>
-                        <div className="text-[11px] text-[#73737c]">Loss</div>
-                        <div className="text-amber-400 mt-0.5 font-mono font-medium">
-                          {stepDetailsMap[activeStep.step_id].metrics?.loss !== undefined &&
-                          stepDetailsMap[activeStep.step_id].metrics?.loss !== null
-                            ? Number(stepDetailsMap[activeStep.step_id].metrics?.loss).toFixed(4)
-                            : '—'}
-                        </div>
-                      </div>
-                      <div className="pl-3">
-                        <div className="text-[11px] text-[#73737c]">Accuracy</div>
-                        <div className="text-emerald-400 mt-0.5 font-mono font-medium">
-                          {stepDetailsMap[activeStep.step_id].metrics?.accuracy !== undefined &&
-                          stepDetailsMap[activeStep.step_id].metrics?.accuracy !== null
-                            ? `${Number(stepDetailsMap[activeStep.step_id].metrics?.accuracy).toFixed(2)}%`
-                            : '—'}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
                   <div className="pt-2 border-t border-white/[0.07]">
                     <button
                       type="button"
@@ -1004,6 +1027,7 @@ export const LiveTrainingPage: React.FC = () => {
           <LiveTrainingCharts
             steps={legacyStepsAdapter}
             expectedWorkers={expectedWorkersCount ?? 0}
+            epochMetrics={epochMetrics}
             onViewAllMetrics={() => setActiveTab('metrics')}
           />
         </div>
@@ -1016,6 +1040,7 @@ export const LiveTrainingPage: React.FC = () => {
           <FullMetricsDashboard
             steps={legacyStepsAdapter}
             expectedWorkers={expectedWorkersCount ?? 0}
+            epochMetrics={epochMetrics}
           />
         </div>
       )}

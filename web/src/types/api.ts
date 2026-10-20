@@ -689,6 +689,7 @@ export interface StepListItemData {
   batch_ordinal: number;
   total_sample_count?: number | null;
   committed_at?: string | null;
+  metrics?: StepMetricsData | null;
 }
 
 export interface StepTimingData {

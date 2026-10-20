@@ -48,7 +48,6 @@ from pbl4.management_backend.schemas.event import (
 from pbl4.management_backend.schemas.step import (
     StepDetail,
     StepListItem,
-    StepMetrics,
     StepTiming,
     WorkerStepItem,
 )
@@ -418,7 +417,7 @@ def list_steps(
         rows = attempt_service.list_attempt_steps(conn, attempt_id, limit=limit + 1, cursor=cursor)
 
     has_more = len(rows) > limit
-    next_cursor = str(rows[limit]["step_id"]) if has_more else None
+    next_cursor = str(rows[limit - 1]["step_id"]) if has_more else None
     items = [
         StepListItem(
             step_id=r["step_id"],
@@ -445,15 +444,6 @@ def get_step(attempt_id: str, step_id: int):
     with db.get_connection() as conn:
         step = attempt_service.get_step(conn, attempt_id, step_id)
     worker_steps = step.get("worker_steps", [])
-    metrics_data = step.get("metrics")
-    metrics = (
-        StepMetrics(
-            loss=metrics_data.get("loss"),
-            accuracy=metrics_data.get("accuracy"),
-        )
-        if metrics_data
-        else None
-    )
     is_step_committed = step["state"] == "COMMITTED"
     return ItemResponse(
         data=StepDetail(
@@ -475,7 +465,6 @@ def get_step(attempt_id: str, step_id: int):
             )
             if step.get("started_at")
             else None,
-            metrics=metrics,
             worker_steps=[
                 WorkerStepItem(
                     worker_id=ws["worker_id"],

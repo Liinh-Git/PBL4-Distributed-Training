@@ -15,6 +15,7 @@ def _priority(event: RuntimeEvent) -> int:
         return 3
     if (
         event.event_type == "step.committed"
+        or event.event_type == "epoch.metrics.finalized"
         or event.event_type.startswith("checkpoint.")
         or event.event_type.endswith(".state_changed")
     ):
