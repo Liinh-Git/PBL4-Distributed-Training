@@ -61,7 +61,7 @@ def snapshot(checkpoint_id="checkpoint"):
         "job",
         "attempt",
         "contract",
-        "after_each_model_update_blocking",
+        "periodic",
         1,
         "strict_bsp",
         "dataset",
@@ -241,12 +241,12 @@ def test_descriptor_load_rejects_corrupt_model_with_matching_outer_hash(tmp_path
 
 
 def test_policy_requires_both_gates_and_caps_retries():
-    policy = CheckpointPolicy()
-    assert not policy.requires_checkpoint(update_completed=True, synchronization_complete=False)
-    assert policy.requires_checkpoint(update_completed=True, synchronization_complete=True)
-    assert not policy.allows_commit(synchronization_complete=True, checkpoint_state="WRITING")
-    assert not policy.allows_commit(synchronization_complete=False, checkpoint_state="COMPLETE")
-    assert policy.allows_commit(synchronization_complete=True, checkpoint_state="COMPLETE")
+    policy = CheckpointPolicy(every_n_epochs=5, max_attempts=3)
+    assert not policy.due_epoch(0)
+    assert not policy.due_epoch(1)
+    assert not policy.due_epoch(4)
+    assert policy.due_epoch(5)
+    assert policy.due_epoch(10)
     assert [policy.may_retry(n) for n in range(4)] == [True, True, True, False]
 
 

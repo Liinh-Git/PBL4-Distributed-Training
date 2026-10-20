@@ -15,7 +15,7 @@ import {
   WifiOff,
 } from 'lucide-react';
 import { useAttemptStream } from '../hooks/useAttemptStream';
-import { attemptsService, workersService, stepsService, systemService, jobsService } from '../api';
+import { attemptsService, workersService, stepsService, systemService, jobsService, checkpointsService } from '../api';
 import {
   MetricItemData,
   WorkerSessionItemData,
@@ -139,7 +139,6 @@ export const LiveTrainingPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'live' | 'metrics' | 'technical'>('live');
   const [isAbortModalOpen, setIsAbortModalOpen] = useState(false);
   const [isTechnicalDrawerOpen, setIsTechnicalDrawerOpen] = useState(false);
-  const [checkpointSavedToast, setCheckpointSavedToast] = useState(false);
   const [showDetailedSyncModal, setShowDetailedSyncModal] = useState(false);
   const [isOverflowOpen, setIsOverflowOpen] = useState(false);
   const [jobDetail, setJobDetail] = useState<import('../types/api').JobDetailData | null>(null);
@@ -149,6 +148,12 @@ export const LiveTrainingPage: React.FC = () => {
   const [selectedWorker, setSelectedWorker] = useState<any>(null);
   const [selectedStep, setSelectedStep] = useState<any>(null);
   const [selectedEvent, setSelectedEvent] = useState<any>(null);
+
+  const [recoveryInfo, setRecoveryInfo] = useState<{
+    status: 'idle' | 'checking' | 'verified_final' | 'final_failed' | 'no_checkpoint' | 'unverified';
+    lastIndexedEpoch?: number;
+    checkpointId?: string;
+  }>({ status: 'idle' });
 
   const attempt = stream.attempt;
 
@@ -178,11 +183,86 @@ export const LiveTrainingPage: React.FC = () => {
   const events = stream.events;
   const activeStep = steps[0];
 
+  // Verify checkpoint lineage when training run COMPLETED
+  useEffect(() => {
+    if (!attempt || attempt.state !== 'COMPLETED') {
+      setRecoveryInfo({ status: 'idle' });
+      return;
+    }
+
+    const finalFailedInMeta = Boolean(attempt.runtime_metadata?.final_checkpoint_failed);
+    const finalFailedInEvents = events.some(
+      (e) => e.event_type === 'checkpoint.failed' && (e.details?.is_final || e.details?.final)
+    );
+    const isFinalFailed = finalFailedInMeta || finalFailedInEvents;
+
+    let isMounted = true;
+    setRecoveryInfo({ status: 'checking' });
+
+    // Fetch COMPLETE checkpoints for THIS attempt only (lineage safety: do not cross to unrelated attempts)
+    checkpointsService
+      .listCheckpoints({ attempt_id: attempt.attempt_id, state: 'COMPLETE', limit: 1 })
+      .then(async (res) => {
+        if (!isMounted) return;
+        const currentAttemptComplete = res.data?.[0];
+
+        if (currentAttemptComplete) {
+          try {
+            const detailRes = await checkpointsService.getCheckpoint(currentAttemptComplete.checkpoint_id);
+            if (!isMounted) return;
+            const cursorEpoch = detailRes.data?.recovery_cursor?.epoch;
+            const totalEpochs =
+              jobDetail?.resolved_contract?.training?.epochs ??
+              jobDetail?.requested_contract?.epochs ??
+              attempt.epoch;
+
+            if (!totalEpochs || cursorEpoch === undefined) {
+              setRecoveryInfo({ status: 'unverified' });
+            } else if (isFinalFailed || cursorEpoch !== totalEpochs) {
+              setRecoveryInfo({
+                status: 'final_failed',
+                lastIndexedEpoch: cursorEpoch,
+                checkpointId: currentAttemptComplete.checkpoint_id,
+              });
+            } else {
+              setRecoveryInfo({ status: 'verified_final' });
+            }
+          } catch {
+            if (isMounted) setRecoveryInfo({ status: 'unverified' });
+          }
+        } else if (attempt.resume_from_checkpoint_id) {
+          try {
+            const sourceDetail = await checkpointsService.getCheckpoint(attempt.resume_from_checkpoint_id);
+            if (!isMounted) return;
+            const cursorEpoch = sourceDetail.data?.recovery_cursor?.epoch;
+            setRecoveryInfo({
+              status: 'final_failed',
+              lastIndexedEpoch: cursorEpoch,
+              checkpointId: attempt.resume_from_checkpoint_id,
+            });
+          } catch {
+            if (isMounted) setRecoveryInfo({ status: 'unverified' });
+          }
+        } else {
+          if (isFinalFailed) {
+            setRecoveryInfo({ status: 'no_checkpoint' });
+          } else {
+            setRecoveryInfo({ status: 'unverified' });
+          }
+        }
+      })
+      .catch(() => {
+        if (isMounted) setRecoveryInfo({ status: 'unverified' });
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [attempt?.attempt_id, attempt?.state, attempt?.runtime_metadata, attempt?.resume_from_checkpoint_id, events, jobDetail]);
+
   const handleRequestCheckpoint = async () => {
     try {
       await stream.requestCheckpoint('manual');
-      setCheckpointSavedToast(true);
-      setTimeout(() => setCheckpointSavedToast(false), 3500);
     } catch (err: any) {
       alert(`Checkpoint request failed: ${err?.message || 'Unknown error'}`);
     }
@@ -375,11 +455,54 @@ export const LiveTrainingPage: React.FC = () => {
 
   return (
     <div className="space-y-4 w-full pb-10 font-sans select-none">
-      {/* Toast Notification */}
-      {checkpointSavedToast && (
-        <div className="fixed top-5 right-5 z-50 bg-[#121214] border border-emerald-500/40 text-emerald-300 px-3.5 py-2.5 rounded shadow-2xl flex items-center gap-2 text-xs font-medium animate-in slide-in-from-top-2">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-          <span>Checkpoint request accepted by coordinator</span>
+      {/* Final Checkpoint Failure Persistent Warning */}
+      {attempt.state === 'COMPLETED' && recoveryInfo.status === 'final_failed' && (
+        <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded text-xs text-amber-200 space-y-2">
+          <div className="flex items-center gap-2 font-semibold text-amber-300">
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>Huấn luyện hoàn thành nhưng checkpoint cuối cùng lưu không thành công.</span>
+          </div>
+          {recoveryInfo.lastIndexedEpoch !== undefined && recoveryInfo.lastIndexedEpoch > 0 ? (
+            <p className="text-amber-200/90 leading-relaxed">
+              Mốc khôi phục khả dụng gần nhất trong chuỗi thực thi: <strong>cuối epoch {recoveryInfo.lastIndexedEpoch}</strong> (tiếp tục từ <strong>epoch {recoveryInfo.lastIndexedEpoch + 1}</strong>).
+            </p>
+          ) : (
+            <p className="text-amber-200/90 leading-relaxed">
+              Mốc khôi phục khả dụng: Checkpoint ID <span className="font-mono text-amber-300">{recoveryInfo.checkpointId}</span>.
+            </p>
+          )}
+          {recoveryInfo.checkpointId && (
+            <div className="flex items-center gap-3 pt-1">
+              <span className="font-mono text-[11px] text-amber-300/80">
+                Checkpoint: {recoveryInfo.checkpointId}
+              </span>
+              <Link
+                to="/checkpoints"
+                className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 rounded border border-amber-500/30 transition-colors"
+              >
+                Xem danh sách checkpoint
+              </Link>
+            </div>
+          )}
+        </div>
+      )}
+
+      {attempt.state === 'COMPLETED' && recoveryInfo.status === 'no_checkpoint' && (
+        <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded text-xs text-amber-200 space-y-1.5">
+          <div className="flex items-center gap-2 font-semibold text-amber-300">
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>Huấn luyện hoàn thành nhưng checkpoint cuối cùng lưu không thành công.</span>
+          </div>
+          <p className="text-amber-200/90">
+            Không có điểm khôi phục khả dụng trong chuỗi thực thi này.
+          </p>
+        </div>
+      )}
+
+      {attempt.state === 'COMPLETED' && recoveryInfo.status === 'unverified' && (
+        <div className="p-3 bg-zinc-800/80 border border-white/[0.08] rounded text-xs text-[#a1a1a8] flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 text-[#73737c] shrink-0" />
+          <span>Chưa xác minh được mốc khôi phục từ backend.</span>
         </div>
       )}
 

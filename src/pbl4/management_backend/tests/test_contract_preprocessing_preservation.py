@@ -250,7 +250,7 @@ def test_api_validate_job_preserves_custom_preprocessing(app_client):
                 "expected_workers": 3,
             },
             "update_policy": {"type": "plain_sgd_without_momentum"},
-            "checkpoint_policy": {"type": "after_each_model_update_blocking", "schema_version": 1},
+            "checkpoint_policy": {"type": "periodic", "policy_version": 1, "schema_version": 1, "every_n_epochs": 5},
             "protocols": {"dtp_version": 1, "mcp_version": 1},
         },
         "warnings": [],

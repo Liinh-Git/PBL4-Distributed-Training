@@ -54,6 +54,7 @@ export const NewTrainingFlowPage: React.FC = () => {
   const [seed, setSeed] = useState<number>(42);
   const [workloadPolicy, setWorkloadPolicy] = useState<'equal' | 'dbs'>('equal');
   const [existingWups, setExistingWups] = useState<number | undefined>(undefined);
+  const [everyNEpochs, setEveryNEpochs] = useState<number>(5);
   const [jobName, setJobName] = useState<string>('');
   const [jobDescription, setJobDescription] = useState<string>('');
 
@@ -125,6 +126,11 @@ export const NewTrainingFlowPage: React.FC = () => {
             }
             if (req.work_units_per_step !== undefined) {
               setExistingWups(req.work_units_per_step);
+            }
+            if (req.checkpoint?.every_n_epochs) {
+              setEveryNEpochs(req.checkpoint.every_n_epochs);
+            } else if ((job as any).resolved_contract?.checkpoint_policy?.every_n_epochs) {
+              setEveryNEpochs((job as any).resolved_contract.checkpoint_policy.every_n_epochs);
             }
 
             const matchingBuild = loadedBuilds.find(b => b.dataset_build_id === req.dataset_build_id);
@@ -217,6 +223,10 @@ export const NewTrainingFlowPage: React.FC = () => {
         setFormError('Enter a positive whole number of work units per step for DBS. It must exceed the expected worker count.');
         return;
       }
+      if (!Number.isInteger(everyNEpochs) || everyNEpochs <= 0) {
+        setFormError('Enter a positive whole number of epochs for checkpoint cadence.');
+        return;
+      }
       setValidating(true);
 
       const finalName = jobName.trim() || `${selectedModel} on ${currentDataset?.name || 'Dataset'}`;
@@ -237,6 +247,7 @@ export const NewTrainingFlowPage: React.FC = () => {
             training_seed: seed,
             training_strategy: 'strict_bsp',
             workload_policy: workloadPolicy,
+            checkpoint: { every_n_epochs: everyNEpochs },
             ...(existingWups !== undefined
               ? { work_units_per_step: existingWups }
               : {}),
@@ -257,6 +268,7 @@ export const NewTrainingFlowPage: React.FC = () => {
             training_seed: seed,
             training_strategy: 'strict_bsp',
             workload_policy: workloadPolicy,
+            checkpoint: { every_n_epochs: everyNEpochs },
             ...(existingWups !== undefined
               ? { work_units_per_step: existingWups }
               : {}),
@@ -716,6 +728,24 @@ export const NewTrainingFlowPage: React.FC = () => {
 
               <div>
                 <label className="block text-[#73737c] mb-1">
+                  Checkpoint every N epochs
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="1000"
+                  step="1"
+                  value={everyNEpochs}
+                  onChange={e => setEveryNEpochs(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                  className="w-full px-3 py-1.5 bg-[#171719] border border-white/[0.07] rounded text-xs text-[#f3f3f4] focus:border-blue-500 focus:outline-hidden transition-colors"
+                />
+                <span className="text-[11px] text-[#73737c] mt-1 block">
+                  Periodic snapshot cadence (default 5 epochs)
+                </span>
+              </div>
+
+              <div>
+                <label className="block text-[#73737c] mb-1">
                   Dataset Batch Size (Configured in Build)
                 </label>
                 <input
@@ -984,6 +1014,19 @@ export const NewTrainingFlowPage: React.FC = () => {
               <div className="text-xs text-[#a1a1a8] sm:text-right">
                 {preview?.synchronization?.expected_workers || 3} expected workers
                 {preview?.workload?.work_units_per_step ? ` · ${preview.workload.work_units_per_step} work units/step` : ''} · DTP v{preview?.protocols?.dtp_version ?? 1} / MCP v{preview?.protocols?.mcp_version ?? 1}
+              </div>
+            </div>
+
+            {/* Checkpoint Section */}
+            <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <div className="text-xs text-[#73737c]">Checkpoint Policy</div>
+                <div className="text-sm font-medium text-[#f3f3f4] mt-0.5">
+                  Every {everyNEpochs} epochs (periodic)
+                </div>
+              </div>
+              <div className="text-xs text-[#a1a1a8] sm:text-right">
+                Blocking write at epoch boundaries · Final save on complete
               </div>
             </div>
           </div>

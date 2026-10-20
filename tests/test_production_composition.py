@@ -42,7 +42,7 @@ def _snapshot() -> CheckpointSnapshot:
         job_id="job-1",
         created_by_attempt_id="attempt-1",
         contract_hash="a" * 64,
-        checkpoint_policy="after_each_model_update_blocking",
+        checkpoint_policy="periodic",
         checkpoint_policy_version=1,
         training_strategy="strict_bsp",
         dataset_build_id="build-1",
@@ -71,3 +71,6 @@ def test_checkpoint_v1_round_trip_and_integrity_rejection():
         serializer.deserialize(payload, metadata + b"\n")
     with pytest.raises(ValueError, match="manifest hash"):
         serializer.serialize(replace(expected, model=ModelSnapshot(4, "bad", payload)))
+    with pytest.raises(ValueError, match="Unsupported checkpoint policy"):
+        serializer.serialize(replace(expected, checkpoint_policy="after_each_model_update_blocking"))
+

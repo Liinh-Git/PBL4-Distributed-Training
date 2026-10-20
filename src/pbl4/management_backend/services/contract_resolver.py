@@ -146,6 +146,27 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
     else:
         k = expected_workers
 
+    raw_cp = requested_contract.get("checkpoint")
+    cp_n = 5
+    if raw_cp is not None:
+        if isinstance(raw_cp, dict):
+            if not raw_cp:
+                errors.append("checkpoint group cannot be empty.")
+            else:
+                n_val = raw_cp.get("every_n_epochs")
+                if n_val is None:
+                    errors.append("checkpoint.every_n_epochs is required when checkpoint group is provided.")
+                elif isinstance(n_val, bool) or not isinstance(n_val, int) or n_val <= 0:
+                    errors.append("checkpoint.every_n_epochs must be an integer > 0 (boolean/float values are rejected).")
+                elif len(raw_cp) > 1:
+                    errors.append("checkpoint group contains unknown fields.")
+                else:
+                    cp_n = n_val
+        else:
+            errors.append("checkpoint must be an object.")
+    if "checkpoint_policy" in requested_contract:
+        errors.append("checkpoint_policy in requested_contract is unsupported. Use 'checkpoint' with 'every_n_epochs'.")
+
     if build is not None:
         batch_size = build.get("batch_size")
         if (
@@ -281,8 +302,10 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
             "type": "plain_sgd_without_momentum",
         },
         "checkpoint_policy": {
-            "type": "after_each_model_update_blocking",
+            "type": "periodic",
+            "policy_version": 1,
             "schema_version": 1,
+            "every_n_epochs": cp_n,
         },
         "protocols": {
             "dtp_version": 1,

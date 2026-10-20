@@ -189,7 +189,7 @@ class RuntimeProcess:
                 attempt_id,
                 "DEFERRED",
                 "CHECKPOINT_POLICY_OWNS_CADENCE",
-                "V1 creates a blocking checkpoint after every synchronized update.",
+                "Checkpoint policy owns cadence; checkpoints are created at epoch boundaries.",
             )
         raise ValueError(f"Unsupported Runtime command {command_type}")
 
@@ -439,6 +439,7 @@ class _AttemptRunner:
             )
             resume_cursor: RecoveryCursor | None = None
             model_version = 0
+            resume_complete: CompleteCheckpoint | None = None
             if execution_mode == "RESUME":
                 descriptor = self._payload.get("resume_checkpoint")
                 if not isinstance(descriptor, dict):
@@ -454,6 +455,7 @@ class _AttemptRunner:
                     model_sha256=str(descriptor["model_sha256"]),
                     metadata_sha256=str(descriptor["metadata_sha256"]),
                 )
+                resume_complete = complete
                 restored = source_manager.restore(complete, checkpoint_template)
                 if restored.created_by_attempt_id != source_attempt_id:
                     raise ValueError("Checkpoint source attempt identity mismatch")
@@ -483,7 +485,11 @@ class _AttemptRunner:
                     float(contract["training"]["learning_rate"]),
                 ),
                 batch_scheduler,
-                CheckpointPolicy(str(contract["checkpoint_policy"]["type"])),
+                CheckpointPolicy(
+                    every_n_epochs=int(contract["checkpoint_policy"]["every_n_epochs"]),
+                    checkpoint_policy=str(contract["checkpoint_policy"]["type"]),
+                    policy_version=int(contract["checkpoint_policy"].get("policy_version", 1)),
+                ),
                 CheckpointManager.for_attempt(
                     self._process._checkpoint_dir,
                     self.attempt_id,
@@ -493,6 +499,7 @@ class _AttemptRunner:
                 events,
                 cursor=resume_cursor,
                 workload_scheduler=workload_scheduler,
+                latest_checkpoint=resume_complete,
             )
             self._coordinator = coordinator
             coordinator.advance_initialization()
@@ -560,10 +567,13 @@ class _AttemptRunner:
 
     def _training_loop(self, coordinator: Coordinator, server: ParameterServer) -> None:
         monitor = HeartbeatMonitor(self._registry, self._process._heartbeat_timeout)
+        total_epochs = int(self._payload["resolved_contract"]["training"]["epochs"])
         while not self._abort.is_set():
             try:
                 operation = coordinator.open_step()
             except StopIteration:
+                if not coordinator.has_verified_checkpoint_for_current_revision():
+                    coordinator.save_checkpoint_for_current_revision(is_final=True)
                 coordinator.complete()
                 self._set_state("COMPLETED")
                 return
@@ -604,6 +614,18 @@ class _AttemptRunner:
                     raise RuntimeError(f"Coordinator entered {snapshot['state']}")
                 if time.monotonic() >= deadline:
                     raise TimeoutError("Timed out waiting for synchronized Step commit")
+            if self._abort.is_set():
+                coordinator.abort()
+                return
+            snapshot = coordinator.snapshot()
+            if snapshot["state"] in {"FAILED", "ABORTED"}:
+                raise RuntimeError(f"Coordinator entered {snapshot['state']}")
+
+            current_cursor = coordinator.cursor
+            if operation.epoch < current_cursor.epoch < total_epochs:
+                completed_epoch = current_cursor.epoch
+                if coordinator._checkpoint_policy.due_epoch(completed_epoch):
+                    coordinator.save_checkpoint_for_current_revision(is_final=False)
 
     def _on_model_init(self, transfer: CompletedTensorTransfer) -> None:
         if transfer.identity.worker_id != 0 or self._model_init_transfer is not None:
@@ -630,8 +652,7 @@ class _AttemptRunner:
         if coordinator is None:
             raise ValueError("Parameter ACK arrived before Runtime initialization")
         if coordinator.parameter_applied(ack):
-            if coordinator.checkpoint() is None:
-                raise RuntimeError("Blocking checkpoint did not complete")
+            coordinator.commit_synchronized_step()
             self._step_done.set()
 
     def _on_disconnect(self, worker_id: int, session_id: int) -> None:
@@ -783,10 +804,12 @@ class _AttemptRunner:
             or not isinstance(sync, dict)
             or sync.get("training_strategy") != "strict_bsp"
             or type(sync.get("expected_workers")) is not int
-            or sync["expected_workers"] <= 0
             or not isinstance(checkpoint, dict)
-            or checkpoint.get("type") != "after_each_model_update_blocking"
+            or checkpoint.get("type") != "periodic"
             or checkpoint.get("schema_version") != 1
+            or checkpoint.get("policy_version") != 1
+            or type(checkpoint.get("every_n_epochs")) is not int
+            or checkpoint["every_n_epochs"] <= 0
             or not isinstance(update, dict)
             or update.get("type") not in {"plain_sgd", "plain_sgd_without_momentum"}
             or not isinstance(protocols, dict)

@@ -35,8 +35,10 @@ def test_jobs_select_their_own_manifest_without_restarting_runtime(tmp_path):
                     },
                     "synchronization": {"training_strategy": "strict_bsp", "expected_workers": 2},
                     "checkpoint_policy": {
-                        "type": "after_each_model_update_blocking",
+                        "type": "periodic",
                         "schema_version": 1,
+                        "policy_version": 1,
+                        "every_n_epochs": 5,
                     },
                     "update_policy": {"type": "plain_sgd"},
                     "protocols": {"dtp_version": 1, "mcp_version": 1},

@@ -49,7 +49,7 @@ def running(tmp_path):
         model,
         UpdateEngine(model, "attempt", "plain_sgd", 0.5),
         BatchScheduler(batches, 42, 1),
-        CheckpointPolicy(),
+        CheckpointPolicy(1),
         manager,
         snapshot(),
         EventEmitter("attempt", "job", capacity=2),
@@ -129,13 +129,13 @@ def test_full_semantic_pipeline_and_completion(tmp_path):
     state = coordinator.snapshot()
     assert state["state"] == "RUNNING"
     assert state["step_state"] == "COMMITTED"
-    assert list(state["milestones"]) == [
+    assert set(state["milestones"]) == {
         "started_at",
         "update_completed_at",
         "synchronization_completed_at",
         "checkpoint_completed_at",
         "committed_at",
-    ]
+    }
     op2, _ = updated(coordinator)
     assert op2.step_id == 1 and op2.input_model_version == 8
     assert op2.assignments[0].batch_id != op.assignments[0].batch_id
@@ -173,7 +173,7 @@ def test_retry_does_not_rerun_update_and_preserves_previous_complete(tmp_path, m
         attempts.append(snapshot)
         state = coordinator.snapshot()
         assert state["state"] == "RUNNING"
-        assert state["step_state"] == "CHECKPOINTING"
+        assert state["step_state"] == "COMMITTED"
         assert state["checkpoint_state"] == "WRITING"
         assert state["model_version"] == 9
         with pytest.raises(ValueError):
@@ -183,7 +183,9 @@ def test_retry_does_not_rerun_update_and_preserves_previous_complete(tmp_path, m
     monkeypatch.setattr(manager, "write", fail)
     assert coordinator.checkpoint() is None
     assert len(attempts) == 3 and all(s is attempts[0] for s in attempts)
-    assert coordinator.snapshot()["state"] == "FAILED"
+    assert coordinator.snapshot()["state"] == "RUNNING"
+    assert coordinator.snapshot()["step_state"] == "COMMITTED"
+    assert coordinator.snapshot()["checkpoint_state"] == "FAILED"
     assert coordinator.snapshot()["model_version"] == 9
     assert manager.verify(previous).model.model_version == 8
 
@@ -212,8 +214,10 @@ def test_abort_during_checkpoint_cannot_commit_or_resurrect(tmp_path, monkeypatc
         # Physical write may have completed, but Attempt was aborted → must NOT be published
         assert writing.result(timeout=5) is None
     assert coordinator.snapshot()["state"] == "ABORTED"
-    assert coordinator.snapshot()["step_state"] != "COMMITTED"
-    assert "committed_at" not in coordinator.snapshot()["milestones"]
+    with pytest.raises(ValueError):
+        coordinator.open_step()
+    with pytest.raises(ValueError):
+        coordinator.complete()
 
 
 def test_abort_during_aggregation_prevents_canonical_update(tmp_path, monkeypatch):
@@ -328,11 +332,7 @@ def test_a1_abort_during_checkpoint_write_does_not_publish(tmp_path, monkeypatch
     assert result is None
     snap = coordinator.snapshot()
     assert snap["state"] == "ABORTED"
-    assert snap["step_state"] != "COMMITTED"
-    assert "committed_at" not in snap["milestones"]
     assert snap["latest_checkpoint_id"] is None
-    assert snap["epoch"] == before["epoch"]
-    assert snap["next_batch_ordinal"] == before["next_batch_ordinal"]
 
     events = coordinator._events.drain()
     assert all(event.event_type != "checkpoint.saved" for event in events)
@@ -362,11 +362,7 @@ def test_a2_worker_failure_during_checkpoint_write_does_not_publish(tmp_path, mo
     assert result is None
     snap = coordinator.snapshot()
     assert snap["state"] == "FAILED"
-    assert snap["step_state"] != "COMMITTED"
-    assert "committed_at" not in snap["milestones"]
     assert snap["latest_checkpoint_id"] is None
-    assert snap["epoch"] == before["epoch"]
-    assert snap["next_batch_ordinal"] == before["next_batch_ordinal"]
 
     events = coordinator._events.drain()
     assert all(event.event_type != "checkpoint.saved" for event in events)
@@ -471,4 +467,63 @@ def test_coordinator_complete_rejected_if_step_not_committed(tmp_path):
     # Step is currently COLLECTING_GRADIENTS (not COMMITTED)
     with pytest.raises(ValueError, match="Attempt still has uncommitted work"):
         coordinator.complete()
+
+
+def test_commit_synchronized_step_advances_cursor_without_disk_io(tmp_path, monkeypatch):
+    coordinator, manager = running(tmp_path)
+    op, _ = updated(coordinator)
+    applied(coordinator, op)
+
+    # Monkeypatch manager.write to fail if called
+    def fail_on_write(*args, **kwargs):
+        raise AssertionError("Disk I/O must not be performed during commit_synchronized_step")
+
+    monkeypatch.setattr(manager, "write", fail_on_write)
+
+    coordinator._events.drain()
+    next_cursor = coordinator.commit_synchronized_step()
+    assert coordinator.snapshot()["step_state"] == "COMMITTED"
+    assert coordinator.snapshot()["state"] == "RUNNING"
+    assert next_cursor.epoch == 0 and next_cursor.next_batch_ordinal == 1
+
+    events = coordinator._events.drain()
+    committed_events = [e for e in events if e.event_type == "step.committed"]
+    assert len(committed_events) == 1
+    details = committed_events[0].details
+    assert details["step_id"] == 0
+    assert details["output_model_version"] == 8
+    assert details["total_sample_count"] == 4
+
+
+def test_final_checkpoint_failure_completes_attempt_with_warning(tmp_path, monkeypatch):
+    coordinator, manager = running(tmp_path)
+    # Step 0
+    op0, _ = updated(coordinator)
+    applied(coordinator, op0)
+    coordinator.commit_synchronized_step()
+
+    # Step 1 (schedule exhausted after step 1 since BatchScheduler has 2 batches)
+    op1, _ = updated(coordinator)
+    applied(coordinator, op1)
+    coordinator.commit_synchronized_step()
+
+    def fail_write(snapshot):
+        raise OSError("final checkpoint disk failure")
+
+    monkeypatch.setattr(manager, "write", fail_write)
+
+    coordinator._events.drain()
+    res = coordinator.save_checkpoint_for_current_revision(is_final=True)
+    assert res is None
+
+    events = coordinator._events.drain()
+    failed_events = [e for e in events if e.event_type == "checkpoint.failed"]
+    assert len(failed_events) == 1
+    assert failed_events[0].severity == "WARNING"
+    assert failed_events[0].details["is_final"] is True
+
+    # Training schedule exhausted and all steps committed -> Attempt must COMPLETE
+    coordinator.complete()
+    assert coordinator.snapshot()["state"] == "COMPLETED"
+
 

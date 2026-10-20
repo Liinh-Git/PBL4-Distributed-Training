@@ -43,6 +43,7 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
   const [seed, setSeed] = useState<number>(42);
   const [selectedModel, setSelectedModel] = useState<string>('resnet18_groupnorm');
   const [selectedBuildId, setSelectedBuildId] = useState<string>('');
+  const [everyNEpochs, setEveryNEpochs] = useState<number>(5);
   const [workloadPolicy, setWorkloadPolicy] = useState<WorkloadPolicy>('equal');
   const [initialPolicy, setInitialPolicy] = useState<WorkloadPolicy>('equal');
   const [existingWups, setExistingWups] = useState<number | undefined>(undefined);
@@ -111,6 +112,11 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
             if (fullJob.requested_contract.work_units_per_step !== undefined) {
               setExistingWups(fullJob.requested_contract.work_units_per_step);
             }
+            if (fullJob.requested_contract.checkpoint?.every_n_epochs) {
+              setEveryNEpochs(fullJob.requested_contract.checkpoint.every_n_epochs);
+            } else if ((fullJob as any).resolved_contract?.checkpoint_policy?.every_n_epochs) {
+              setEveryNEpochs((fullJob as any).resolved_contract.checkpoint_policy.every_n_epochs);
+            }
           }
         }
 
@@ -168,6 +174,11 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
           setSaving(false);
           return;
         }
+        if (!Number.isInteger(everyNEpochs) || everyNEpochs <= 0) {
+          setError('Enter a positive whole number of epochs for checkpoint cadence.');
+          setSaving(false);
+          return;
+        }
 
         const patchContract: RequestedContractPatchV1 = {
           dataset_build_id: selectedBuildId,
@@ -177,6 +188,7 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
           training_seed: Number(seed),
           training_strategy: 'strict_bsp',
           workload_policy: workloadPolicy,
+          checkpoint: { every_n_epochs: Number(everyNEpochs) },
           ...((workloadPolicy === 'dbs' || workloadPolicy === initialPolicy) && existingWups !== undefined
             ? { work_units_per_step: existingWups }
             : {}),
@@ -373,8 +385,8 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
                 </div>
               </div>
 
-              {/* Epochs, Learning Rate, Seed */}
-              <div className="grid grid-cols-3 gap-2.5 pt-1">
+              {/* Epochs, Learning Rate, Seed, Checkpoint Cadence */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-1">
                 <div className="space-y-1">
                   <label className="block text-[11px] font-medium text-[#a1a1a8]">
                     Epochs
@@ -411,6 +423,20 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
                     type="number"
                     value={seed}
                     onChange={e => setSeed(parseInt(e.target.value) || 0)}
+                    className="w-full px-2.5 py-1.5 rounded bg-[#171719] border border-white/[0.08] text-[#f3f3f4] text-xs focus:outline-hidden focus:border-blue-500"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="block text-[11px] font-medium text-[#a1a1a8]">
+                    Checkpoint (Epochs)
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={1000}
+                    value={everyNEpochs}
+                    onChange={e => setEveryNEpochs(Math.max(1, parseInt(e.target.value) || 1))}
                     className="w-full px-2.5 py-1.5 rounded bg-[#171719] border border-white/[0.08] text-[#f3f3f4] text-xs focus:outline-hidden focus:border-blue-500"
                   />
                 </div>
@@ -503,7 +529,7 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
               <span className="text-[11px] font-semibold text-[#73737c]">
                 Locked Training Parameters
               </span>
-              <div className="grid grid-cols-3 gap-2 text-[11px]">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
                 <div className="p-2 rounded bg-[#171719] border border-white/[0.05]">
                   <span className="text-[#73737c] block">Model</span>
                   <span className="text-[#f3f3f4] font-medium">{job.model_id || 'resnet18'}</span>
@@ -516,6 +542,12 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
                   <span className="text-[#73737c] block">Workload</span>
                   <span className="text-[#f3f3f4] font-medium">
                     {workloadPolicy === 'dbs' ? 'DBS Adaptive' : 'Equal'}
+                  </span>
+                </div>
+                <div className="p-2 rounded bg-[#171719] border border-white/[0.05]">
+                  <span className="text-[#73737c] block">Checkpoint</span>
+                  <span className="text-[#f3f3f4] font-medium">
+                    Every {everyNEpochs} epochs
                   </span>
                 </div>
               </div>

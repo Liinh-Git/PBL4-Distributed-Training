@@ -9,14 +9,29 @@ import math
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from pbl4.management_backend.schemas.common import StrictWriteModel
 
 # ─── Requested Contract (user input) ─────────────────────────────────────────
 
 
-class RequestedContractV1(StrictWriteModel):
+class CheckpointRequestV1(StrictWriteModel):
+    every_n_epochs: int = Field(gt=0)
+
+    @field_validator("every_n_epochs", mode="before")
+    @classmethod
+    def validate_every_n_epochs(cls, v: Any) -> Any:
+        if isinstance(v, bool):
+            raise ValueError("Boolean values are not accepted for every_n_epochs.")
+        if not isinstance(v, int):
+            raise ValueError("every_n_epochs must be an integer.")
+        if v <= 0:
+            raise ValueError("every_n_epochs must be a positive integer.")
+        return v
+
+
+class RequestedContractCreateV1(StrictWriteModel):
     dataset_build_id: str
     model_id: str
     epochs: int = Field(ge=1)
@@ -25,6 +40,7 @@ class RequestedContractV1(StrictWriteModel):
     training_strategy: str = "strict_bsp"
     workload_policy: str = "equal"
     work_units_per_step: int | None = Field(default=None, ge=1)
+    checkpoint: CheckpointRequestV1 | None = None
 
     @field_validator("epochs", "training_seed", "work_units_per_step", mode="before")
     @classmethod
@@ -56,6 +72,72 @@ class RequestedContractV1(StrictWriteModel):
             raise ValueError(f"Unsupported workload_policy '{v}'. Must be 'equal' or 'dbs'.")
         return v
 
+    @model_validator(mode="before")
+    @classmethod
+    def check_checkpoint_group(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "checkpoint" in data:
+                cp = data["checkpoint"]
+                if cp is None:
+                    raise ValueError("checkpoint group cannot be null.")
+                if isinstance(cp, dict) and not cp:
+                    raise ValueError("checkpoint group cannot be empty.")
+        return data
+
+
+class RequestedContractV1(StrictWriteModel):
+    dataset_build_id: str
+    model_id: str
+    epochs: int = Field(ge=1)
+    learning_rate: float = Field(gt=0)
+    training_seed: int
+    training_strategy: str = "strict_bsp"
+    workload_policy: str = "equal"
+    work_units_per_step: int | None = Field(default=None, ge=1)
+    checkpoint: CheckpointRequestV1 = Field(default_factory=lambda: CheckpointRequestV1(every_n_epochs=5))
+
+    @field_validator("epochs", "training_seed", "work_units_per_step", mode="before")
+    @classmethod
+    def reject_bool_int(cls, v: Any) -> Any:
+        if isinstance(v, bool):
+            raise ValueError("Boolean values are not accepted for integer fields.")
+        return v
+
+    @field_validator("learning_rate", mode="before")
+    @classmethod
+    def validate_learning_rate(cls, v: Any) -> Any:
+        if isinstance(v, bool):
+            raise ValueError("Boolean values are not accepted for float fields.")
+        if isinstance(v, (int, float)) and (not math.isfinite(v) or v <= 0):
+            raise ValueError("learning_rate must be a finite positive number.")
+        return v
+
+    @field_validator("training_strategy")
+    @classmethod
+    def validate_strategy(cls, v: str) -> str:
+        if v != "strict_bsp":
+            raise ValueError(f"Unsupported training_strategy '{v}'. V1 only supports 'strict_bsp'.")
+        return v
+
+    @field_validator("workload_policy")
+    @classmethod
+    def validate_workload_policy(cls, v: str) -> str:
+        if v not in {"equal", "dbs"}:
+            raise ValueError(f"Unsupported workload_policy '{v}'. Must be 'equal' or 'dbs'.")
+        return v
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_checkpoint_group(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "checkpoint" in data:
+                cp = data["checkpoint"]
+                if cp is None:
+                    raise ValueError("checkpoint group cannot be null.")
+                if isinstance(cp, dict) and not cp:
+                    raise ValueError("checkpoint group cannot be empty.")
+        return data
+
 
 class RequestedContractPatchV1(StrictWriteModel):
     dataset_build_id: str | None = None
@@ -66,6 +148,7 @@ class RequestedContractPatchV1(StrictWriteModel):
     training_strategy: str | None = None
     workload_policy: str | None = None
     work_units_per_step: int | None = Field(default=None, ge=1)
+    checkpoint: CheckpointRequestV1 | None = None
 
     @field_validator("epochs", "training_seed", "work_units_per_step", mode="before")
     @classmethod
@@ -96,6 +179,18 @@ class RequestedContractPatchV1(StrictWriteModel):
         if v is not None and v not in {"equal", "dbs"}:
             raise ValueError(f"Unsupported workload_policy '{v}'. Must be 'equal' or 'dbs'.")
         return v
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_checkpoint_group(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "checkpoint" in data:
+                cp = data["checkpoint"]
+                if cp is None:
+                    raise ValueError("checkpoint group cannot be null.")
+                if isinstance(cp, dict) and not cp:
+                    raise ValueError("checkpoint group cannot be empty.")
+        return data
 
 
 # ─── Resolved Contract (frozen after validate/freeze) ─────────────────────────
@@ -140,8 +235,26 @@ class ResolvedUpdatePolicy(BaseModel):
 
 
 class ResolvedCheckpointPolicy(BaseModel):
-    type: str
+    type: str = "periodic"
+    policy_version: int = 1
     schema_version: int = 1
+    every_n_epochs: int = Field(default=5, gt=0)
+
+    @field_validator("type")
+    @classmethod
+    def validate_type(cls, v: str) -> str:
+        if v != "periodic":
+            raise ValueError(f"Unsupported checkpoint_policy type '{v}'. Only 'periodic' is supported.")
+        return v
+
+    @field_validator("every_n_epochs", mode="before")
+    @classmethod
+    def validate_every_n_epochs(cls, v: Any) -> Any:
+        if isinstance(v, bool):
+            raise ValueError("Boolean values are not accepted for every_n_epochs.")
+        if not isinstance(v, int) or v <= 0:
+            raise ValueError("every_n_epochs must be an integer > 0.")
+        return v
 
 
 class ResolvedProtocols(BaseModel):
@@ -168,7 +281,7 @@ class ResolvedContractV1(BaseModel):
 class JobCreateRequest(StrictWriteModel):
     display_name: str = Field(min_length=1)
     description: str = ""
-    requested_contract: RequestedContractV1
+    requested_contract: RequestedContractCreateV1
 
 
 class JobPatchRequest(StrictWriteModel):

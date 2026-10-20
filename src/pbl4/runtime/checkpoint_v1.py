@@ -138,7 +138,7 @@ class CheckpointV1Serializer(CheckpointSerializer):
     def _validate_snapshot(snapshot: CheckpointSnapshot) -> None:
         if snapshot.checkpoint_schema_version != 1:
             raise ValueError("Unsupported checkpoint_schema_version")
-        if snapshot.checkpoint_policy != "after_each_model_update_blocking":
+        if snapshot.checkpoint_policy != "periodic":
             raise ValueError("Unsupported checkpoint policy")
         if snapshot.checkpoint_policy_version != 1:
             raise ValueError("Unsupported checkpoint policy version")

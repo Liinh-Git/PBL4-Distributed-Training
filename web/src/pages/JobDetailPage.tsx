@@ -35,11 +35,16 @@ const formatModelName = (modelId?: string | null, archName?: string | null): str
     .replace(/\b\w/g, c => c.toUpperCase());
 };
 
-const formatCheckpointPolicy = (type?: string | null): string => {
-  if (!type) return 'After each epoch';
-  if (type === 'after_each_model_update_blocking') return 'Every Step (Blocking)';
-  if (type === 'epoch_end') return 'End of Each Epoch';
-  return type
+const formatCheckpointPolicy = (
+  policy?: import('../types/api').ResolvedCheckpointPolicyData | null,
+  reqCheckpoint?: import('../types/api').RequestedCheckpointPolicyData | null
+): string => {
+  const n = policy?.every_n_epochs ?? reqCheckpoint?.every_n_epochs;
+  if (n) {
+    return `Every ${n} epochs (periodic)`;
+  }
+  if (!policy?.type) return 'Every 5 epochs (periodic)';
+  return policy.type
     .replace(/_/g, ' ')
     .replace(/\b\w/g, c => c.toUpperCase());
 };
@@ -431,10 +436,10 @@ export const JobDetailPage: React.FC = () => {
           <div className="p-3.5 space-y-1">
             <div className="text-[11px] text-[#73737c]">Checkpoint Policy</div>
             <div className="text-xs font-medium text-[#f3f3f4]">
-              {formatCheckpointPolicy(resv?.checkpoint_policy?.type)}
+              {formatCheckpointPolicy(resv?.checkpoint_policy, req?.checkpoint)}
             </div>
             <div className="text-[11px] text-[#73737c]">
-              Schema v{resv?.checkpoint_policy?.schema_version || 1}
+              Blocking at epoch boundaries
             </div>
           </div>
         </div>

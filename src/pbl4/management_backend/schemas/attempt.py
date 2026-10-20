@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from typing import Any
+
 from pydantic import BaseModel, field_validator
 
 from pbl4.management_backend.schemas.common import StrictWriteModel
@@ -88,6 +90,7 @@ class AttemptDetail(BaseModel):
     strategy_state: StrategyStateStrictBSP | None = None
     failure: FailureInfo | None = None
     links: AttemptLinks | None = None
+    runtime_metadata: dict[str, Any] | None = None
     created_at: datetime
     started_at: datetime | None = None
     ended_at: datetime | None = None

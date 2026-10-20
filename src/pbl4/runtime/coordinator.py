@@ -28,11 +28,11 @@ from pbl4.runtime.worker_registry import SessionState, WorkerRegistry
 from pbl4.runtime.workload_scheduler import WorkloadScheduler
 
 
+logger = logging.getLogger(__name__)
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
-
-
-logger = logging.getLogger(__name__)
 
 
 class Coordinator:
@@ -57,6 +57,7 @@ class Coordinator:
         events: EventEmitter,
         cursor: RecoveryCursor | None = None,
         workload_scheduler: WorkloadScheduler | None = None,
+        latest_checkpoint: CompleteCheckpoint | None = None,
     ):
         if (
             checkpoint_context.job_id != context.job_id
@@ -86,12 +87,31 @@ class Coordinator:
         self._state = "CREATED"
         self._step_state: str | None = None
         self._operation: OperationContext | None = None
+        self._last_committed_operation: OperationContext | None = None
         self._plan: UpdatePlan | None = None
         self._store = GradientStore()
         self._aggregator = GradientAggregator()
-        self._latest: CompleteCheckpoint | None = None
-        self._checkpoint_state: str | None = None
+        self._latest: CompleteCheckpoint | None = latest_checkpoint
+        self._checkpoint_state: str | None = "COMPLETE" if latest_checkpoint is not None else None
         self._milestones: dict[str, str] = {}
+
+    @property
+    def cursor(self) -> RecoveryCursor:
+        with self._lock:
+            return self._cursor
+
+    def has_verified_checkpoint_for_current_revision(self) -> bool:
+        with self._lock:
+            if self._latest is None:
+                return False
+            cursor = self._latest.snapshot.recovery_cursor
+            model_ver = self._latest.snapshot.model.model_version
+            return (
+                cursor.epoch == self._cursor.epoch
+                and cursor.next_batch_ordinal == self._cursor.next_batch_ordinal
+                and model_ver == self._model.snapshot().model_version
+            )
+
 
     def _event(self, event_type: str, details: dict[str, object], severity: str = "INFO") -> None:
         self._events.emit(event_type, details, _now(), "coordinator", severity)
@@ -152,7 +172,6 @@ class Coordinator:
             self._policy.open_operation(operation)
             self._operation = operation
             self._step_state = "COLLECTING_GRADIENTS"
-            self._checkpoint_state = None
             self._milestones = {"started_at": _now()}
             self._event(
                 "step.started",
@@ -265,30 +284,87 @@ class Coordinator:
                 return True
             return False
 
-    def checkpoint(self) -> CompleteCheckpoint | None:
+    def commit_synchronized_step(self) -> RecoveryCursor:
         with self._lock:
-            if (
-                self._state != "RUNNING"
-                or self._step_state != "WAITING_PARAMETER_APPLIED"
-                or not self._checkpoint_policy.requires_checkpoint(
-                    update_completed="update_completed_at" in self._milestones,
-                    synchronization_complete=self._policy.synchronization_complete,
-                )
-            ):
-                raise ValueError("Checkpoint safe boundary has not been reached")
+            if self._state != "RUNNING" or self._step_state != "WAITING_PARAMETER_APPLIED":
+                raise ValueError("Step cannot be committed in current state")
+            if not self._policy.synchronization_complete:
+                raise ValueError("Synchronization is not complete")
             operation = self._operation
             assert operation is not None
             next_cursor = self._scheduler.next_cursor(self._cursor)
+            output_model_version = self._model.snapshot().model_version
+            self._step_state = "COMMITTED"
+            self._milestones["committed_at"] = _now()
+            self._last_committed_operation = operation
+
+            if self._workload_scheduler is not None and self._plan is not None:
+                self._workload_scheduler.record_committed(
+                    self._plan.contributions,
+                    epoch=operation.epoch,
+                )
+            if next_cursor.epoch > operation.epoch and self._workload_scheduler is not None:
+                new_plan = self._workload_scheduler.on_epoch_completed(operation.epoch)
+                if new_plan is not None:
+                    try:
+                        self._event(
+                            "workload.plan_changed",
+                            {
+                                "epoch": new_plan.epoch,
+                                "policy": new_plan.policy,
+                                "units_per_worker": new_plan.units_per_worker,
+                                "target_ratios": new_plan.target_ratios,
+                            },
+                        )
+                    except Exception:
+                        logger.exception("Failed to emit workload.plan_changed event")
+
+            self._cursor = next_cursor
+            self._plan = None
+            self._store.discard(self._context.attempt_id, operation.operation_id)
+
+            total_sample_count = sum(assignment.sample_count for assignment in operation.assignments)
+            self._event(
+                "step.committed",
+                {
+                    "step_id": operation.step_id,
+                    "operation_id": operation.operation_id,
+                    "input_model_version": operation.input_model_version,
+                    "output_model_version": output_model_version,
+                    "epoch": operation.epoch,
+                    "batch_ordinal": operation.assignments[0].batch_ordinal if operation.assignments else 0,
+                    "total_sample_count": total_sample_count,
+                    "synchronization_completed_at": self._milestones.get(
+                        "synchronization_completed_at", self._milestones["committed_at"]
+                    ),
+                    "committed_at": self._milestones["committed_at"],
+                    "recovery_cursor": {
+                        "epoch": next_cursor.epoch,
+                        "next_batch_ordinal": next_cursor.next_batch_ordinal,
+                    },
+                },
+            )
+
+            return next_cursor
+
+    def save_checkpoint_for_current_revision(self, *, is_final: bool = False) -> CompleteCheckpoint | None:
+        with self._lock:
+            if self._state not in ("RUNNING", "COMPLETED"):
+                raise ValueError("Checkpoint safe boundary has not been reached")
+            if self._step_state != "COMMITTED" and not (self._step_state is None and is_final):
+                raise ValueError("Checkpoint safe boundary has not been reached")
+            operation = self._operation or self._last_committed_operation
+            source_op_id = operation.operation_id if operation is not None else 0
+            source_step_id = operation.step_id if operation is not None else None
             snapshot = replace(
                 self._checkpoint_context,
                 checkpoint_id=uuid4().hex,
                 model=self._model.snapshot(),
-                recovery_cursor=next_cursor,
-                source_operation_id=operation.operation_id,
-                source_step_id=operation.step_id,
+                recovery_cursor=self._cursor,
+                source_operation_id=source_op_id,
+                source_step_id=source_step_id,
                 created_at=_now(),
             )
-            self._step_state = "CHECKPOINTING"
             self._checkpoint_state = "WRITING"
             self._event(
                 "checkpoint.started",
@@ -308,69 +384,40 @@ class Coordinator:
                     "checkpoint_policy": snapshot.checkpoint_policy,
                     "checkpoint_policy_version": snapshot.checkpoint_policy_version,
                     "created_at": snapshot.created_at,
+                    "is_final": is_final,
                 },
             )
         attempts = 0
         while self._checkpoint_policy.may_retry(attempts):
             with self._lock:
-                if self._state != "RUNNING":
+                if self._state not in ("RUNNING", "COMPLETED"):
                     return None
             attempts += 1
             try:
                 complete = self._checkpoints.write(snapshot)
             except Exception:
                 with self._lock:
-                    if self._state != "RUNNING":
+                    if self._state not in ("RUNNING", "COMPLETED"):
                         return None
                     if not self._checkpoint_policy.may_retry(attempts):
                         self._checkpoint_state = "FAILED"
                         self._event(
-                            "checkpoint.failed", {"checkpoint_id": snapshot.checkpoint_id}, "ERROR"
+                            "checkpoint.failed",
+                            {
+                                "checkpoint_id": snapshot.checkpoint_id,
+                                "is_final": is_final,
+                                "reason": "Checkpoint attempts exhausted",
+                            },
+                            "WARNING",
                         )
-                        self._fail("Checkpoint attempts exhausted")
                         return None
                 continue
             with self._lock:
-                if (
-                    self._state != "RUNNING"
-                    or self._step_state != "CHECKPOINTING"
-                    or self._operation != operation
-                    or not self._policy.synchronization_complete
-                ):
+                if self._state not in ("RUNNING", "COMPLETED"):
                     return None
                 self._latest = complete
                 self._checkpoint_state = "COMPLETE"
                 self._milestones["checkpoint_completed_at"] = _now()
-                if not self._checkpoint_policy.allows_commit(
-                    synchronization_complete=self._policy.synchronization_complete,
-                    checkpoint_state=self._checkpoint_state,
-                ):
-                    raise ValueError("Durability gate inconsistency")
-                self._step_state = "COMMITTED"
-                self._milestones["committed_at"] = _now()
-                self._cursor = next_cursor
-                if self._workload_scheduler is not None and self._plan is not None:
-                    self._workload_scheduler.record_committed(
-                        self._plan.contributions,
-                        epoch=operation.epoch,
-                    )
-                if next_cursor.epoch > operation.epoch and self._workload_scheduler is not None:
-                    new_plan = self._workload_scheduler.on_epoch_completed(operation.epoch)
-                    if new_plan is not None:
-                        try:
-                            self._event(
-                                "workload.plan_changed",
-                                {
-                                    "epoch": new_plan.epoch,
-                                    "policy": new_plan.policy,
-                                    "units_per_worker": new_plan.units_per_worker,
-                                    "target_ratios": new_plan.target_ratios,
-                                },
-                            )
-                        except Exception:
-                            logger.exception("Failed to emit workload.plan_changed event")
-                self._plan = None
-                self._store.discard(self._context.attempt_id, operation.operation_id)
                 self._event(
                     "checkpoint.saved",
                     {
@@ -384,15 +431,26 @@ class Coordinator:
                         "metadata_sha256": complete.metadata_sha256,
                         "artifact_size_bytes": complete.model_size + complete.metadata_size,
                         "recovery_cursor": {
-                            "epoch": next_cursor.epoch,
-                            "next_batch_ordinal": next_cursor.next_batch_ordinal,
+                            "epoch": snapshot.recovery_cursor.epoch,
+                            "next_batch_ordinal": snapshot.recovery_cursor.next_batch_ordinal,
                         },
                         "checkpoint_completed_at": self._milestones["checkpoint_completed_at"],
-                        "committed_at": self._milestones["committed_at"],
+                        "committed_at": self._milestones.get("committed_at", _now()),
+                        "is_final": is_final,
                     },
                 )
                 return complete
         raise AssertionError("Checkpoint policy allowed no attempt")
+
+    def checkpoint(self, *, is_final: bool = False) -> CompleteCheckpoint | None:
+        with self._lock:
+            if self._state not in ("RUNNING", "COMPLETED"):
+                raise ValueError("Checkpoint safe boundary has not been reached")
+            if self._step_state == "WAITING_PARAMETER_APPLIED" and self._policy.synchronization_complete:
+                self.commit_synchronized_step()
+            elif self._step_state != "COMMITTED" and not (self._step_state is None and is_final):
+                raise ValueError("Checkpoint safe boundary has not been reached")
+        return self.save_checkpoint_for_current_revision(is_final=is_final)
 
     def _fail(self, reason: str) -> None:
         self._policy.cleanup()
@@ -441,7 +499,7 @@ class Coordinator:
 
     def complete(self) -> None:
         with self._lock:
-            if self._state != "RUNNING" or self._step_state != "COMMITTED":
+            if self._state != "RUNNING" or (self._step_state is not None and self._step_state != "COMMITTED"):
                 raise ValueError("Attempt still has uncommitted work")
             try:
                 self._scheduler.assignments(self._cursor)

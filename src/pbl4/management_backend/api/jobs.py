@@ -51,6 +51,15 @@ def _build_job_detail(row: dict) -> JobDetail:
     if isinstance(res, str):
         res = json.loads(res)
 
+    if not isinstance(rc, dict) or "checkpoint" not in rc or rc.get("checkpoint") is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "UNSUPPORTED_LEGACY_CONTRACT",
+                "message": "Unsupported legacy job contract: missing 'checkpoint' configuration. Project owner cleanup required.",
+            },
+        )
+
     raw_summary = row.get("attempt_summary")
     if raw_summary:
         attempt_summary = AttemptSummary(**raw_summary)
@@ -61,21 +70,30 @@ def _build_job_detail(row: dict) -> JobDetail:
             latest_attempt_state=None,
         )
 
-    return JobDetail(
-        job_id=row["job_id"],
-        display_name=row["display_name"],
-        description=row["description"] or "",
-        state=row["state"],
-        requested_contract=rc,
-        resolved_contract=res,
-        contract_hash=row.get("contract_hash"),
-        cloned_from_job_id=row.get("cloned_from_job_id"),
-        attempt_summary=attempt_summary,
-        links=JobLinks(attempts=f"/api/v1/attempts?job_id={row['job_id']}"),
-        created_at=row["created_at"],
-        frozen_at=row.get("frozen_at"),
-        archived_at=row.get("archived_at"),
-    )
+    try:
+        return JobDetail(
+            job_id=row["job_id"],
+            display_name=row["display_name"],
+            description=row["description"] or "",
+            state=row["state"],
+            requested_contract=rc,
+            resolved_contract=res,
+            contract_hash=row.get("contract_hash"),
+            cloned_from_job_id=row.get("cloned_from_job_id"),
+            attempt_summary=attempt_summary,
+            links=JobLinks(attempts=f"/api/v1/attempts?job_id={row['job_id']}"),
+            created_at=row["created_at"],
+            frozen_at=row.get("frozen_at"),
+            archived_at=row.get("archived_at"),
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "UNSUPPORTED_LEGACY_CONTRACT",
+                "message": f"Unsupported legacy job contract: {e}. Project owner cleanup required.",
+            },
+        )
 
 
 def _build_job_list_item(row: dict) -> JobListItem:

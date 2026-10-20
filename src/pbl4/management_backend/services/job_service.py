@@ -103,6 +103,27 @@ def _validate_contract(requested_contract: dict) -> list[str]:
     if lr is not None and (not isinstance(lr, (int, float)) or lr <= 0):
         errors.append("learning_rate must be a positive number.")
 
+    if "checkpoint" in requested_contract:
+        raw_cp = requested_contract["checkpoint"]
+        if raw_cp is None:
+            errors.append("checkpoint group cannot be null.")
+        elif isinstance(raw_cp, dict):
+            if not raw_cp:
+                errors.append("checkpoint group cannot be empty.")
+            elif "every_n_epochs" not in raw_cp:
+                errors.append("checkpoint.every_n_epochs is required when checkpoint group is provided.")
+            else:
+                n_val = raw_cp["every_n_epochs"]
+                if isinstance(n_val, bool) or not isinstance(n_val, int) or n_val <= 0:
+                    errors.append("checkpoint.every_n_epochs must be an integer > 0 (boolean/float values are rejected).")
+                elif len(raw_cp) > 1:
+                    errors.append("checkpoint group contains unknown fields.")
+        else:
+            errors.append("checkpoint must be an object.")
+
+    if "checkpoint_policy" in requested_contract:
+        errors.append("checkpoint_policy in requested_contract is unsupported. Use 'checkpoint' with 'every_n_epochs'.")
+
     return errors
 
 
@@ -124,6 +145,14 @@ def create_job(
     description: str,
     requested_contract: dict,
 ) -> dict:
+    if hasattr(requested_contract, "model_dump"):
+        requested_contract = requested_contract.model_dump()
+    else:
+        requested_contract = dict(requested_contract)
+
+    if "checkpoint" not in requested_contract or requested_contract.get("checkpoint") is None:
+        requested_contract["checkpoint"] = {"every_n_epochs": 5}
+
     errors = _validate_contract(requested_contract)
     if errors:
         raise JobValidationError("Contract validation failed", errors)
@@ -234,14 +263,17 @@ def update_job(
             rc = json.loads(rc)
         old_policy = rc.get("workload_policy", "equal")
         new_policy = requested_contract.get("workload_policy", old_policy)
-        # K belongs to the selected workload policy. A policy switch without an
-        # explicit replacement K must not inherit the previous policy's value.
+        if "checkpoint" in requested_contract and requested_contract["checkpoint"] is None:
+            raise JobValidationError("Contract validation failed", ["checkpoint group cannot be null."])
+
         merged_rc = {**rc, **requested_contract}
         if (new_policy != old_policy and "work_units_per_step" not in requested_contract) or (
             "work_units_per_step" in requested_contract
             and requested_contract["work_units_per_step"] is None
         ):
             merged_rc.pop("work_units_per_step", None)
+        if "checkpoint" not in merged_rc or merged_rc["checkpoint"] is None:
+            merged_rc["checkpoint"] = {"every_n_epochs": 5}
         errors = _validate_contract(merged_rc)
         if errors:
             raise JobValidationError("Contract validation failed", errors)
@@ -305,6 +337,9 @@ def validate_job(conn: psycopg.Connection, job_id: str) -> dict:
             "errors": [],
         }
 
+    if "checkpoint" not in rc or rc.get("checkpoint") is None:
+        rc["checkpoint"] = {"every_n_epochs": 5}
+
     errors = _validate_contract(rc)
     resolved_preview = None
     warnings: list[str] = []
@@ -340,6 +375,8 @@ def freeze_job(conn: psycopg.Connection, job_id: str) -> dict:
     rc = current["requested_contract"]
     if isinstance(rc, str):
         rc = json.loads(rc)
+    if "checkpoint" not in rc or rc.get("checkpoint") is None:
+        rc["checkpoint"] = {"every_n_epochs": 5}
 
     errors = _validate_contract(rc)
     if errors:
@@ -374,6 +411,15 @@ def clone_job(conn: psycopg.Connection, job_id: str, *, display_name: str | None
     rc = source["requested_contract"]
     if isinstance(rc, str):
         rc = json.loads(rc)
+
+    if not isinstance(rc, dict) or "checkpoint" not in rc or rc.get("checkpoint") is None:
+        raise JobValidationError(
+            f"Cannot clone legacy job '{job_id}': missing required 'checkpoint' configuration.",
+            [f"Cannot clone legacy job '{job_id}': missing required 'checkpoint' configuration."],
+        )
+    errors = _validate_contract(rc)
+    if errors:
+        raise JobValidationError(f"Cannot clone invalid/legacy job '{job_id}'", errors)
 
     new_job_id = _new_job_id()
     now = datetime.now(UTC)

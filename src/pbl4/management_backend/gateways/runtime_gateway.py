@@ -935,6 +935,7 @@ class RuntimeGateway:
         if event_type == "model.updated":
             step_id = int(details["step_id"])
             for item in details.get("contributions", []):
+                sample_count = int(item["sample_count"])
                 step_repository.upsert_worker_step(
                     conn,
                     attempt_id=attempt_id,
@@ -943,8 +944,9 @@ class RuntimeGateway:
                     session_id=int(item["session_id"]),
                     shard_id=int(item["shard_id"]),
                     batch_id=int(item["batch_id"]),
-                    sample_count=int(item["sample_count"]),
+                    sample_count=sample_count,
                     loss=item.get("loss"),
+                    accuracy=None,
                     compute_ms=float(item.get("compute_ms", 0.0)),
                 )
             step_repository.update_step(
@@ -957,14 +959,41 @@ class RuntimeGateway:
                 update_completed_at=occurred_at,
             )
             return
+        if event_type == "step.committed":
+            step_id = int(details["step_id"])
+            sync_at = details.get("synchronization_completed_at")
+            sync_dt = (
+                datetime.fromisoformat(str(sync_at).replace("Z", "+00:00"))
+                if sync_at
+                else occurred_at
+            )
+            comm_at = details.get("committed_at")
+            comm_dt = (
+                datetime.fromisoformat(str(comm_at).replace("Z", "+00:00"))
+                if comm_at
+                else occurred_at
+            )
+            step_repository.update_step(
+                conn,
+                attempt_id,
+                step_id,
+                state="COMMITTED",
+                output_model_version=int(details["output_model_version"]),
+                total_sample_count=int(details["total_sample_count"]),
+                synchronization_completed_at=sync_dt,
+                committed_at=comm_dt,
+            )
+            return
         if event_type == "checkpoint.started":
             cursor = details["recovery_cursor"]
+            source_step_id = details.get("source_step_id")
+            source_step_id_int = int(source_step_id) if source_step_id is not None else None
             checkpoint_repository.create_checkpoint(
                 conn,
                 checkpoint_id=str(details["checkpoint_id"]),
                 created_by_attempt_id=attempt_id,
                 source_operation_id=int(details["source_operation_id"]),
-                source_step_id=int(details["source_step_id"]),
+                source_step_id=source_step_id_int,
                 model_version=int(details["model_version"]),
                 recovery_cursor_jsonb=cursor,
                 epoch=int(cursor["epoch"]),
@@ -979,13 +1008,14 @@ class RuntimeGateway:
                     str(details["created_at"]).replace("Z", "+00:00")
                 ),
             )
-            step_repository.update_step(
-                conn,
-                attempt_id,
-                int(details["source_step_id"]),
-                state="CHECKPOINTING",
-                synchronization_completed_at=occurred_at,
-            )
+            if source_step_id_int is not None:
+                step_repository.update_step(
+                    conn,
+                    attempt_id,
+                    source_step_id_int,
+                    state="CHECKPOINTING",
+                    synchronization_completed_at=occurred_at,
+                )
             return
         if event_type == "checkpoint.saved":
             checkpoint_repository.complete_checkpoint(
@@ -999,15 +1029,41 @@ class RuntimeGateway:
                     str(details["checkpoint_completed_at"]).replace("Z", "+00:00")
                 ),
             )
-            step_repository.update_step(
-                conn,
-                attempt_id,
-                int(details["source_step_id"]),
-                state="COMMITTED",
-                committed_at=datetime.fromisoformat(
-                    str(details["committed_at"]).replace("Z", "+00:00")
-                ),
-            )
+            source_step_id = details.get("source_step_id")
+            if source_step_id is not None:
+                comm_at = details.get("committed_at")
+                comm_dt = (
+                    datetime.fromisoformat(str(comm_at).replace("Z", "+00:00"))
+                    if comm_at
+                    else occurred_at
+                )
+                step_repository.update_step(
+                    conn,
+                    attempt_id,
+                    int(source_step_id),
+                    state="COMMITTED",
+                    committed_at=comm_dt,
+                )
+            return
+        if event_type == "checkpoint.failed":
+            checkpoint_id = str(details["checkpoint_id"])
+            checkpoint_repository.fail_checkpoint(conn, checkpoint_id)
+            if details.get("is_final"):
+                attempt = attempt_repository.get_attempt(conn, attempt_id)
+                if attempt:
+                    meta = dict(attempt.get("runtime_metadata") or {})
+                    meta["final_checkpoint_failed"] = True
+                    meta["final_checkpoint_id"] = checkpoint_id
+                    meta["final_checkpoint_reason"] = str(
+                        details.get("reason", "Checkpoint attempts exhausted")
+                    )
+                    attempt_repository.update_attempt_state(
+                        conn,
+                        attempt_id,
+                        attempt["state"],
+                        runtime_metadata=meta,
+                    )
+            return
 
     # ─── Outbound Bounded Command Dispatch ────────────────────────────────────
 

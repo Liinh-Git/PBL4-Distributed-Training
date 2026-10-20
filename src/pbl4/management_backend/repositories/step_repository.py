@@ -81,7 +81,10 @@ def update_step(
     params: list[Any] = []
 
     if state is not None:
-        sets.append("state = %s")
+        if state == "CHECKPOINTING":
+            sets.append("state = CASE WHEN state = 'COMMITTED' THEN state ELSE %s END")
+        else:
+            sets.append("state = %s")
         params.append(state)
     if output_model_version is not None:
         sets.append("output_model_version = %s")

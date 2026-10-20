@@ -42,7 +42,7 @@ class WorkerStepItem(BaseModel):
     batch_id: int
     sample_count: int
     contribution_accepted: bool = True
-    parameter_applied: bool = True
+    parameter_applied: bool | None = None
     loss: float | None = None
     accuracy: float | None = None
     compute_ms: float | None = None

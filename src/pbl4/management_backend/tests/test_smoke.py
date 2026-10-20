@@ -522,7 +522,7 @@ def test_get_step_detail_matches_contract(client):
         assert data["timing"]["synchronization_completed_at"] == "2026-09-07T03:24:16.700000Z"
         assert data["timing"]["checkpoint_completed_at"] == "2026-09-07T03:24:17.800000Z"
         assert data["timing"]["committed_at"] == "2026-09-07T03:24:18Z"
-        assert data["metrics"] == {"loss": 0.22, "accuracy": 88.5}
+        assert data["metrics"] is None
         assert len(data["worker_steps"]) == 3
         ws0 = data["worker_steps"][0]
         assert ws0["worker_id"] == 0

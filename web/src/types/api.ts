@@ -341,6 +341,10 @@ export interface DatasetBuildDeprecateResponseData {
 
 export type WorkloadPolicy = 'equal' | 'dbs';
 
+export interface RequestedCheckpointPolicyData {
+  every_n_epochs: number;
+}
+
 export interface RequestedContractV1 {
   dataset_build_id: string;
   model_id: string;
@@ -350,6 +354,7 @@ export interface RequestedContractV1 {
   training_strategy: 'strict_bsp';
   workload_policy?: WorkloadPolicy;
   work_units_per_step?: number;
+  checkpoint?: RequestedCheckpointPolicyData;
 }
 
 export interface RequestedContractPatchV1 {
@@ -361,6 +366,7 @@ export interface RequestedContractPatchV1 {
   training_strategy?: 'strict_bsp';
   workload_policy?: WorkloadPolicy;
   work_units_per_step?: number;
+  checkpoint?: RequestedCheckpointPolicyData;
 }
 
 export interface ResolvedDatasetData {
@@ -404,6 +410,7 @@ export interface ResolvedUpdatePolicyData {
 export interface ResolvedCheckpointPolicyData {
   type: string;
   schema_version: number;
+  every_n_epochs?: number;
 }
 
 export interface ResolvedProtocolsData {
@@ -584,6 +591,7 @@ export interface AttemptDetailData {
   contract_hash: string;
   state: AttemptState;
   execution_mode: ExecutionMode;
+  resume_from_checkpoint_id?: string | null;
   training_strategy?: TrainingStrategy | null;
   model_id?: string | null;
   expected_workers?: number | null;
@@ -596,6 +604,7 @@ export interface AttemptDetailData {
   strategy_state?: StrategyStateStrictBSPData | null;
   failure?: FailureInfoData | null;
   links?: AttemptLinksData | null;
+  runtime_metadata?: Record<string, any> | null;
   created_at: string;
   started_at?: string | null;
   ended_at?: string | null;
@@ -703,7 +712,7 @@ export interface WorkerStepData {
   batch_id?: number | string | null;
   sample_count: number;
   contribution_accepted?: boolean;
-  parameter_applied?: boolean;
+  parameter_applied?: boolean | null;
   loss?: number | null;
   accuracy?: number | null;
   compute_ms?: number | null;

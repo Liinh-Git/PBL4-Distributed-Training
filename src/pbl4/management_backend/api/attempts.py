@@ -143,6 +143,13 @@ def get_attempt(attempt_id: str):
         progress_cursor = ProgressCursor(
             epoch=snap["epoch"], next_batch_ordinal=snap["current_batch_ordinal"]
         )
+    meta = row.get("runtime_metadata")
+    if isinstance(meta, str):
+        try:
+            import json
+            meta = json.loads(meta)
+        except Exception:
+            meta = None
     return ItemResponse(
         data=AttemptDetail(
             attempt_id=row["attempt_id"],
@@ -178,6 +185,7 @@ def get_attempt(attempt_id: str):
                 steps=f"/api/v1/attempts/{attempt_id}/steps",
                 events=f"/api/v1/attempts/{attempt_id}/events",
             ),
+            runtime_metadata=meta if isinstance(meta, dict) else None,
             created_at=row["created_at"],
             started_at=row.get("started_at"),
             ended_at=row.get("ended_at"),
@@ -446,11 +454,7 @@ def get_step(attempt_id: str, step_id: int):
         if metrics_data
         else None
     )
-    is_step_applied = step["state"] in (
-        "WAITING_PARAMETER_APPLIED",
-        "CHECKPOINTING",
-        "COMMITTED",
-    )
+    is_step_committed = step["state"] == "COMMITTED"
     return ItemResponse(
         data=StepDetail(
             training_strategy=step["training_strategy"],
@@ -480,7 +484,7 @@ def get_step(attempt_id: str, step_id: int):
                     batch_id=ws["batch_id"],
                     sample_count=ws["sample_count"],
                     contribution_accepted=ws.get("contribution_accepted", True),
-                    parameter_applied=ws.get("parameter_applied", is_step_applied),
+                    parameter_applied=ws.get("parameter_applied", True if is_step_committed else None),
                     loss=ws.get("loss"),
                     accuracy=ws.get("accuracy"),
                     compute_ms=ws.get("compute_ms"),
