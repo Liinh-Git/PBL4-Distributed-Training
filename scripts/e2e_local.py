@@ -740,12 +740,17 @@ class Harness:
         if not (
             len(started)
             == len(updated)
-            == len(checkpoint_started)
-            == len(checkpoint_saved)
             == total_steps
             and len(applied) == total_steps * 3
         ):
             raise AssertionError("Per-step event cardinality invariant failed")
+        if is_smoke:
+            if len(checkpoint_started) != len(checkpoint_saved):
+                raise AssertionError("Checkpoint started/saved mismatch in smoke run")
+        else:
+            if len(checkpoint_started) != len(checkpoint_saved) or len(checkpoint_saved) == 0:
+                raise AssertionError("Expected at least one completed checkpoint for full run")
+
         by_operation_start = {item["details"]["operation_id"]: item for item in started}
         by_operation_update = {item["details"]["operation_id"]: item for item in updated}
         by_operation_checkpoint = {
@@ -754,7 +759,6 @@ class Harness:
         for operation in range(total_steps):
             start_event = by_operation_start[operation]
             update_event = by_operation_update[operation]
-            saved_event = by_operation_checkpoint[operation]
             contributions = update_event["details"]["contributions"]
             if len(contributions) != 3 or {item["worker_id"] for item in contributions} != {
                 0,
@@ -775,12 +779,23 @@ class Harness:
                 start_event["runtime_event_seq"]
                 < update_event["runtime_event_seq"]
                 < min(item["runtime_event_seq"] for item in ack_events)
-                < saved_event["runtime_event_seq"]
             ):
-                raise AssertionError("Update/apply/checkpoint causal order failed")
-            next_start = by_operation_start.get(operation + 1)
-            if next_start and saved_event["runtime_event_seq"] >= next_start["runtime_event_seq"]:
-                raise AssertionError("Next Step opened before prior checkpoint commit")
+                raise AssertionError("Update/apply causal order failed")
+
+            saved_event = by_operation_checkpoint.get(operation)
+            if saved_event:
+                if not (
+                    min(item["runtime_event_seq"] for item in ack_events)
+                    < saved_event["runtime_event_seq"]
+                ):
+                    raise AssertionError("Checkpoint saved before all worker acks")
+                next_start = by_operation_start.get(operation + 1)
+                if next_start and saved_event["runtime_event_seq"] >= next_start["runtime_event_seq"]:
+                    raise AssertionError("Next Step opened before prior checkpoint commit")
+            else:
+                next_start = by_operation_start.get(operation + 1)
+                if next_start and min(item["runtime_event_seq"] for item in ack_events) >= next_start["runtime_event_seq"]:
+                    raise AssertionError("Next Step opened before current step ACKs")
 
         all_checkpoints = self.request(
             "GET", f"/api/v1/checkpoints?attempt_id={attempt_id}&limit=200"
@@ -789,12 +804,12 @@ class Harness:
             checkpoints = [
                 item for item in all_checkpoints if item.get("source_operation_id", 0) < total_steps
             ]
-            if len(checkpoints) < total_steps or any(
+            if len(checkpoints) != len(checkpoint_saved) or any(
                 item["state"] != "COMPLETE" for item in checkpoints
             ):
                 raise AssertionError("Checkpoint projection count/state mismatch in smoke run")
         else:
-            if len(all_checkpoints) != total_steps or any(
+            if len(all_checkpoints) != len(checkpoint_saved) or any(
                 item["state"] != "COMPLETE" for item in all_checkpoints
             ):
                 raise AssertionError("Checkpoint projection count/state mismatch")

@@ -301,8 +301,10 @@ class Harness:
             },
             "update_policy": {"type": "plain_sgd_without_momentum"},
             "checkpoint_policy": {
-                "type": "after_each_model_update_blocking",
+                "type": "periodic",
                 "schema_version": 1,
+                "policy_version": 1,
+                "every_n_epochs": 1,
             },
             "protocols": {"dtp_version": 1, "mcp_version": 1},
             "workload": {
@@ -397,6 +399,8 @@ class Harness:
                         "20260925",
                         "--heartbeat-interval",
                         "1",
+                        "--model-id",
+                        "resnet18_groupnorm",
                         "--attempt-id",
                         attempt_id,
                         "--allocation-id",
@@ -571,8 +575,8 @@ class Harness:
         policies = {
             int(event["details"]["epoch"]): str(event["details"]["policy"]) for event in plans
         }
-        if policies.get(1) != "equal" or policies.get(2) != "dbs":
-            raise AssertionError(f"Mid-epoch resume warm-up semantics failed: {plans}")
+        if policies.get(2) != "dbs":
+            raise AssertionError(f"Boundary resume warm-up semantics failed: {plans}")
         return {
             "source_attempt_id": source_attempt,
             "resumed_attempt_id": resumed_attempt,
