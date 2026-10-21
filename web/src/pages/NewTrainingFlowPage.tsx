@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, useSearchParams, useParams, Link } from 'react-router-dom';
 import {
   ArrowLeft,
@@ -14,7 +14,7 @@ import {
   AlertTriangle,
   RefreshCw,
 } from 'lucide-react';
-import { datasetsService, datasetBuildsService, systemService, jobsService } from '../api';
+import { datasetsService, datasetBuildsService, systemService, jobsService, attemptsService } from '../api';
 import {
   DatasetItemData,
   DatasetBuildListItemData,
@@ -22,6 +22,7 @@ import {
   JobDetailData,
   JobValidateResponseData,
   NodeItemData,
+  AttemptListItemData,
 } from '../types/api';
 
 export const NewTrainingFlowPage: React.FC = () => {
@@ -63,7 +64,15 @@ export const NewTrainingFlowPage: React.FC = () => {
   const [validationResult, setValidationResult] = useState<JobValidateResponseData | null>(null);
   const [validating, setValidating] = useState<boolean>(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [activeAttempt, setActiveAttempt] = useState<AttemptListItemData | null | undefined>();
+  const launching = useRef(false);
   const [formError, setFormError] = useState<string | null>(null);
+
+  useEffect(() => {
+    attemptsService.getActiveAttempt().then(setActiveAttempt).catch(() => {
+      setFormError('Unable to verify active attempts. Reload before starting training.');
+    });
+  }, []);
 
   const changeWorkloadPolicy = (policy: 'equal' | 'dbs') => {
     if (policy !== workloadPolicy) setExistingWups(undefined);
@@ -296,7 +305,8 @@ export const NewTrainingFlowPage: React.FC = () => {
    */
   const handleStartTraining = async () => {
     const targetId = createdJob?.job_id || jobId;
-    if (!targetId) return;
+    if (!targetId || activeAttempt !== null || launching.current) return;
+    launching.current = true;
     try {
       setActionLoading('start');
       setFormError(null);
@@ -304,13 +314,16 @@ export const NewTrainingFlowPage: React.FC = () => {
         setFormError(`Select exactly ${selectedBuild?.shard_count} Nodes, or clear the selection for automatic placement.`);
         return;
       }
+      await attemptsService.assertNoActiveAttempt();
       const startRes = await jobsService.startJob(targetId, selectedNodeIds.length ? { node_ids: selectedNodeIds } : undefined);
       const attemptId = startRes.data.attempt_id;
-      // Navigate to live monitoring or job detail with real attempt_id
-      navigate(`/jobs/${targetId}`);
+      navigate(`/live?attempt_id=${encodeURIComponent(attemptId)}`);
     } catch (err: any) {
       setFormError(err?.message || 'Failed to start training attempt');
+      setActiveAttempt(undefined);
+      attemptsService.getActiveAttempt().then(setActiveAttempt).catch(() => {});
     } finally {
+      launching.current = false;
       setActionLoading(null);
     }
   };
@@ -1052,7 +1065,7 @@ export const NewTrainingFlowPage: React.FC = () => {
               </button>
               <button
                 type="button"
-                disabled={hasValidationErrors || actionLoading === 'start'}
+                disabled={hasValidationErrors || actionLoading === 'start' || activeAttempt !== null}
                 onClick={handleStartTraining}
                 className="px-4 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:pointer-events-none"
               >
@@ -1062,6 +1075,15 @@ export const NewTrainingFlowPage: React.FC = () => {
             </div>
           </div>
         </div>
+      )}
+
+      {step >= 4 && activeAttempt === undefined && (
+        <p className="text-xs text-amber-400">Run availability is unverified. Reload this page if Start remains disabled.</p>
+      )}
+      {activeAttempt && (
+        <p className="text-xs text-amber-400">
+          An attempt is active. <Link to={`/live?attempt_id=${encodeURIComponent(activeAttempt.attempt_id)}`} className="underline">View Run</Link> before starting training.
+        </p>
       )}
 
       {/* STEP 5: READY STATE (After Job creation or edit) */}
@@ -1091,7 +1113,7 @@ export const NewTrainingFlowPage: React.FC = () => {
             )}
             <button
               type="button"
-              disabled={hasValidationErrors || actionLoading === 'start'}
+              disabled={hasValidationErrors || actionLoading === 'start' || activeAttempt !== null}
               onClick={handleStartTraining}
               className="px-4 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:pointer-events-none"
             >

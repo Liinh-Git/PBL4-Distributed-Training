@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   Play,
@@ -22,6 +22,7 @@ import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { EditJobModal } from '../components/common/EditJobModal';
 import { EmptyState } from '../components/common/EmptyState';
 import { jobsService, attemptsService, datasetsService, datasetBuildsService } from '../api';
+import { isActiveAttempt } from '../api/attempts';
 import { JobDetailData, AttemptListItemData } from '../types/api';
 
 const formatModelName = (modelId?: string | null, archName?: string | null): string => {
@@ -70,6 +71,8 @@ export const JobDetailPage: React.FC = () => {
 
   const [job, setJob] = useState<JobDetailData | null>(null);
   const [attempts, setAttempts] = useState<AttemptListItemData[]>([]);
+  const [systemActiveAttempt, setSystemActiveAttempt] = useState<AttemptListItemData | null | undefined>();
+  const launching = useRef(false);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -87,11 +90,13 @@ export const JobDetailPage: React.FC = () => {
     if (!jobId) return;
     try {
       setLoading(true);
+      setSystemActiveAttempt(undefined);
       setError(null);
 
-      const [jobRes, attemptsRes] = await Promise.allSettled([
+      const [jobRes, attemptsRes, activeRes] = await Promise.allSettled([
         jobsService.getJob(jobId),
         attemptsService.listAttempts({ job_id: jobId, limit: 50 }),
+        attemptsService.getActiveAttempt(),
       ]);
 
       if (jobRes.status === 'fulfilled') {
@@ -146,7 +151,14 @@ export const JobDetailPage: React.FC = () => {
       }
 
       if (attemptsRes.status === 'fulfilled') {
-        setAttempts(attemptsRes.value.data || []);
+        setAttempts(attemptsRes.value.data);
+      } else {
+        throw attemptsRes.reason;
+      }
+      if (activeRes.status === 'fulfilled') {
+        setSystemActiveAttempt(activeRes.value);
+      } else {
+        throw activeRes.reason;
       }
     } catch (err: any) {
       setError(err?.message || `Job specification "${jobId}" could not be loaded`);
@@ -186,29 +198,35 @@ export const JobDetailPage: React.FC = () => {
   }
 
   const handleLaunch = async () => {
-    if (!job) return;
+    if (!job || !canLaunch || launching.current) return;
+    launching.current = true;
     try {
       setActionLoading('launch');
+      await attemptsService.assertNoActiveAttempt();
       const res = await jobsService.startJob(job.job_id);
-      await loadJobData();
-      navigate('/live');
+      navigate(`/live?attempt_id=${encodeURIComponent(res.data.attempt_id)}`);
     } catch (err: any) {
       alert(`Failed to launch training run: ${err?.message || 'Unknown error'}`);
+      void loadJobData();
     } finally {
+      launching.current = false;
       setActionLoading(null);
     }
   };
 
   const handleRetry = async () => {
-    if (!job) return;
+    if (!job || !canLaunch || launching.current) return;
+    launching.current = true;
     try {
       setActionLoading('retry');
-      await jobsService.retryJob(job.job_id, { note: 'Retry from job detail' });
-      await loadJobData();
-      navigate('/live');
+      await attemptsService.assertNoActiveAttempt();
+      const res = await jobsService.retryJob(job.job_id, { note: 'Retry from job detail' });
+      navigate(`/live?attempt_id=${encodeURIComponent(res.data.attempt_id)}`);
     } catch (err: any) {
       alert(`Failed to retry training run: ${err?.message || 'Unknown error'}`);
+      void loadJobData();
     } finally {
+      launching.current = false;
       setActionLoading(null);
     }
   };
@@ -242,7 +260,10 @@ export const JobDetailPage: React.FC = () => {
 
   const req = job.requested_contract;
   const resv = job.resolved_contract;
-  const isRunning = attempts.some(a => a.state === 'RUNNING');
+  const activeAttempt = attempts.find(a => a.job_id === jobId && isActiveAttempt(a.state))
+    ?? (systemActiveAttempt?.job_id === jobId ? systemActiveAttempt : null);
+  const hasActiveAttempt = Boolean(activeAttempt);
+  const canLaunch = !loading && systemActiveAttempt === null && !activeAttempt && !actionLoading;
   const latestAttempt = attempts[0];
   const canRetry = latestAttempt && (latestAttempt.state === 'FAILED' || latestAttempt.state === 'ABORTED');
 
@@ -269,6 +290,17 @@ export const JobDetailPage: React.FC = () => {
 
   return (
     <div className="space-y-6 w-full pb-10 select-none font-sans">
+      {error && (
+        <div className="text-xs text-rose-300" role="alert">
+          Unable to verify run availability: {error}{' '}
+          <button type="button" onClick={loadJobData} className="underline">Refresh</button>
+        </div>
+      )}
+      {systemActiveAttempt && systemActiveAttempt.job_id !== jobId && (
+        <p className="text-xs text-amber-400">
+          Another job has an active attempt. <Link to={`/live?attempt_id=${encodeURIComponent(systemActiveAttempt.attempt_id)}`} className="underline">View Run</Link> before launching another.
+        </p>
+      )}
       {/* Top Breadcrumb */}
       <div className="flex items-center gap-2 text-xs text-[#73737c]">
         <Link to="/jobs" className="hover:text-[#f3f3f4] flex items-center gap-1 transition-colors">
@@ -301,7 +333,7 @@ export const JobDetailPage: React.FC = () => {
 
         {/* Action hierarchy */}
         <div className="flex items-center gap-2 self-start sm:self-auto">
-          {(job.state === 'DRAFT' || job.state === 'READY') && !isRunning && (
+          {(job.state === 'DRAFT' || job.state === 'READY') && !hasActiveAttempt && (
             <button
               type="button"
               onClick={() => setShowEditModal(true)}
@@ -322,10 +354,10 @@ export const JobDetailPage: React.FC = () => {
             <span>{actionLoading === 'clone' ? 'Cloning...' : 'Clone'}</span>
           </button>
 
-          {canRetry && !isRunning && (
+          {canRetry && !hasActiveAttempt && (
             <button
               type="button"
-              disabled={actionLoading === 'retry'}
+              disabled={!canLaunch}
               onClick={handleRetry}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-normal rounded bg-[#171719] hover:bg-[#202024] text-[#f3f3f4] transition-colors border border-white/[0.07] disabled:opacity-50"
             >
@@ -334,10 +366,16 @@ export const JobDetailPage: React.FC = () => {
             </button>
           )}
 
-          {(job.state === 'READY' || job.state === 'DRAFT') && !isRunning && (
+          {activeAttempt && (
+            <Link to={`/live?attempt_id=${encodeURIComponent(activeAttempt.attempt_id)}`}
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded bg-blue-600 hover:bg-blue-500 text-white">
+              <Activity className="w-3.5 h-3.5" />View Run
+            </Link>
+          )}
+          {(job.state === 'READY' || job.state === 'DRAFT') && !hasActiveAttempt && (
             <button
               type="button"
-              disabled={actionLoading === 'launch'}
+              disabled={!canLaunch}
               onClick={() => {
                 if (job.state === 'DRAFT') {
                   setShowStartDraftConfirm(true);

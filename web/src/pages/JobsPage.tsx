@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   Plus,
@@ -17,7 +17,8 @@ import { JobStateBadge, AttemptStateBadge } from '../components/common/Badge';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { EditJobModal } from '../components/common/EditJobModal';
 import { jobsService, attemptsService, datasetsService, datasetBuildsService } from '../api';
-import { JobListItemData, JobState } from '../types/api';
+import { isActiveAttempt } from '../api/attempts';
+import { JobListItemData, JobState, AttemptListItemData } from '../types/api';
 
 const formatModelName = (modelId?: string | null): string => {
   if (!modelId) return 'ResNet-18';
@@ -34,6 +35,8 @@ export const JobsPage: React.FC = () => {
 
   // API State
   const [jobs, setJobs] = useState<JobListItemData[]>([]);
+  const [activeAttempt, setActiveAttempt] = useState<AttemptListItemData | null | undefined>();
+  const launching = useRef(false);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -114,6 +117,7 @@ export const JobsPage: React.FC = () => {
   const fetchJobs = useCallback(async (cursor?: string | null) => {
     try {
       setLoading(true);
+      setActiveAttempt(undefined);
       setError(null);
 
       const params = {
@@ -123,7 +127,10 @@ export const JobsPage: React.FC = () => {
         limit: 20,
       };
 
-      const res = await jobsService.listJobs(params);
+      const [res, active] = await Promise.all([
+        jobsService.listJobs(params), attemptsService.getActiveAttempt(),
+      ]);
+      setActiveAttempt(active);
       setJobs(res.data || []);
       setNextCursor(res.page?.next_cursor || null);
     } catch (err: any) {
@@ -154,15 +161,19 @@ export const JobsPage: React.FC = () => {
   };
 
   const handleLaunch = async (jobId: string) => {
+    if (loading || activeAttempt !== null || actionLoading || launching.current) return;
+    launching.current = true;
     try {
       setActionLoading(`launch_${jobId}`);
+      await attemptsService.assertNoActiveAttempt();
       const res = await jobsService.startJob(jobId);
       const attemptId = res.data.attempt_id;
-      // Navigate to job detail or live attempt
-      navigate(`/jobs/${jobId}`);
+      navigate(`/live?attempt_id=${encodeURIComponent(attemptId)}`);
     } catch (err: any) {
       alert(`Failed to start job: ${err?.message || 'Unknown error'}`);
+      void fetchJobs();
     } finally {
+      launching.current = false;
       setActionLoading(null);
     }
   };
@@ -251,6 +262,11 @@ export const JobsPage: React.FC = () => {
       </div>
 
       {/* Error Banner */}
+      {activeAttempt && (
+        <p className="text-xs text-amber-400">
+          Training is already active. <Link to={`/live?attempt_id=${encodeURIComponent(activeAttempt.attempt_id)}`} className="underline">View Run</Link> before starting another.
+        </p>
+      )}
       {error && (
         <div className="p-3 bg-rose-500/10 border border-rose-500/20 rounded flex items-center justify-between text-xs text-rose-300">
           <div className="flex items-center gap-2">
@@ -401,6 +417,12 @@ export const JobsPage: React.FC = () => {
 
                     <td className="py-2.5 px-3.5 text-left w-[190px] min-w-[190px] shrink-0">
                       <div className="flex items-center justify-start gap-1.5">
+                        {(activeAttempt?.job_id === job.job_id || isActiveAttempt(job.latest_attempt?.state)) && (
+                          <Link
+                            to={`/live?attempt_id=${encodeURIComponent(activeAttempt?.job_id === job.job_id ? activeAttempt.attempt_id : job.latest_attempt!.attempt_id)}`}
+                            className="text-blue-400 hover:text-blue-300 text-xs whitespace-nowrap"
+                          >View Run</Link>
+                        )}
                         {/* Slot 1: Run or Abort */}
                         {isAttemptAbortable(job.latest_attempt?.state) ? (
                           <button
@@ -417,10 +439,10 @@ export const JobsPage: React.FC = () => {
                             <Square className="w-3 h-3 fill-rose-400 text-rose-400" />
                             <span>{actionLoading === `abort_${job.latest_attempt!.attempt_id}` ? '...' : 'Abort'}</span>
                           </button>
-                        ) : job.state === 'READY' || job.state === 'DRAFT' ? (
+                        ) : !isActiveAttempt(job.latest_attempt?.state) && activeAttempt?.job_id !== job.job_id && (job.state === 'READY' || job.state === 'DRAFT') ? (
                           <button
                             type="button"
-                            disabled={actionLoading === `launch_${job.job_id}`}
+                            disabled={loading || activeAttempt !== null || Boolean(actionLoading)}
                             onClick={() => {
                               if (job.state === 'DRAFT') {
                                 setJobToStart(job);
@@ -434,7 +456,7 @@ export const JobsPage: React.FC = () => {
                             <Play className="w-3 h-3 text-[#73737c]" />
                             <span>{actionLoading === `launch_${job.job_id}` ? '...' : 'Run'}</span>
                           </button>
-                        ) : (
+                        ) : !isActiveAttempt(job.latest_attempt?.state) && activeAttempt?.job_id !== job.job_id ? (
                           <button
                             type="button"
                             disabled
@@ -444,7 +466,7 @@ export const JobsPage: React.FC = () => {
                             <Play className="w-3 h-3 opacity-30" />
                             <span>Run</span>
                           </button>
-                        )}
+                        ) : null}
 
                         {/* Slot 2: Edit */}
                         {job.state === 'DRAFT' || job.state === 'READY' ? (

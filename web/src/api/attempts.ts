@@ -5,6 +5,7 @@
  */
 
 import { apiClient, ApiClient, RequestOptions } from './client';
+import { AppApiError } from './errors';
 import {
   AbortAttemptRequest,
   AbortAttemptResponseData,
@@ -35,8 +36,37 @@ export interface CatchUpEventsParams {
   event_type?: string;
 }
 
+// COMPLETING is retained only for compatibility with legacy persisted attempts.
+export const isActiveAttempt = (state?: string | null): boolean =>
+  ['CREATED', 'WAITING_WORKERS', 'PROVISIONING', 'INITIALIZING', 'RUNNING', 'COMPLETING'].includes(state ?? '');
+
 export class AttemptsService {
   constructor(private readonly client: ApiClient = apiClient) {}
+
+  async getActiveAttempt(): Promise<AttemptListItemData | null> {
+    let cursor: string | null | undefined;
+    do {
+      const res = await this.listAttempts({ limit: 200, cursor });
+      const active = res.data.find(attempt => isActiveAttempt(attempt.state));
+      if (active) return active;
+      if (res.data.some(attempt => !['COMPLETED', 'FAILED', 'ABORTED'].includes(attempt.state))) {
+        throw new Error('Unable to verify active attempts. Refresh before starting training.');
+      }
+      cursor = res.page?.next_cursor;
+    } while (cursor);
+    return null;
+  }
+
+  async assertNoActiveAttempt(): Promise<void> {
+    const active = await this.getActiveAttempt();
+    if (active) {
+      throw new AppApiError({
+        status: 409,
+        code: 'ACTIVE_ATTEMPT_EXISTS',
+        message: `Attempt ${active.attempt_id} for job ${active.job_id} is still active. View that run before starting another.`,
+      });
+    }
+  }
 
   /**
    * 23.0 GET /api/v1/attempts — List attempts with filtering and cursor pagination
