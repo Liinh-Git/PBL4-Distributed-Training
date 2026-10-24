@@ -1,7 +1,7 @@
 /**
  * Idempotency Key utilities for Management Backend mutations.
  *
- * Required by API_contract.md for POST / PATCH / DELETE business workflows.
+ * Adds idempotency headers to mutation requests; see docs/API.md.
  */
 
 /**

@@ -1,5 +1,9 @@
 # API Contract — Backend REST & WebSocket
 
+> **HISTORICAL / NON-NORMATIVE** — Bản cũ được chuyển khỏi root ngày 2026-10-24.
+> Có nội dung đã lệch implementation, bao gồm checkpoint cadence.
+> Tra cứu [API đang triển khai](../API.md) trước khi sửa client hoặc Backend.
+
 ## 1. System — Health tổng hợp
 
 **Method:** `GET`  

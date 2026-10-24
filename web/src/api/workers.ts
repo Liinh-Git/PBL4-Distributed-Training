@@ -1,7 +1,7 @@
 /**
  * Workers Observation API Service
  *
- * Source of Truth: API_contract.md (28.0 - 29.0)
+ * API implementation reference: docs/API.md
  */
 
 import { apiClient, ApiClient, RequestOptions } from './client';

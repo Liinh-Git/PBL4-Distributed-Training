@@ -1,7 +1,7 @@
 /**
  * Jobs Management API Service
  *
- * Source of Truth: API_contract.md (13.0 - 22.0)
+ * API implementation reference: docs/API.md
  */
 
 import { apiClient, ApiClient, RequestOptions } from './client';

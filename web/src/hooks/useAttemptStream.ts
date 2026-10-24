@@ -1,7 +1,7 @@
 /**
  * Attempt Realtime Stream Hook & State Controller
  *
- * Source of Truth: API_contract.md (24.0, 25.0, 27.0 - 31.0, 34.0, 35.0, 39.0)
+ * API implementation reference: docs/API.md
  */
 
 import { useState, useEffect, useRef, useCallback, useContext } from 'react';

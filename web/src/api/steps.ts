@@ -1,7 +1,7 @@
 /**
  * Strict BSP Steps API Service
  *
- * Source of Truth: API_contract.md (30.0 - 31.0)
+ * API implementation reference: docs/API.md
  */
 
 import { apiClient, ApiClient, RequestOptions } from './client';

@@ -1,7 +1,7 @@
 /**
  * Attempts Lifecycle & Runtime Control API Service
  *
- * Source of Truth: API_contract.md (23.0 - 27.0, 34.0 - 35.0)
+ * API implementation reference: docs/API.md
  */
 
 import { apiClient, ApiClient, RequestOptions } from './client';

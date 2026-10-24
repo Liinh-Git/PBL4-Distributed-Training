@@ -4,6 +4,8 @@ Chạy Runtime, Backend, ba Node Agent và WebUI bằng `python services/start.p
 
 Hướng dẫn hiện hành: [Chạy qua WebUI](docs/DISTRIBUTED_DEMO_GUIDE.md). Database lấy từ `.env` (Aiven trên máy này); launcher không tạo database hoặc Job mẫu.
 
+Tra cứu thêm: [Mục lục tài liệu](docs/README.md) · [API đang triển khai](docs/API.md).
+
 “Xây dựng hạ tầng huấn luyện mô hình học sâu phân tán với cơ chế đồng bộ tham số giữa các thiết bị.”
 
 ---

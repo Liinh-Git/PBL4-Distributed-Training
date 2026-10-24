@@ -1,7 +1,7 @@
 /**
  * API Contract Strict TypeScript Definitions
  *
- * Source of Truth: API_contract.md
+ * API implementation reference: docs/API.md
  * Wire format representation for all 40 REST endpoints and WebSocket stream frames.
  */
 

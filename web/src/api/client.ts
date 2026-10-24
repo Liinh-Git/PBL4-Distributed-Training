@@ -2,7 +2,7 @@
  * Core HTTP API Client
  *
  * Provides a robust, type-safe HTTP communication layer with Management Backend.
- * Adheres strictly to API_contract.md envelope formats and error specifications.
+ * Uses Management Backend envelopes and errors; see docs/API.md.
  */
 
 import { config } from '../config';

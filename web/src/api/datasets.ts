@@ -1,7 +1,7 @@
 /**
  * Datasets API Service
  *
- * Source of Truth: API_contract.md (4.0, 5.0, 6.0)
+ * API implementation reference: docs/API.md
  */
 
 import { apiClient, ApiClient, RequestOptions } from './client';

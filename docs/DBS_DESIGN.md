@@ -8,9 +8,8 @@
 
 Tài liệu này là đặc tả **normative** cho semantics DBS và Work Unit của PBL4. Nó
 phải tuân theo kiến trúc canonical, `docs/IMPLEMENTATION_CONTRACT.md` và
-`AGENTS.md`. `docs/DBS_IMPLEMENTATION_PLAN.md` phải tuân theo tài liệu này;
-`docs/DBS_EXECUTION_BLUEPRINT.md` chỉ là execution note non-normative và không
-được dùng để thay đổi semantics.
+`AGENTS.md`. Kế hoạch triển khai và execution note phải tuân theo tài liệu này,
+không được dùng để thay đổi semantics.
 
 Các ý tưởng có giá trị được giữ lại:
 - Work Unit là đơn vị nhỏ, cố định để Runtime chia việc.

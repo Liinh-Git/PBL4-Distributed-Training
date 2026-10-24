@@ -1,7 +1,7 @@
 /**
  * Training Metrics Time-Series API Service
  *
- * Source of Truth: API_contract.md (40.0)
+ * API implementation reference: docs/API.md
  */
 
 import { apiClient, ApiClient, RequestOptions } from './client';

@@ -1,7 +1,7 @@
 /**
  * Checkpoints API Service
  *
- * Source of Truth: API_contract.md (32.0, 33.0)
+ * API implementation reference: docs/API.md
  */
 
 import { apiClient, ApiClient, RequestOptions } from './client';

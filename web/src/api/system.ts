@@ -1,7 +1,7 @@
 /**
  * System and Capabilities API Service
  *
- * Source of Truth: API_contract.md (1.0, 2.0, 3.0)
+ * API implementation reference: docs/API.md
  */
 
 import { apiClient, ApiClient } from './client';
