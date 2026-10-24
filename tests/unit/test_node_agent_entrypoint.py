@@ -170,3 +170,28 @@ def test_start_before_backend_retries_then_persists_one_identity(
     assert mock_enroll.call_count == 2
     mock_sleep.assert_called_once_with(1.0)
     assert load_identity(tmp_path).node_id == "node-retry"
+
+
+def test_cli_start_duplicate_var_dir_fails_fast(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """When a var-dir is already locked by another agent, start fails fast with exit code 1."""
+    from pbl4.node_agent.dir_lock import NodeAgentDirectoryLock
+
+    lock = NodeAgentDirectoryLock(tmp_path)
+    assert lock.acquire() is True
+    try:
+        code = main(
+            [
+                "start",
+                "--backend-url",
+                "http://127.0.0.1:8000",
+                "--var-dir",
+                str(tmp_path),
+            ]
+        )
+        assert code == 1
+        captured = capsys.readouterr()
+        assert "already in use by another Node Agent" in captured.err
+    finally:
+        lock.release()

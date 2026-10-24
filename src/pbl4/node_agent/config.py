@@ -15,7 +15,7 @@ class NodeAgentConfig:
     """Immutable runtime configuration for the Node Agent process."""
 
     backend_url: str
-    var_dir: str = "var/agent"
+    var_dir: str = "var/demo-node-0"
     heartbeat_interval_seconds: float = 5.0
     telemetry_interval_seconds: float = 10.0
     reconnect_min_seconds: float = 1.0
@@ -56,7 +56,7 @@ class NodeAgentConfig:
         backend_url = overrides.get("backend_url") or os.getenv(
             "PBL4_BACKEND_URL", "http://127.0.0.1:8000"
         )
-        var_dir = overrides.get("var_dir") or os.getenv("PBL4_VAR_DIR", "var/agent")
+        var_dir = overrides.get("var_dir") or os.getenv("PBL4_VAR_DIR", "var/demo-node-0")
         heartbeat_interval = overrides.get("heartbeat_interval_seconds") or float(
             os.getenv("PBL4_HEARTBEAT_INTERVAL_SECONDS", "5.0")
         )

@@ -221,7 +221,7 @@ class TestNodeAgentConfig(unittest.TestCase):
     def test_config_defaults_and_validation(self) -> None:
         config = NodeAgentConfig(backend_url="http://127.0.0.1:8000")
         self.assertEqual(config.backend_url, "http://127.0.0.1:8000")
-        self.assertEqual(config.var_dir, "var/agent")
+        self.assertEqual(config.var_dir, "var/demo-node-0")
         self.assertEqual(config.heartbeat_interval_seconds, 5.0)
         self.assertEqual(config.telemetry_interval_seconds, 10.0)
 
