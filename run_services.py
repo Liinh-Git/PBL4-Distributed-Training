@@ -30,29 +30,26 @@ from services.services import command, environment, prepare_manifests  # noqa: E
 # ═══════════════════════════ CONFIG — edit per machine ═══════════════════════════
 
 # Which services to start on this machine
-START_RUNTIME = True
+START_RUNTIME = False
 START_BACKEND = True
-START_NODE_AGENT = True
 START_WEB = True
 
 # Runtime (Parameter Server)
 RUNTIME_BIND_HOST = "127.0.0.1"  # listen address; 0.0.0.0 accepts remote workers
 RUNTIME_HOST = "127.0.0.1"  # address Backend uses to reach Runtime (MCP/1 + default DTP advertise)
 RUNTIME_ADVERTISED_HOST = ""  # ps_host handed to workers; empty = RUNTIME_HOST
-RUNTIME_PORT = 5000
-RUNTIME_MANAGEMENT_PORT = 7443
+RUNTIME_PORT = 9000
+RUNTIME_MANAGEMENT_PORT = 9001
 
 # Management Backend
 BACKEND_BIND_HOST = "127.0.0.1"  # listen address; 0.0.0.0 accepts remote agents/WebUI
 BACKEND_PORT = 8000
-BACKEND_URL = ""  # public origin of the Backend (e.g. http://192.168.1.20:8000); empty = derived
+# public origin of Backend (e.g. http://192.168.1.20:8000); empty = derived
+BACKEND_URL = "http://127.0.0.1:8000"
 
 # Dataset Manager
 DATASET_MANAGER_URL = ""  # empty = keep the value from .env
 
-# Node Agent
-NODE_AGENT_BACKEND_URL = ""  # empty = BACKEND_URL
-NODE_AGENT_VAR_DIR = "var/agent"
 
 # WebUI
 WEB_BIND_HOST = "127.0.0.1"
@@ -69,13 +66,13 @@ _LOOPBACK_OR_WILDCARD = ("0.0.0.0", "::")
 
 
 def resolve_backend_url() -> str:
-    candidate = NODE_AGENT_BACKEND_URL or BACKEND_URL
+    candidate = BACKEND_URL
     if candidate:
         return candidate.rstrip("/")
     if BACKEND_BIND_HOST in _LOOPBACK_OR_WILDCARD:
         raise SystemExit(
             "BACKEND_BIND_HOST is a wildcard address — fill BACKEND_URL "
-            "(or NODE_AGENT_BACKEND_URL) in run_services.py with the address used "
+            "in run_services.py with the address used "
             f"to reach the Backend, e.g. http://<backend-ip>:{BACKEND_PORT}."
         )
     return f"http://{BACKEND_BIND_HOST}:{BACKEND_PORT}"
@@ -128,17 +125,6 @@ def runtime_command(env: dict[str, str], manifests: Path, extra: list[str]) -> l
 
 def backend_command(extra: list[str]) -> list[str]:
     return command("backend", {}, Path("var/manifests"), extra)
-
-
-def agent_command(env: dict[str, str], extra: list[str]) -> list[str]:
-    agent_args = [
-        "--backend-url",
-        resolve_backend_url(),
-        "--var-dir",
-        NODE_AGENT_VAR_DIR,
-        *extra,
-    ]
-    return command("agent", env, Path("var/manifests"), agent_args)
 
 
 def web_command(npm: str) -> list[str]:
@@ -205,7 +191,6 @@ def main() -> None:
     flags = {
         "runtime": START_RUNTIME,
         "backend": START_BACKEND,
-        "node-agent": START_NODE_AGENT,
         "web": START_WEB,
     }
     started = [name for name, enabled in flags.items() if enabled]
@@ -243,8 +228,6 @@ def main() -> None:
         commands["runtime"] = runtime_command(env, manifests, extra)
     if START_BACKEND:
         commands["backend"] = backend_command(extra)
-    if START_NODE_AGENT:
-        commands["node-agent"] = agent_command(env, extra)
     npm: str | None = None
     if START_WEB:
         npm = find_npm()
@@ -268,8 +251,6 @@ def main() -> None:
             )
         if START_BACKEND:
             print(f"  backend: bind {BACKEND_BIND_HOST}:{BACKEND_PORT}")
-        if START_NODE_AGENT:
-            print(f"  node-agent: backend {resolve_backend_url()} (var-dir {NODE_AGENT_VAR_DIR})")
         if START_WEB:
             print(f"  web: {web_origins()[0]} -> api {env['VITE_API_BASE_URL']}")
         print("Env overrides:")
@@ -324,11 +305,6 @@ def main() -> None:
         )
     if START_BACKEND:
         print(f"  backend: bind {BACKEND_BIND_HOST}:{BACKEND_PORT}", flush=True)
-    if START_NODE_AGENT:
-        print(
-            f"  node-agent: backend {resolve_backend_url()} (var-dir {NODE_AGENT_VAR_DIR})",
-            flush=True,
-        )
     if START_WEB:
         print(f"  web: {web_origins()[0]}", flush=True)
 
@@ -351,18 +327,20 @@ def main() -> None:
             start("runtime", commands["runtime"])
         if START_BACKEND:
             start("backend", commands["backend"])
-        if START_BACKEND and START_NODE_AGENT:
-            wait_for_backend()
-        if START_NODE_AGENT:
-            start("node-agent", commands["node-agent"])
         if START_WEB:
             start("web", commands["web"], ROOT / "web")
             print(
-                f"Open {web_origins()[0]}; create jobs in WebUI. Ctrl+C stops services.",
+                f"Open {web_origins()[0]}; create jobs in WebUI.\n"
+                "Start Node Agents in separate terminals using: python services/node-agent.py\n"
+                "Ctrl+C stops services.",
                 flush=True,
             )
         else:
-            print("Ctrl+C stops services.", flush=True)
+            print(
+                "Start Node Agents in separate terminals using: python services/node-agent.py\n"
+                "Ctrl+C stops services.",
+                flush=True,
+            )
         while all(p.poll() is None for p in children):
             time.sleep(1)
         raise RuntimeError("A service stopped; inspect var/logs")

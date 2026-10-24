@@ -1,4 +1,4 @@
-'''Start Runtime, Backend, local Node Agents and WebUI.'''
+"""Start Runtime, Backend and WebUI. (Start Node Agents via: python services/node-agent.py)"""
 
 import sys
 from pathlib import Path

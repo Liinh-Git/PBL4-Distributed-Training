@@ -1,6 +1,6 @@
 # PBL4 — Distributed Deep Learning Training Infrastructure
 
-Chạy Runtime, Backend, ba Node Agent và WebUI bằng `python services/start.py` trong môi trường Python đã cài dependencies. Tạo Job, chọn model/Build và bắt đầu training trên WebUI.
+Khởi động Runtime, Backend và WebUI bằng `python services/start.py`. Khởi động các Node Agent trong từng terminal riêng biệt bằng `python services/node-agent.py`. Tạo Job, chọn model/Build và bắt đầu training trên WebUI.
 
 Hướng dẫn hiện hành: [Chạy qua WebUI](docs/DISTRIBUTED_DEMO_GUIDE.md). Database lấy từ `.env` (Aiven trên máy này); launcher không tạo database hoặc Job mẫu.
 
