@@ -102,13 +102,10 @@ def main(service: str = "all") -> None:
         )
 
     parser = argparse.ArgumentParser(
-        description="Start local PBL4 services. Create and train jobs in WebUI."
+        description="Start local PBL4 infrastructure (Runtime, Backend, WebUI)."
     )
-    parser.add_argument("--nodes", type=int, default=3)
     parser.add_argument("--web-port", type=int, default=3000)
     args = parser.parse_args()
-    if args.nodes < 1:
-        parser.error("--nodes must be positive")
     # All-in-one mode always uses loopback; no machine-specific LAN address is needed.
     env.update(
         RUNTIME_HOST="127.0.0.1",
@@ -180,17 +177,7 @@ def main(service: str = "all") -> None:
                         "Backend startup timed out; inspect var/logs/backend.log"
                     ) from None
                 time.sleep(0.5)
-        for index in range(args.nodes):
-            state = state_root / ("agent" if index == 0 else f"demo-node-{index}")
-            start(
-                f"node-{index}",
-                command(
-                    "agent",
-                    env,
-                    manifests,
-                    ["--backend-url", f"http://127.0.0.1:{backend_port}", "--var-dir", str(state)],
-                ),
-            )
+
         start(
             "web",
             [
@@ -207,7 +194,9 @@ def main(service: str = "all") -> None:
             ROOT / "web",
         )
         print(
-            f"Open http://127.0.0.1:{args.web_port}; create jobs in WebUI. Ctrl+C stops services.",
+            f"Open http://127.0.0.1:{args.web_port}; create jobs in WebUI.\n"
+            "Start Node Agents in separate terminals using: python services/node-agent.py\n"
+            "Ctrl+C stops services.",
             flush=True,
         )
         while all(p.poll() is None for p in children):

@@ -16,11 +16,19 @@ Linux/macOS dùng `source .venv/bin/activate`. Cấu hình `.env` theo `.env.exa
 ## Mỗi lần chạy trên một máy
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
+# Bước 1: Khởi động hạ tầng dịch vụ (Runtime, Backend, WebUI)
 python services/start.py
+
+# Bước 2: Khởi động các Node Agent (mỗi agent chạy trong một terminal riêng)
+# Terminal 1:
+python services/node-agent.py
+# Terminal 2:
+python services/node-agent.py
+# Terminal 3:
+python services/node-agent.py
 ```
 
-Mở http://127.0.0.1:3000. Launcher chạy Runtime, Backend, ba Node Agent và Vite. `--nodes N` đổi số Node local. Các cổng lấy từ `.env`; địa chỉ nội bộ tự dùng loopback để không phụ thuộc IP máy. Nếu cổng đang được dùng, dừng phiên service cũ trước; launcher không tự giết process khác.
+Mở http://127.0.0.1:3000. Launcher `python services/start.py` chạy Runtime, Backend và Vite. Các Node Agent được chạy độc lập trên từng terminal bằng `python services/node-agent.py` (hệ thống tự động cấp phát demo-node-0, demo-node-1, demo-node-2 và khóa chống trùng lặp). Các cổng lấy từ `.env`; địa chỉ nội bộ tự dùng loopback để không phụ thuộc IP máy. Nếu cổng đang được dùng, dừng phiên service cũ trước; launcher không tự giết process khác.
 
 Trên UI:
 
@@ -37,7 +45,8 @@ Không cần CLI tạo Job hoặc lệnh bật Worker. Manifest các model đư�
 ```powershell
 python services/runtime.py --host 0.0.0.0
 python services/backend.py --host 0.0.0.0
-python services/node-agent.py --backend-url http://BACKEND_HOST:8000 --var-dir var/agent
+python services/node-agent.py --backend-url http://BACKEND_HOST:8000 --var-dir var/demo-node-0
+# Hoặc chạy không cần --var-dir để tự động nhận slot khả dụng (demo-node-0, demo-node-1, ...)
 ```
 
 Chạy mỗi lệnh trong terminal riêng. Cấu hình `RUNTIME_HOST`, `RUNTIME_ADVERTISED_HOST`, `RUNTIME_PORT`, `RUNTIME_MANAGEMENT_PORT` theo địa chỉ Runtime mà Backend/Workers truy cập được. Node máy khác chỉ cần dependencies Worker/Agent và URL Backend; không cần connection string Aiven. Dùng thư mục `--var-dir` riêng cho từng Agent để giữ cache/identity ổn định. WebUI riêng cần `VITE_API_BASE_URL` và `VITE_WS_BASE_URL` là origin Backend (không thêm `/api/v1` hoặc `/ws/v1`). CORS Backend phải cho phép origin WebUI.

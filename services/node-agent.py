@@ -1,4 +1,4 @@
-'''Start a Node Agent; accepts --backend-url and --var-dir.'''
+"""Start a Node Agent; accepts optional --backend-url and --var-dir (auto-allocated if omitted)."""
 
 import sys
 from pathlib import Path
