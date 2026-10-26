@@ -41,7 +41,7 @@ export const LiveActivityConsole: React.FC<LiveActivityConsoleProps> = ({
 
   // Filter events client-side
   const visibleEvents = useMemo(() => {
-    return (events || []).filter(evt => {
+    const filtered = (events || []).filter(evt => {
       // Client-side clear filter
       if (clearedEventIds.has(evt.id)) {
         return false;
@@ -50,6 +50,8 @@ export const LiveActivityConsole: React.FC<LiveActivityConsoleProps> = ({
       const formatted = formatDiagnosticEvent(evt);
       return formatted.category === selectedCategory;
     });
+    // Cap visible items to the latest 200 to prevent DOM thrashing during long runs
+    return filtered.length > 200 ? filtered.slice(filtered.length - 200) : filtered;
   }, [events, selectedCategory, clearedEventIds]);
 
   // Counts for filter pills
@@ -95,12 +97,12 @@ export const LiveActivityConsole: React.FC<LiveActivityConsoleProps> = ({
     isAutoScrollingRef.current = true;
     el.scrollTo({
       top: el.scrollHeight,
-      behavior: 'smooth',
+      behavior: 'auto',
     });
 
     const timeout = setTimeout(() => {
       isAutoScrollingRef.current = false;
-    }, 150);
+    }, 50);
 
     return () => clearTimeout(timeout);
   }, [(events || []).length, autoFollow, isScrolledUp]);

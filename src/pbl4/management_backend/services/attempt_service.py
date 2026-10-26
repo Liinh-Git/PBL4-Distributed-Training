@@ -36,7 +36,6 @@ from pbl4.management_backend.services.cluster_scheduler import (
     ClusterScheduler,
     WorkerPlacementSpec,
 )
-from pbl4.management_backend.services.job_service import JobValidationError
 from pbl4.management_backend.services.dataset_service import (
     InvalidCursorError as InvalidCursorError,
 )
@@ -46,6 +45,7 @@ from pbl4.management_backend.services.dataset_service import (
 from pbl4.management_backend.services.dataset_service import (
     encode_cursor as encode_cursor,
 )
+from pbl4.management_backend.services.job_service import JobValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -331,6 +331,19 @@ def _preflight_job_and_select_placements(
     online_nodes = node_repository.list_nodes(
         conn, state=node_repository.NODE_STATE_ONLINE, limit=1000
     )
+    try:
+        from pbl4.management_backend.gateways.node_control_gateway import get_node_control_gateway
+
+        gateway = get_node_control_gateway()
+        active_ids = gateway.get_active_node_ids()
+        if isinstance(active_ids, (list, tuple, set)) and active_ids:
+            connected_node_ids = set(active_ids)
+            filtered_nodes = [n for n in online_nodes if n["node_id"] in connected_node_ids]
+            if len(filtered_nodes) >= expected_workers or node_ids is not None:
+                online_nodes = filtered_nodes
+    except Exception:
+        pass
+
     active_allocs = allocation_repository.list_active(conn)
     if node_ids is not None:
         if len(node_ids) != expected_workers or len(set(node_ids)) != len(node_ids):
@@ -1137,7 +1150,9 @@ def _dispatch_workers_for_attempt(
                         conn,
                         str(d_alloc["allocation_id"]),
                         failure_code="WORKER_SPAWN_FAILED",
-                        failure_message="Cancelled due to partial worker dispatch failure in attempt",
+                        failure_message=(
+                            "Cancelled due to partial worker dispatch failure in attempt"
+                        ),
                     )
             except Exception as exc:
                 logger.warning(

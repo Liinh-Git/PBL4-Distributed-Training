@@ -443,6 +443,7 @@ export const JobsPage: React.FC = () => {
                           <button
                             type="button"
                             disabled={loading || activeAttempt !== null || Boolean(actionLoading)}
+                            aria-busy={actionLoading === `launch_${job.job_id}`}
                             onClick={() => {
                               if (job.state === 'DRAFT') {
                                 setJobToStart(job);
@@ -453,8 +454,10 @@ export const JobsPage: React.FC = () => {
                             className="inline-flex items-center justify-center gap-1 w-16 py-1 text-xs rounded bg-[#171719] hover:bg-[#202024] text-[#f3f3f4] border border-white/[0.07] transition-colors disabled:opacity-50 shrink-0"
                             title={job.state === 'DRAFT' ? "Start Training (freeze draft to READY)" : "Launch Training Run"}
                           >
-                            <Play className="w-3 h-3 text-[#73737c]" />
-                            <span>{actionLoading === `launch_${job.job_id}` ? '...' : 'Run'}</span>
+                            {actionLoading === `launch_${job.job_id}`
+                              ? <RefreshCw aria-hidden="true" className="w-3 h-3 animate-spin motion-reduce:animate-none" />
+                              : <Play aria-hidden="true" className="w-3 h-3 text-[#73737c]" />}
+                            <span>Run</span>
                           </button>
                         ) : !isActiveAttempt(job.latest_attempt?.state) && activeAttempt?.job_id !== job.job_id ? (
                           <button
@@ -555,12 +558,14 @@ export const JobsPage: React.FC = () => {
       {/* Start DRAFT Job Confirmation Modal */}
       <ConfirmationModal
         isOpen={!!jobToStart}
+        isLoading={actionLoading === `launch_${jobToStart?.job_id}`}
+        closeOnConfirm={false}
         onClose={() => setJobToStart(null)}
         onConfirm={async () => {
           if (!jobToStart) return;
           const targetId = jobToStart.job_id;
-          setJobToStart(null);
           await handleLaunch(targetId);
+          setJobToStart(null);
         }}
         title="Start Training Run?"
         confirmLabel="Start Training"

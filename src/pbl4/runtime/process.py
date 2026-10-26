@@ -24,7 +24,7 @@ from pbl4.protocol.parameter_manifest import ParameterManifest
 from pbl4.protocol.transfer import CompletedTensorTransfer
 from pbl4.runtime.batch_scheduler import BatchScheduler, RecoveryCursor
 from pbl4.runtime.canonical_model import CanonicalModel, ModelSnapshot
-from pbl4.runtime.checkpoint import CheckpointManager
+from pbl4.runtime.checkpoint import CheckpointManager, CompleteCheckpoint
 from pbl4.runtime.checkpoint_policy import CheckpointPolicy
 from pbl4.runtime.checkpoint_v1 import CheckpointV1Serializer
 from pbl4.runtime.coordinator import Coordinator
@@ -140,15 +140,13 @@ class RuntimeProcess:
         if command_type == "START_ATTEMPT":
             with self._lock:
                 previous = self._active
-            if previous is not None and previous.terminal:
-                # Coordinator terminal state is visible before the runner has
-                # released DTP sockets. Finish bounded cleanup before reusing
-                # the listener for RETRY/RESUME, outside the Runtime state lock.
-                previous.join(5.0)
+            if previous is not None and previous.closing:
+                # Abort/terminal state can precede socket cleanup. Await the
+                # resource owner rather than admitting another runner early.
+                # Keep this outside the state lock so cleanup can release it.
+                previous.wait_closed(5.0)
             with self._lock:
-                if self._active is not None and (
-                    not self._active.terminal or self._active._thread.is_alive()
-                ):
+                if self._active is not None and not self._active.wait_closed(0):
                     return self._result(
                         command_id,
                         attempt_id,
@@ -226,6 +224,7 @@ class _AttemptRunner:
         self._state = "CREATED"
         self._state_lock = threading.Lock()
         self._abort = threading.Event()
+        self._closed = threading.Event()
         self._thread = threading.Thread(
             target=self._run, name=f"pbl4-attempt-{self.attempt_id}", daemon=True
         )
@@ -258,6 +257,14 @@ class _AttemptRunner:
 
     def join(self, timeout: float) -> None:
         self._thread.join(timeout)
+
+    @property
+    def closing(self) -> bool:
+        return self._abort.is_set() or self.terminal
+
+    def wait_closed(self, timeout: float) -> bool:
+        """Wait until the runner has finished closing its DTP resources."""
+        return self._closed.wait(timeout)
 
     def abort(self) -> None:
         self._abort.set()
@@ -321,8 +328,11 @@ class _AttemptRunner:
                 raise ValueError("Pinned Dataset Manifest shard count differs from membership")
             shard_manifests = self._fetch_shard_manifests(dataset)
 
-            if not server.wait_for_workers(expected_workers, 180.0):
-                raise TimeoutError("Timed out waiting for full DTP worker membership")
+            self._wait_for(
+                lambda: server.wait_for_workers(expected_workers, 0.0),
+                180.0,
+                "full DTP worker membership",
+            )
             self._set_state("PROVISIONING")
             for worker_id in server.worker_ids():
                 server.send_dataset_assignment(
@@ -351,22 +361,25 @@ class _AttemptRunner:
                 "verified worker shards",
             )
             self._set_state("INITIALIZING")
-            if not server.wait_for_manifests(120.0):
-                raise TimeoutError("Timed out waiting for Parameter Manifests")
+            self._wait_for(
+                lambda: server.wait_for_manifests(0.0),
+                120.0,
+                "Parameter Manifests",
+            )
             execution_mode = str(self._payload["execution_mode"])
             if execution_mode == "RESUME":
                 initial = np.zeros(self._manifest.total_numel, dtype=np.float32)
             else:
-                if not self._model_init.wait(120.0):
-                    raise TimeoutError("Timed out waiting for worker-0 canonical initialization")
+                self._wait_for(
+                    self._model_init.is_set,
+                    120.0,
+                    "worker-0 canonical initialization",
+                )
                 transfer = self._model_init_transfer
                 if transfer is None:
                     raise ValueError("Canonical initialization transfer is unavailable")
                 initial = np.frombuffer(transfer.data, dtype="<f4").astype(np.float32, copy=True)
-                if (
-                    initial.size != self._manifest.total_numel
-                    or not np.isfinite(initial).all()
-                ):
+                if initial.size != self._manifest.total_numel or not np.isfinite(initial).all():
                     raise ValueError("Canonical initialization tensor is invalid")
 
             members = tuple(Member(item.worker_id, item.session_id) for item in registry.snapshot())
@@ -432,9 +445,7 @@ class _AttemptRunner:
                 source_step_id=None,
                 optimizer=str(contract["update_policy"]["type"]),
                 created_at=_now(),
-                model=ModelSnapshot(
-                    0, self._manifest.parameter_manifest_hash, initial.tobytes()
-                ),
+                model=ModelSnapshot(0, self._manifest.parameter_manifest_hash, initial.tobytes()),
                 recovery_cursor=RecoveryCursor(0, 0),
             )
             resume_cursor: RecoveryCursor | None = None
@@ -564,6 +575,9 @@ class _AttemptRunner:
             coordinator = self._coordinator
             if coordinator is not None:
                 self._set_state(str(coordinator.snapshot()["state"]))
+            # Preserve the terminal snapshot until the next runner replaces us.
+            # Reporting idle before terminal events arrive can abort the DB projection.
+            self._closed.set()
 
     def _training_loop(self, coordinator: Coordinator, server: ParameterServer) -> None:
         monitor = HeartbeatMonitor(self._registry, self._process._heartbeat_timeout)
@@ -593,9 +607,7 @@ class _AttemptRunner:
                             "batch_id": assignment.batch_id,
                             "expected_sample_count": assignment.sample_count,
                             "training_strategy": "strict_bsp",
-                            "parameter_manifest_hash": (
-                                self._manifest.parameter_manifest_hash
-                            ),
+                            "parameter_manifest_hash": self._manifest.parameter_manifest_hash,
                             "work_units": [u.to_dict() for u in assignment.work_units],
                         }
                     ),
@@ -799,8 +811,7 @@ class _AttemptRunner:
             or model.get("model_id") not in MODEL_PROFILES
             or model.get("profile") != MODEL_PROFILES.get(model.get("model_id"))
             or self._manifest is None
-            or model.get("parameter_manifest_hash")
-            != self._manifest.parameter_manifest_hash
+            or model.get("parameter_manifest_hash") != self._manifest.parameter_manifest_hash
             or not isinstance(sync, dict)
             or sync.get("training_strategy") != "strict_bsp"
             or type(sync.get("expected_workers")) is not int
@@ -900,12 +911,14 @@ class _AttemptRunner:
 
     def _wait_for(self, predicate, timeout: float, description: str) -> None:
         deadline = time.monotonic() + timeout
-        while not predicate():
+        while True:
             if self._abort.is_set():
                 raise RuntimeError("Attempt aborted")
+            if predicate():
+                return
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"Timed out waiting for {description}")
-            time.sleep(0.05)
+            self._abort.wait(0.05)
 
 
 def load_parameter_manifest(path: Path) -> ParameterManifest:
