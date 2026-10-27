@@ -15,6 +15,7 @@ from __future__ import annotations
 import concurrent.futures
 import contextlib
 import logging
+import queue
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -37,7 +38,7 @@ from pbl4.transport.tcp_client import TcpClient
 
 logger = logging.getLogger(__name__)
 
-McpMessageHandler = Callable[[str, dict[str, Any]], None]
+McpMessageHandler = Callable[[str, Any], None]
 DatasetResolver = Callable[[dict[str, Any]], dict[str, object]]
 
 
@@ -273,9 +274,13 @@ class RealMcpClientPort(McpClientPort):
         self._waiters: dict[str, concurrent.futures.Future[McpEnvelope]] = {}
         self._reader: threading.Thread | None = None
         self._reconnector: threading.Thread | None = None
-        self._dispatch_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="pbl4-mcp-projection"
+        self._inbound_queue: queue.Queue[McpEnvelope | None] = queue.Queue(maxsize=10000)
+        self._drain_thread: threading.Thread | None = threading.Thread(
+            target=self._drain_loop,
+            name="pbl4-mcp-drain",
+            daemon=True,
         )
+        self._drain_thread.start()
 
     def set_message_handler(self, handler: McpMessageHandler | None) -> None:
         self._handler = handler
@@ -356,6 +361,9 @@ class RealMcpClientPort(McpClientPort):
         if reconnect is not None and reconnect is not threading.current_thread():
             reconnect.join(timeout=2.0)
         self._reconnector = None
+        if self._drain_thread is not None and self._drain_thread.is_alive():
+            with contextlib.suppress(Exception):
+                self._inbound_queue.put(None)
 
     def _close_socket(self) -> None:
         client, self._client = self._client, None
@@ -472,9 +480,43 @@ class RealMcpClientPort(McpClientPort):
         handler = self._handler
         if handler is None:
             return
-        # Keep semantic delivery in TCP receive order. Reader/correlation and
-        # dataset resolution stay independent so handlers may request state.
-        self._dispatch_executor.submit(handler, envelope.message_type, envelope.payload.to_dict())
+        try:
+            self._inbound_queue.put_nowait(envelope)
+        except queue.Full:
+            logger.warning("MCP inbound queue full, blocking put")
+            self._inbound_queue.put(envelope)
+
+    def _drain_loop(self) -> None:
+        while not self._closing.is_set():
+            try:
+                item = self._inbound_queue.get(timeout=0.02)
+            except queue.Empty:
+                continue
+            if item is None:
+                break
+            handler = self._handler
+            if handler is None:
+                continue
+            if item.message_type == "RUNTIME_EVENT":
+                batch = [item.payload.to_dict()]
+                while len(batch) < 100:
+                    try:
+                        next_item = self._inbound_queue.get_nowait()
+                        if next_item is None:
+                            return
+                        if next_item.message_type == "RUNTIME_EVENT":
+                            batch.append(next_item.payload.to_dict())
+                        else:
+                            # Flush current batch first, then dispatch non-event
+                            handler("RUNTIME_EVENT", batch)
+                            batch = []
+                            handler(next_item.message_type, next_item.payload.to_dict())
+                    except queue.Empty:
+                        break
+                if batch:
+                    handler("RUNTIME_EVENT", batch)
+            else:
+                handler(item.message_type, item.payload.to_dict())
 
     def _serve_dataset_resolution(self, request: McpEnvelope) -> None:
         try:

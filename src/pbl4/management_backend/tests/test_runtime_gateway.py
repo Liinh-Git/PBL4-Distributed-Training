@@ -1176,3 +1176,111 @@ def test_live_snapshot_does_not_skip_buffered_step_events():
         gateway.handle_state_snapshot(snapshot)
     assert cursor.authoritative_snapshot_seq == 12
     assert cursor.highest_contiguous_seq == 0
+
+
+def test_runtime_event_batch_atomic_single_transaction():
+    """Verify batch of events executes in a single database transaction."""
+    gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
+    cursor = gateway.get_cursor("attempt-batch")
+    transaction_calls = 0
+    fake_conn = MagicMock()
+
+    @contextmanager
+    def counting_transaction():
+        nonlocal transaction_calls
+        transaction_calls += 1
+        yield fake_conn
+
+    events = [
+        {
+            "attempt_id": "attempt-batch",
+            "job_id": "job-1",
+            "runtime_event_seq": i,
+            "event_type": "step.started",
+            "event_schema_version": 1,
+            "severity": "INFO",
+            "occurred_at": datetime.now(UTC).isoformat(),
+            "source_component": "runtime",
+            "details": {"step_id": i},
+        }
+        for i in range(1, 11)
+    ]
+
+    with (
+        patch("pbl4.management_backend.db.transaction", counting_transaction),
+        patch(
+            "pbl4.management_backend.services.event_ingest.ingest_runtime_event",
+            side_effect=lambda _c, **kw: RuntimeEventIngestResult(row={"id": kw["runtime_event_seq"]}, inserted=True),
+        ),
+        patch.object(gateway, "_project_runtime_event") as mock_project,
+        patch("pbl4.management_backend.services.event_ingest.broadcast_runtime_event") as mock_broadcast,
+    ):
+        gateway.handle_runtime_event(events)
+
+    # Exactly 1 transaction for the entire batch of 10 events
+    assert transaction_calls == 1
+    assert mock_project.call_count == 10
+    assert mock_broadcast.call_count == 10
+    assert cursor.highest_contiguous_seq == 10
+    assert cursor.gap_fenced is False
+
+
+def test_runtime_event_fast_path_never_queries_db_for_in_order_events():
+    """In-order events use in-memory payload directly, performing zero SELECT queries."""
+    gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
+    fake_conn = MagicMock()
+
+    @contextmanager
+    def fake_transaction():
+        yield fake_conn
+
+    events = [
+        {
+            "attempt_id": "attempt-in-order",
+            "job_id": "job-1",
+            "runtime_event_seq": i,
+            "event_type": "step.started",
+            "event_schema_version": 1,
+            "severity": "INFO",
+            "occurred_at": datetime.now(UTC).isoformat(),
+            "source_component": "runtime",
+            "details": {"step_id": i},
+        }
+        for i in range(1, 6)
+    ]
+
+    with (
+        patch("pbl4.management_backend.db.transaction", fake_transaction),
+        patch(
+            "pbl4.management_backend.services.event_ingest.ingest_runtime_event",
+            side_effect=lambda _c, **kw: RuntimeEventIngestResult(row={"id": kw["runtime_event_seq"]}, inserted=True),
+        ),
+        patch(
+            "pbl4.management_backend.repositories.event_repository.get_event_by_seq"
+        ) as mock_get_event,
+        patch.object(gateway, "_project_runtime_event") as mock_project,
+        patch("pbl4.management_backend.services.event_ingest.broadcast_runtime_event"),
+    ):
+        for ev in events:
+            gateway.handle_runtime_event(ev)
+
+    # Zero SELECT queries executed for in-order events!
+    mock_get_event.assert_not_called()
+    assert mock_project.call_count == 5
+    assert gateway.get_cursor("attempt-in-order").highest_contiguous_seq == 5
+
+
+def test_inbound_runtime_event_dispatches_list_and_dict():
+    """Verify _handle_inbound_message routes RUNTIME_EVENT whether passed as a single dict or a list."""
+    gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
+    with patch.object(gateway, "handle_runtime_event") as mock_handler:
+        single_ev = {"attempt_id": "att-1", "runtime_event_seq": 1}
+        gateway._handle_inbound_message("RUNTIME_EVENT", single_ev)
+        mock_handler.assert_called_once_with(single_ev)
+
+        mock_handler.reset_mock()
+        batch_evs = [{"attempt_id": "att-1", "runtime_event_seq": 2}, {"attempt_id": "att-1", "runtime_event_seq": 3}]
+        gateway._handle_inbound_message("RUNTIME_EVENT", batch_evs)
+        mock_handler.assert_called_once_with(batch_evs)
+
+
