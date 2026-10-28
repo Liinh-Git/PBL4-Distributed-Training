@@ -109,9 +109,8 @@ class RuntimeGateway:
         """Return the sequence cursor owned exclusively by one Attempt."""
         return self._attempt_cursors.setdefault(attempt_id, AttemptRuntimeCursor())
 
-    def record_event_seq(self, attempt_id: str, seq: int, conn: Any) -> None:
+    def record_event_seq(self, attempt_id: str, seq: int, conn: Any = None) -> None:
         """Track one Attempt's event continuity and fence gaps."""
-        from pbl4.management_backend.repositories import event_repository
         from pbl4.management_backend.websocket import hub
 
         cursor = self.get_cursor(attempt_id)
@@ -128,6 +127,9 @@ class RuntimeGateway:
                 else 1
             )
         )
+
+        if cursor.highest_contiguous_seq is not None and seq <= cursor.highest_contiguous_seq:
+            return
 
         if seq > expected:
             logger.warning(
@@ -156,87 +158,8 @@ class RuntimeGateway:
                 },
             )
         elif seq == expected:
-            # Persisted events are not applied until their projection commits.  The
-            # arriving event and any buffered successors use the same path, so a
-            # duplicate delivery can retry a previously failed projection.
-            from pbl4.management_backend.services import event_ingest
-
-            while True:
-                next_seq = expected
-                if next_seq > cursor.max_seen_seq:
-                    break
-                try:
-                    next_ev = event_repository.get_event_by_seq(conn, attempt_id, next_seq)
-                except Exception as read_err:
-                    logger.warning("Failed to read event %s for projection: %s", next_seq, read_err)
-                    break
-                if next_ev is not None:
-                    details = next_ev.get("payload_jsonb")
-                    if isinstance(details, str):
-                        try:
-                            details = json.loads(details)
-                        except Exception:
-                            details = {}
-                    elif details is None:
-                        details = {}
-
-                    occurred_at_val = next_ev.get("occurred_at")
-                    if isinstance(occurred_at_val, datetime):
-                        occurred_at_str = occurred_at_val.isoformat()
-                    else:
-                        occurred_at_str = str(occurred_at_val or datetime.now(UTC).isoformat())
-
-                    next_payload = {
-                        "attempt_id": attempt_id,
-                        "runtime_event_seq": next_seq,
-                        "event_type": next_ev.get("event_type"),
-                        "severity": next_ev.get("severity", "INFO"),
-                        "occurred_at": occurred_at_str,
-                        "details": details,
-                    }
-                    try:
-                        self._project_runtime_event(conn, next_payload)
-                        conn.commit()
-                    except Exception as proj_err:
-                        logger.warning("Failed to project drained event %s: %s", next_seq, proj_err)
-                        conn.rollback()
-                        break
-                    cursor.highest_contiguous_seq = next_seq
-                    if next_ev.get("event_type") == "model.updated":
-                        snapshot = self._attempt_snapshots.get(attempt_id)
-                        if snapshot is not None:
-                            snapshot["model_version"] = max(
-                                snapshot.get("model_version") or 0,
-                                int(details["output_model_version"]),
-                            )
-                    expected = next_seq + 1
-                    event_ingest.broadcast_runtime_event(
-                        attempt_id=attempt_id,
-                        runtime_event_seq=next_seq,
-                        event_type=next_ev.get("event_type"),
-                        severity=next_ev.get("severity", "INFO"),
-                        occurred_at=(
-                            occurred_at_val
-                            if isinstance(occurred_at_val, datetime)
-                            else datetime.now(UTC)
-                        ),
-                        source_component=next_ev.get("source_component", "Runtime"),
-                        payload=details,
-                    )
-                else:
-                    break
-
-            if (
-                cursor.highest_contiguous_seq is not None
-                and cursor.highest_contiguous_seq >= cursor.max_seen_seq
-            ):
-                if cursor.gap_fenced:
-                    logger.info(
-                        "Event gap closed for attempt %s; contiguous cursor at %s",
-                        attempt_id,
-                        cursor.highest_contiguous_seq,
-                    )
-                cursor.gap_fenced = False
+            cursor.highest_contiguous_seq = seq
+            cursor.gap_fenced = False
 
     def _empty_snapshot(self) -> dict[str, Any]:
         return {
@@ -425,7 +348,7 @@ class RuntimeGateway:
 
     # ─── Inbound Management Message Dispatcher ────────────────────────────────
 
-    def _handle_inbound_message(self, msg_type: str, payload: dict[str, Any]) -> None:
+    def _handle_inbound_message(self, msg_type: str, payload: Any) -> None:
         if msg_type == "MGMT_HELLO_ACK":
             self.handle_hello_ack(payload)
         elif msg_type == "STATE_SNAPSHOT":
@@ -771,83 +694,249 @@ class RuntimeGateway:
                 {"command_id": command_id, "state": state, "result": result, "payload": payload}
             )
 
-    def handle_runtime_event(self, payload: dict[str, Any]) -> None:
-        with self._projection_lock:
-            self._handle_runtime_event(payload)
-
-    def _handle_runtime_event(self, payload: dict[str, Any]) -> None:
-        """RUNTIME_EVENT -> event ingestion / dedup / gap handling / projection / WS publish."""
-        try:
-            payload = RuntimeEvent.from_dict(payload).to_dict()
-        except ProtocolError as exc:
-            logger.warning("Ignoring malformed RUNTIME_EVENT: %s", exc)
+    def handle_runtime_event(self, payload: dict[str, Any] | list[dict[str, Any]]) -> None:
+        """Process single event or event batch atomically under projection lock."""
+        events = payload if isinstance(payload, list) else [payload]
+        if not events:
             return
-        attempt_id = payload["attempt_id"]
-        seq = payload["runtime_event_seq"]
-        event_type = payload["event_type"]
-        severity = payload["severity"]
-        occurred_at_raw = payload["occurred_at"]
-        occurred_at = datetime.now(UTC)
-        if occurred_at_raw:
-            with contextlib.suppress(Exception):
-                occurred_at = (
-                    datetime.fromisoformat(occurred_at_raw)
-                    if isinstance(occurred_at_raw, str)
-                    else occurred_at_raw
-                )
+        with self._projection_lock:
+            self._handle_runtime_event_batch(events)
 
-        # Preflight: check sequence continuity BEFORE mutating projection
-        is_contiguous = True
-        if attempt_id is not None and seq is not None:
-            cursor = self.get_cursor(attempt_id)
-            expected = (
-                (cursor.highest_contiguous_seq + 1)
-                if cursor.highest_contiguous_seq is not None
-                else (
-                    cursor.authoritative_snapshot_seq + 1
-                    if cursor.authoritative_snapshot_seq is not None
-                    else 1
-                )
-            )
-            if seq != expected:
-                is_contiguous = False
+    def _handle_runtime_event_batch(self, events: list[dict[str, Any]]) -> None:
+        """Batch ingestion + projection in a single transaction with gap/duplicate handling."""
+        from pbl4.management_backend import db
+        from pbl4.management_backend.services import event_ingest
+        from pbl4.management_backend.websocket import hub
+
+        committed_events: list[tuple[str, int, dict[str, Any], datetime]] = []
+        gaps_detected: list[dict[str, Any]] = []
+        lifecycle_snapshots: list[str] = []
+        staged_cursor_updates: list[tuple[AttemptRuntimeCursor, int, int]] = []
+
+        effective_highest: dict[str, int | None] = {}
+        effective_max_seen: dict[str, int] = {}
 
         try:
-            from pbl4.management_backend import db
-            from pbl4.management_backend.services import event_ingest
-
-            source_component = payload["source_component"]
-            event_payload = payload["details"]
             with db.transaction() as conn:
-                ingest_result = event_ingest.ingest_runtime_event(
-                    conn,
-                    attempt_id=attempt_id,
-                    runtime_event_seq=seq,
-                    event_type=event_type,
-                    severity=severity,
-                    occurred_at=occurred_at,
-                    source_component=source_component,
-                    payload=event_payload,
+                for raw in events:
+                    try:
+                        payload = RuntimeEvent.from_dict(raw).to_dict()
+                    except ProtocolError as exc:
+                        logger.warning("Ignoring malformed RUNTIME_EVENT: %s", exc)
+                        continue
+
+                    attempt_id = payload.get("attempt_id")
+                    seq = payload.get("runtime_event_seq")
+                    if attempt_id is None or seq is None:
+                        continue
+
+                    event_type = payload.get("event_type")
+                    severity = payload.get("severity", "INFO")
+                    source_component = payload.get("source_component", "Runtime")
+                    event_payload = payload.get("details", {})
+                    occurred_at_raw = payload.get("occurred_at")
+                    occurred_at = datetime.now(UTC)
+                    if occurred_at_raw:
+                        with contextlib.suppress(Exception):
+                            occurred_at = (
+                                datetime.fromisoformat(occurred_at_raw)
+                                if isinstance(occurred_at_raw, str)
+                                else occurred_at_raw
+                            )
+
+                    cursor = self.get_cursor(attempt_id)
+                    cursor.observed_at = datetime.now(UTC)
+                    cursor.stale = not self.connected
+
+                    curr_highest = effective_highest.get(attempt_id, cursor.highest_contiguous_seq)
+                    curr_max = effective_max_seen.get(attempt_id, cursor.max_seen_seq)
+
+                    expected = (
+                        (curr_highest + 1)
+                        if curr_highest is not None
+                        else (
+                            cursor.authoritative_snapshot_seq + 1
+                            if cursor.authoritative_snapshot_seq is not None
+                            else 1
+                        )
+                    )
+
+                    # 1. Duplicate check (Idempotency)
+                    if curr_highest is not None and seq <= curr_highest:
+                        event_ingest.ingest_runtime_event(
+                            conn,
+                            attempt_id=attempt_id,
+                            runtime_event_seq=seq,
+                            event_type=event_type,
+                            severity=severity,
+                            occurred_at=occurred_at,
+                            source_component=source_component,
+                            payload=event_payload,
+                        )
+                        continue
+
+                    # 2. Gap check (Event loss / skip)
+                    if seq > expected:
+                        logger.warning(
+                            "Event gap detected for attempt %s: expected %s, received %s (fencing projection)",
+                            attempt_id, expected, seq,
+                        )
+                        cursor.gap_fenced = True
+                        curr_max = max(curr_max, seq)
+                        cursor.max_seen_seq = curr_max
+                        effective_max_seen[attempt_id] = curr_max
+                        snap = self._attempt_snapshots.get(attempt_id)
+                        if snap is not None:
+                            snap["management_event_gap_count"] = (
+                                snap.get("management_event_gap_count", 0) + 1
+                            )
+                        gaps_detected.append({
+                            "attempt_id": attempt_id,
+                            "expected": expected,
+                            "received": seq,
+                        })
+                        # Still persist raw event
+                        event_ingest.ingest_runtime_event(
+                            conn,
+                            attempt_id=attempt_id,
+                            runtime_event_seq=seq,
+                            event_type=event_type,
+                            severity=severity,
+                            occurred_at=occurred_at,
+                            source_component=source_component,
+                            payload=event_payload,
+                        )
+                        break
+
+                    # 3. Happy Path (seq == expected)
+                    ingest_result = event_ingest.ingest_runtime_event(
+                        conn,
+                        attempt_id=attempt_id,
+                        runtime_event_seq=seq,
+                        event_type=event_type,
+                        severity=severity,
+                        occurred_at=occurred_at,
+                        source_component=source_component,
+                        payload=event_payload,
+                    )
+
+                    if ingest_result.inserted or seq == expected:
+                        try:
+                            self._project_runtime_event(conn, payload)
+                        except Exception as proj_err:
+                            logger.warning("Failed to project runtime event %s: %s", seq, proj_err)
+                            if hasattr(conn, "rollback"):
+                                with contextlib.suppress(Exception):
+                                    conn.rollback()
+                            cursor.gap_fenced = True
+                            break
+
+                        curr_highest = seq
+                        curr_max = max(curr_max, seq)
+                        effective_highest[attempt_id] = curr_highest
+                        effective_max_seen[attempt_id] = curr_max
+                        staged_cursor_updates.append((cursor, curr_highest, curr_max))
+
+                        if event_type == "model.updated":
+                            snapshot = self._attempt_snapshots.get(attempt_id)
+                            if snapshot is not None and "output_model_version" in event_payload:
+                                snapshot["model_version"] = max(
+                                    snapshot.get("model_version") or 0,
+                                    int(event_payload["output_model_version"]),
+                                )
+                        committed_events.append((attempt_id, seq, payload, occurred_at))
+
+                        # If earlier events were pre-persisted (drained after a gap)
+                        if curr_max > seq:
+                            from pbl4.management_backend.repositories import event_repository
+                            drained_seq = seq
+                            while drained_seq < curr_max:
+                                next_seq = drained_seq + 1
+                                next_ev = event_repository.get_event_by_seq(conn, attempt_id, next_seq)
+                                if next_ev is None:
+                                    break
+                                next_details = next_ev.get("payload_jsonb")
+                                if isinstance(next_details, str):
+                                    with contextlib.suppress(Exception):
+                                        next_details = json.loads(next_details)
+                                next_occ = next_ev.get("occurred_at")
+                                next_payload = {
+                                    "attempt_id": attempt_id,
+                                    "runtime_event_seq": next_seq,
+                                    "event_type": next_ev.get("event_type"),
+                                    "severity": next_ev.get("severity", "INFO"),
+                                    "occurred_at": str(next_occ or datetime.now(UTC).isoformat()),
+                                    "details": next_details or {},
+                                }
+                                try:
+                                    self._project_runtime_event(conn, next_payload)
+                                except Exception as proj_err:
+                                    logger.warning("Failed to project drained event %s: %s", next_seq, proj_err)
+                                    if hasattr(conn, "rollback"):
+                                        with contextlib.suppress(Exception):
+                                            conn.rollback()
+                                    cursor.gap_fenced = True
+                                    break
+                                drained_seq = next_seq
+                                curr_highest = next_seq
+                                effective_highest[attempt_id] = curr_highest
+                                staged_cursor_updates.append((cursor, next_seq, curr_max))
+                                committed_events.append(
+                                    (attempt_id, next_seq, next_payload, next_occ or datetime.now(UTC))
+                                )
+
+                        if (
+                            ingest_result.inserted
+                            and event_type == "attempt.state_changed"
+                            and event_payload.get("state") in {"RUNNING", "COMPLETED", "FAILED", "ABORTED"}
+                        ):
+                            lifecycle_snapshots.append(attempt_id)
+
+            # Apply cursor updates only after transaction commits successfully
+            for cur, c_seq, c_max in staged_cursor_updates:
+                cur.highest_contiguous_seq = c_seq
+                cur.max_seen_seq = c_max
+                if cur.highest_contiguous_seq >= cur.max_seen_seq:
+                    cur.gap_fenced = False
+
+            # Broadcast outside transaction
+            for att_id, s, p, occ_at in committed_events:
+                event_ingest.broadcast_runtime_event(
+                    attempt_id=att_id,
+                    runtime_event_seq=s,
+                    event_type=p["event_type"],
+                    severity=p["severity"],
+                    occurred_at=occ_at if isinstance(occ_at, datetime) else datetime.now(UTC),
+                    source_component=p.get("source_component", "Runtime"),
+                    payload=p["details"],
                 )
-            if attempt_id is not None and (ingest_result.inserted or is_contiguous):
-                with db.get_connection() as conn:
-                    self.record_event_seq(attempt_id, seq, conn)
-            if (
-                ingest_result.inserted
-                and event_type == "attempt.state_changed"
-                and event_payload.get("state") in {"RUNNING", "COMPLETED", "FAILED", "ABORTED"}
-            ):
-                # Session rows come from authoritative snapshots. Establish them
-                # before model.updated references their IDs, without relying on
-                # a browser/CLI polling /runtime/snapshot. Refresh terminal model
-                # metadata too; this is management-only, outside any DB transaction.
+
+            for g in gaps_detected:
+                hub.broadcast_sync(
+                    g["attempt_id"],
+                    {
+                        "kind": "GAP",
+                        "attempt_id": g["attempt_id"],
+                        "runtime_event_seq": None,
+                        "occurred_at": datetime.now(UTC).isoformat(),
+                        "payload": {
+                            "expected_seq": g["expected"],
+                            "received_seq": g["received"],
+                            "reason": f"Event gap: expected {g['expected']}, received {g['received']}",
+                            "snapshot_required": True,
+                        },
+                    },
+                )
+
+            for att_id in lifecycle_snapshots:
                 snapshot = self._port.request_state()
-                if snapshot and snapshot.get("active_attempt_id") == attempt_id:
+                if snapshot and snapshot.get("active_attempt_id") == att_id:
                     self.handle_state_snapshot(snapshot)
+
         except event_ingest.ConflictingEventPayloadError:
             raise
         except Exception as exc:
-            logger.exception("Failed to ingest runtime event: %s", exc)
+            logger.exception("Failed to ingest runtime event batch: %s", exc)
 
     @staticmethod
     def _project_attempt_state_transition(

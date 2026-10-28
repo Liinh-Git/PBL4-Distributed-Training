@@ -14,12 +14,14 @@ def test_semantic_dispatch_does_not_overtake_blocked_event():
     delivered = []
 
     def handler(kind, payload):
-        if payload["seq"] == 1:
-            first_entered.set()
-            assert release.wait(2)
-        delivered.append(payload["seq"])
-        if payload["seq"] == 2:
-            second_done.set()
+        events = payload if isinstance(payload, list) else [payload]
+        for ev in events:
+            if ev["seq"] == 1:
+                first_entered.set()
+                assert release.wait(2)
+            delivered.append(ev["seq"])
+            if ev["seq"] == 2:
+                second_done.set()
 
     port.set_message_handler(handler)
     try:
@@ -34,4 +36,4 @@ def test_semantic_dispatch_does_not_overtake_blocked_event():
         assert delivered == [1, 2]
     finally:
         release.set()
-        port._dispatch_executor.shutdown(wait=True)
+        port.disconnect()
