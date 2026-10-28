@@ -365,52 +365,12 @@ export const LiveTrainingPage: React.FC = () => {
     };
   }, [activeStep, workers.length, stream.attempt?.expected_workers, stream.snapshot]);
 
-  if (attemptResolving || (stream.loading && !attempt)) {
-    return (
-      <div className="w-full py-20 flex flex-col items-center justify-center text-center font-sans select-none text-xs text-[#73737c] gap-3">
-        <RefreshCw className="w-5 h-5 animate-spin text-blue-400" />
-        <span>Connecting to training attempt runtime stream...</span>
-      </div>
-    );
-  }
-
-  if (!resolvedAttemptId || !attempt) {
-    return (
-      <div className="w-full py-16 flex flex-col items-center justify-center text-center font-sans select-none">
-        <div className="w-12 h-12 rounded-full bg-white/[0.04] border border-white/[0.08] flex items-center justify-center mb-4 text-[#73737c]">
-          <Activity className="w-5 h-5 text-[#a1a1a8]" />
-        </div>
-        <h2 className="text-base font-semibold text-[#f3f3f4]">
-          No active training attempt found.
-        </h2>
-        <p className="text-xs text-[#73737c] mt-1 max-w-md">
-          Start a new training run or select an existing attempt to observe realtime progress.
-        </p>
-        <div className="flex items-center gap-3 mt-5">
-          <Link
-            to="/training/new"
-            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition-colors"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>New training</span>
-          </Link>
-          <Link
-            to="/jobs"
-            className="px-3.5 py-1.5 rounded bg-[#171719] hover:bg-[#202024] text-[#a1a1a8] hover:text-[#f3f3f4] text-xs transition-colors border border-white/[0.07]"
-          >
-            View saved jobs
-          </Link>
-        </div>
-      </div>
-    );
-  }
-
   // Authoritative expected and observed worker counts
-  const expectedWorkersCount = attempt.expected_workers ?? attempt.membership?.expected_workers ?? null;
+  const expectedWorkersCount = attempt?.expected_workers ?? attempt?.membership?.expected_workers ?? null;
   const observedWorkersCount = workers.length;
 
-  // Adapter for subcomponents expecting legacy shapes
-  const legacyAttemptAdapter: any = {
+  // Adapter for subcomponents expecting legacy shapes (memoized to eliminate cascade re-renders)
+  const legacyAttemptAdapter = useMemo<any>(() => attempt ? ({
     id: attempt.attempt_id,
     jobId: attempt.job_id,
     jobName: attempt.job_id,
@@ -428,9 +388,9 @@ export const LiveTrainingPage: React.FC = () => {
     datasetBuildId: jobDetail?.resolved_contract?.dataset.dataset_build_id ?? jobDetail?.requested_contract.dataset_build_id ?? '—',
     elapsedFormatted: attempt.started_at ? 'Active run' : 'Pending',
     runtimeEventSeq: stream.lastReceivedSeq,
-  };
+  }) : null, [attempt, snapshot, jobDetail, workers, expectedWorkersCount, stream.lastReceivedSeq]);
 
-  const legacyWorkersAdapter: any[] = workers.map(w => ({
+  const legacyWorkersAdapter = useMemo<any[]>(() => workers.map(w => ({
     workerId: w.worker_id,
     sessionId: w.session_id,
     nodeLabel: w.node_label || `node-${w.worker_id}`,
@@ -438,13 +398,13 @@ export const LiveTrainingPage: React.FC = () => {
     assignedShard: w.shard_id !== null && w.shard_id !== undefined ? `shard-${w.shard_id}` : 'Unassigned',
     currentModelVersion: w.local_model_version !== null && w.local_model_version !== undefined
       ? w.local_model_version
-      : (attempt.model_version ?? null),
+      : (attempt?.model_version ?? null),
     protocolVersion: w.protocol_version ? `dtp/v${w.protocol_version}` : 'dtp/v1',
     connectedAt: w.connected_at,
     lastHeartbeatMs: w.last_heartbeat_at ? Math.max(0, Math.round(Date.now() - new Date(w.last_heartbeat_at).getTime())) : null,
-  }));
+  })), [workers, attempt?.model_version]);
 
-  const legacyStepsAdapter: any[] = steps.map((st) => {
+  const legacyStepsAdapter = useMemo<any[]>(() => steps.map((st) => {
     const detail = stepDetailsMap[st.step_id];
     const workerSteps = detail?.worker_steps;
     const workerContributions =
@@ -496,9 +456,49 @@ export const LiveTrainingPage: React.FC = () => {
       },
       workerContributions,
     };
-  });
+  }), [steps, stepDetailsMap]);
 
-  const slowWorkersMap = detectSlowWorkers(legacyStepsAdapter);
+  const slowWorkersMap = useMemo(() => detectSlowWorkers(legacyStepsAdapter), [legacyStepsAdapter]);
+
+  if (attemptResolving || (stream.loading && !attempt)) {
+    return (
+      <div className="w-full py-20 flex flex-col items-center justify-center text-center font-sans select-none text-xs text-[#73737c] gap-3">
+        <RefreshCw className="w-5 h-5 animate-spin text-blue-400" />
+        <span>Connecting to training attempt runtime stream...</span>
+      </div>
+    );
+  }
+
+  if (!resolvedAttemptId || !attempt) {
+    return (
+      <div className="w-full py-16 flex flex-col items-center justify-center text-center font-sans select-none">
+        <div className="w-12 h-12 rounded-full bg-white/[0.04] border border-white/[0.08] flex items-center justify-center mb-4 text-[#73737c]">
+          <Activity className="w-5 h-5 text-[#a1a1a8]" />
+        </div>
+        <h2 className="text-base font-semibold text-[#f3f3f4]">
+          No active training attempt found.
+        </h2>
+        <p className="text-xs text-[#73737c] mt-1 max-w-md">
+          Start a new training run or select an existing attempt to observe realtime progress.
+        </p>
+        <div className="flex items-center gap-3 mt-5">
+          <Link
+            to="/training/new"
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition-colors"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>New training</span>
+          </Link>
+          <Link
+            to="/jobs"
+            className="px-3.5 py-1.5 rounded bg-[#171719] hover:bg-[#202024] text-[#a1a1a8] hover:text-[#f3f3f4] text-xs transition-colors border border-white/[0.07]"
+          >
+            View saved jobs
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4 w-full pb-10 font-sans select-none">

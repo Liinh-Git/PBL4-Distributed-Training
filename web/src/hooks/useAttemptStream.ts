@@ -49,6 +49,9 @@ export interface UseAttemptStreamResult {
 
 export function useAttemptStream(attemptId: string | null): UseAttemptStreamResult {
   const appContext = useContext(AppContext);
+  const setRuntimeStale = appContext?.setIsRuntimeStale;
+  const setHistoryGap = appContext?.setHasEventHistoryGap;
+
   const [connectionState, setConnectionState] = useState<StreamConnectionState>('IDLE');
   const [attempt, setAttempt] = useState<AttemptDetailData | null>(null);
   const [snapshot, setSnapshot] = useState<AttemptSnapshotData | null>(null);
@@ -60,18 +63,14 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Sync live stale/gap indicators into AppContext
+  // React state setters stay stable when the context's other values change.
   useEffect(() => {
-    if (appContext) {
-      appContext.setIsRuntimeStale(isStale);
-    }
-  }, [isStale, appContext]);
+    setRuntimeStale?.(isStale);
+  }, [isStale, setRuntimeStale]);
 
   useEffect(() => {
-    if (appContext) {
-      appContext.setHasEventHistoryGap(gapDetected);
-    }
-  }, [gapDetected, appContext]);
+    setHistoryGap?.(gapDetected);
+  }, [gapDetected, setHistoryGap]);
 
   // References for connection management
   const wsRef = useRef<WebSocket | null>(null);
@@ -421,10 +420,8 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
       setIsStale(false);
       setGapDetected(false);
       setLoading(false);
-      if (appContext) {
-        appContext.setIsRuntimeStale(false);
-        appContext.setHasEventHistoryGap(false);
-      }
+      setRuntimeStale?.(false);
+      setHistoryGap?.(false);
     }
 
     return () => {
@@ -440,12 +437,10 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
         wsRef.current.close();
         wsRef.current = null;
       }
-      if (appContext) {
-        appContext.setIsRuntimeStale(false);
-        appContext.setHasEventHistoryGap(false);
-      }
+      setRuntimeStale?.(false);
+      setHistoryGap?.(false);
     };
-  }, [attemptId, loadInitialRestState, connectWebSocket, appContext]);
+  }, [attemptId, loadInitialRestState, connectWebSocket, setRuntimeStale, setHistoryGap]);
 
   /**
    * Action: Manual Checkpoint Request (API 34.0)
