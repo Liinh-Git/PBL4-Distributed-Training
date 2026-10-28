@@ -184,3 +184,44 @@ def test_api_list_and_detail_return_consistent_training_strategy(app_client):
 
         # 3. Assert exact equality
         assert list_data[0]["training_strategy"] == detail_data["training_strategy"]
+
+
+def test_attempt_state_transition_validation() -> None:
+    """Validate Attempt state machine transitions and terminal monotonicity."""
+    # 1. Idempotent replay is always valid
+    for state in [
+        "CREATED",
+        "WAITING_WORKERS",
+        "PROVISIONING",
+        "INITIALIZING",
+        "RUNNING",
+        "COMPLETED",
+        "FAILED",
+        "ABORTED",
+    ]:
+        assert attempt_repository.is_valid_attempt_transition(state, state) is True
+
+    # 2. Terminal states cannot transition to ANY other state
+    for term in ["COMPLETED", "FAILED", "ABORTED"]:
+        for other in ["CREATED", "WAITING_WORKERS", "PROVISIONING", "INITIALIZING", "RUNNING"]:
+            assert attempt_repository.is_valid_attempt_transition(term, other) is False
+        assert (
+            attempt_repository.is_valid_attempt_transition(term, "FAILED" if term != "FAILED" else "ABORTED") is False
+        )
+
+    # 3. Progression order is monotonic forward
+    assert attempt_repository.is_valid_attempt_transition("CREATED", "WAITING_WORKERS") is True
+    assert attempt_repository.is_valid_attempt_transition("WAITING_WORKERS", "PROVISIONING") is True
+    assert attempt_repository.is_valid_attempt_transition("PROVISIONING", "INITIALIZING") is True
+    assert attempt_repository.is_valid_attempt_transition("INITIALIZING", "RUNNING") is True
+    assert attempt_repository.is_valid_attempt_transition("RUNNING", "COMPLETED") is True
+
+    # 4. Backward progression is rejected
+    assert attempt_repository.is_valid_attempt_transition("RUNNING", "WAITING_WORKERS") is False
+    assert attempt_repository.is_valid_attempt_transition("INITIALIZING", "CREATED") is False
+
+    # 5. Non-terminal states can transition to FAILED or ABORTED
+    for active in ["CREATED", "WAITING_WORKERS", "PROVISIONING", "INITIALIZING", "RUNNING"]:
+        assert attempt_repository.is_valid_attempt_transition(active, "FAILED") is True
+        assert attempt_repository.is_valid_attempt_transition(active, "ABORTED") is True
+

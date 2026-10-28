@@ -128,7 +128,10 @@ def test_real_mcp_bidirectional_correlation_and_reconnect() -> None:
             }
         )
         assert event_seen.wait(2.0)
-        assert any(kind == "RUNTIME_EVENT" and value["details"] for kind, value in received)
+        assert any(
+            kind == "RUNTIME_EVENT" and (value[0]["details"] if isinstance(value, list) else value["details"])
+            for kind, value in received
+        )
 
         client.disconnect()
         assert client.connect()
