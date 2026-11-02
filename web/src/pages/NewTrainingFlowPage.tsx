@@ -13,6 +13,7 @@ import {
   AlertCircle,
   AlertTriangle,
   RefreshCw,
+  ChevronDown,
 } from 'lucide-react';
 import { datasetsService, datasetBuildsService, systemService, jobsService, attemptsService } from '../api';
 import {
@@ -38,6 +39,7 @@ export const NewTrainingFlowPage: React.FC = () => {
   const [loadingData, setLoadingData] = useState<boolean>(true);
   const [nodes, setNodes] = useState<NodeItemData[]>([]);
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
+  const [nodeSelectionMode, setNodeSelectionMode] = useState<'auto' | 'manual'>('auto');
 
   // Step state: 1 = Dataset, 2 = Model, 3 = Settings, 4 = Review, 5 = Ready
   const [step, setStep] = useState<1 | 2 | 3 | 4 | 5>(1);
@@ -193,7 +195,7 @@ export const NewTrainingFlowPage: React.FC = () => {
   const MODEL_OPTIONS = supportedModels.map(m => ({
     id: m.model_id,
     name: m.display_name || m.model_id,
-    description: `Architecture ${m.model_id} for distributed training.`,
+    description: m.description || `Kiến trúc ${m.model_id} cho huấn luyện phân tán.`,
     parameters: 'Chưa có dữ liệu',
   }));
 
@@ -212,7 +214,7 @@ export const NewTrainingFlowPage: React.FC = () => {
       const buildsRes = await datasetBuildsService.listBuilds({ dataset_id: selectedDatasetId });
       setApiBuilds(buildsRes.data || []);
     } catch (err: any) {
-      setFormError(err?.message || 'Failed to create dataset build');
+      setFormError(err?.message || 'Không thể tạo bản dựng tập dữ liệu');
     }
   };
 
@@ -225,15 +227,15 @@ export const NewTrainingFlowPage: React.FC = () => {
     try {
       setFormError(null);
       if (!selectedModel || !supportedModels.some(m => m.model_id === selectedModel)) {
-        setFormError('Choose a supported model from the Backend catalog.');
+        setFormError('Vui lòng chọn một mô hình được hỗ trợ từ danh mục.');
         return;
       }
       if (workloadPolicy === 'dbs' && (!Number.isInteger(existingWups) || (existingWups ?? 0) <= 0)) {
-        setFormError('Enter a positive whole number of work units per step for DBS. It must exceed the expected worker count.');
+        setFormError('Nhập số nguyên dương các đơn vị công việc mỗi bước cho DBS. Giá trị phải lớn hơn số lượng worker dự kiến.');
         return;
       }
       if (!Number.isInteger(everyNEpochs) || everyNEpochs <= 0) {
-        setFormError('Enter a positive whole number of epochs for checkpoint cadence.');
+        setFormError('Nhập số nguyên dương các epoch cho chu kỳ lưu checkpoint.');
         return;
       }
       setValidating(true);
@@ -293,7 +295,7 @@ export const NewTrainingFlowPage: React.FC = () => {
 
       setStep(4);
     } catch (err: any) {
-      setFormError(err?.message || 'Failed to save and validate training specification');
+      setFormError(err?.message || 'Không thể lưu và xác thực cấu hình huấn luyện');
     } finally {
       setValidating(false);
     }
@@ -311,7 +313,7 @@ export const NewTrainingFlowPage: React.FC = () => {
       setActionLoading('start');
       setFormError(null);
       if (selectedNodeIds.length && selectedNodeIds.length !== selectedBuild?.shard_count) {
-        setFormError(`Select exactly ${selectedBuild?.shard_count} Nodes, or clear the selection for automatic placement.`);
+        setFormError(`Chọn chính xác ${selectedBuild?.shard_count} Node trực tuyến, hoặc chọn Tự động phân bổ.`);
         return;
       }
       await attemptsService.assertNoActiveAttempt();
@@ -319,7 +321,7 @@ export const NewTrainingFlowPage: React.FC = () => {
       const attemptId = startRes.data.attempt_id;
       navigate(`/live?attempt_id=${encodeURIComponent(attemptId)}`);
     } catch (err: any) {
-      setFormError(err?.message || 'Failed to start training attempt');
+      setFormError(err?.message || 'Không thể khởi chạy phiên huấn luyện');
       setActiveAttempt(undefined);
       attemptsService.getActiveAttempt().then(setActiveAttempt).catch(() => {});
     } finally {
@@ -332,53 +334,40 @@ export const NewTrainingFlowPage: React.FC = () => {
   const hasValidationWarnings = (validationResult?.warnings?.length ?? 0) > 0;
   const preview = validationResult?.resolved_preview;
 
+  const onlineNodes = nodes.filter(n => n.state === 'ONLINE');
+  const offlineNodes = nodes.filter(n => n.state !== 'ONLINE');
+  const requiredNodes = selectedBuild?.shard_count ?? 3;
+
   return (
     <div className="space-y-6 w-full pb-12 font-sans select-none">
-      {/* Top Breadcrumb & Cancel */}
-      <div className="flex items-center justify-between text-xs text-[#73737c]">
-        <div className="flex items-center gap-2">
-          <Link to="/jobs" className="hover:text-[#f3f3f4] flex items-center gap-1 transition-colors">
-            <ArrowLeft className="w-3.5 h-3.5" />
-            <span>Jobs</span>
-          </Link>
-          <span>/</span>
-          {isEditMode ? (
-            <>
-              <Link to={`/jobs/${jobId}`} className="hover:text-[#f3f3f4] transition-colors font-mono">
-                {jobName || jobId}
-              </Link>
-              <span>/</span>
-              <span className="text-[#a1a1a8]">Edit draft</span>
-            </>
-          ) : (
-            <span className="text-[#a1a1a8]">New training</span>
-          )}
-        </div>
-        <Link to={isEditMode && jobId ? `/jobs/${jobId}` : "/jobs"} className="hover:text-[#f3f3f4] transition-colors">
-          Cancel
-        </Link>
-      </div>
-
       {/* Header */}
-      <div>
-        <h1 className="text-base font-semibold text-[#f3f3f4]">
-          {isEditMode ? 'Edit draft training' : 'New training'}
-        </h1>
-        <p className="text-xs text-[#73737c] mt-0.5">
-          {isEditMode
-            ? 'Modify configuration, dataset selection, and hyperparameters for this draft job.'
-            : 'Configure a dataset, select a model architecture, and launch distributed training.'}
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <h1 className="text-base font-semibold text-[#f3f3f4]">
+            {isEditMode ? 'Chỉnh sửa bản nháp huấn luyện' : 'Tạo phiên huấn luyện mới'}
+          </h1>
+          <p className="text-xs text-[#73737c] mt-0.5">
+            {isEditMode
+              ? 'Điều chỉnh cấu hình, chọn tập dữ liệu và siêu tham số cho bản nháp này.'
+              : 'Cấu hình tập dữ liệu, chọn kiến trúc mô hình và khởi chạy huấn luyện phân tán.'}
+          </p>
+        </div>
+        <Link
+          to={isEditMode && jobId ? `/jobs/${jobId}` : "/jobs"}
+          className="px-3 py-1.5 rounded text-xs text-[#73737c] hover:text-[#f3f3f4] bg-[#121214] border border-white/[0.07] transition-colors self-start sm:self-auto shrink-0"
+        >
+          Hủy
+        </Link>
       </div>
 
       {/* Step Indicator */}
       <nav aria-label="Training setup steps" className="border-y border-white/[0.07] py-2.5">
         <div className="flex items-center gap-2 sm:gap-4 text-xs">
           {[
-            { num: 1, label: 'Dataset' },
-            { num: 2, label: 'Model' },
-            { num: 3, label: 'Training settings' },
-            { num: 4, label: 'Review' },
+            { num: 1, label: 'Tập dữ liệu' },
+            { num: 2, label: 'Mô hình' },
+            { num: 3, label: 'Cấu hình huấn luyện' },
+            { num: 4, label: 'Xem lại' },
           ].map((s, idx) => {
             const isCurrent = step === s.num;
             const isDone = step > s.num;
@@ -429,10 +418,10 @@ export const NewTrainingFlowPage: React.FC = () => {
         <div className="space-y-4">
           <div>
             <h2 className="text-sm font-semibold text-[#f3f3f4]">
-              Choose a dataset
+              Chọn tập dữ liệu
             </h2>
             <p className="text-xs text-[#73737c] mt-0.5">
-              Select verified training data. Training requires an active, partitioned build.
+              Chọn dữ liệu huấn luyện đã xác thực. Cần một bản dựng phân vùng sẵn sàng trước khi huấn luyện.
             </p>
           </div>
 
@@ -458,8 +447,8 @@ export const NewTrainingFlowPage: React.FC = () => {
                       <div className="text-sm font-medium text-[#f3f3f4]">
                         {ds.name}
                       </div>
-                      <div className="text-xs text-[#73737c] mt-0.5 font-mono">
-                        {ds.dataset_id} · {ds.task_type || 'image_classification'}
+                      <div className="text-xs text-[#73737c] mt-0.5">
+                        {ds.task_type || 'Phân loại hình ảnh'} · {ds.source_type || 'Tập dữ liệu chuẩn'}
                       </div>
                     </div>
                     {isSelected && (
@@ -470,19 +459,19 @@ export const NewTrainingFlowPage: React.FC = () => {
                   </div>
 
                   <p className="text-xs text-[#a1a1a8] mt-2 line-clamp-2 leading-relaxed">
-                    Source: {ds.source_type} ({ds.source_reference})
+                    Nguồn: {ds.source_type} ({ds.source_reference})
                   </p>
 
                   <div className="mt-3 pt-2.5 border-t border-white/[0.06] text-xs">
                     {hasReadyBuild ? (
                       <span className="text-emerald-400 text-[11px] flex items-center gap-1">
                         <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                        {dsReadyBuilds.length} ready build{dsReadyBuilds.length > 1 ? 's' : ''} available
+                        {dsReadyBuilds.length} bản dựng sẵn sàng
                       </span>
                     ) : (
                       <span className="text-amber-400 text-[11px] flex items-center gap-1">
                         <AlertCircle className="w-3 h-3" />
-                        No ready build available
+                        Chưa có bản dựng sẵn sàng
                       </span>
                     )}
                   </div>
@@ -495,7 +484,7 @@ export const NewTrainingFlowPage: React.FC = () => {
           <div className="p-4 bg-[#121214] border border-white/[0.07] rounded space-y-3">
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold text-[#f3f3f4]">
-                Available builds for {currentDataset?.name}
+                Bản dựng khả dụng cho {currentDataset?.name}
               </span>
               {readyBuilds.length === 0 && (
                 <button
@@ -504,7 +493,7 @@ export const NewTrainingFlowPage: React.FC = () => {
                   className="px-2.5 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium flex items-center gap-1 transition-colors"
                 >
                   <Plus className="w-3 h-3" />
-                  <span>Create dataset build</span>
+                  <span>Tạo bản dựng tập dữ liệu</span>
                 </button>
               )}
             </div>
@@ -534,14 +523,14 @@ export const NewTrainingFlowPage: React.FC = () => {
                         />
                         <div>
                           <div className="text-xs font-medium text-[#f3f3f4]">
-                            Ready build <span className="font-mono text-[11px] text-[#a1a1a8]">({b.dataset_build_id})</span> · batch size {b.batch_size || 64} · {shardsCount} shards
+                            Bản dựng sẵn sàng · Lô {b.batch_size || 64} mẫu · {shardsCount} phân vùng
                           </div>
                           <div className="text-[11px] text-[#73737c] mt-0.5">
-                            {sampleCount.toLocaleString()} samples · {b.profile || 'standard-sharded'}
+                            {sampleCount.toLocaleString()} mẫu · {b.profile || 'standard-sharded'}
                           </div>
                         </div>
                       </div>
-                      <span className="text-[11px] text-emerald-400">Ready for training</span>
+                      <span className="text-[11px] text-emerald-400">Sẵn sàng huấn luyện</span>
                     </label>
                   );
                 })}
@@ -549,10 +538,10 @@ export const NewTrainingFlowPage: React.FC = () => {
             ) : (
               <div className="p-4 bg-[#171719] rounded text-center space-y-2">
                 <div className="text-xs text-[#a1a1a8]">
-                  Dataset is not ready for training.
+                  Tập dữ liệu chưa sẵn sàng cho huấn luyện.
                 </div>
                 <p className="text-[11px] text-[#73737c]">
-                  A materialized partitioned build is required before starting distributed training.
+                  Cần tạo một bản dựng phân vùng trước khi bắt đầu huấn luyện phân tán.
                 </p>
                 <button
                   type="button"
@@ -560,7 +549,7 @@ export const NewTrainingFlowPage: React.FC = () => {
                   className="px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium inline-flex items-center gap-1.5 transition-colors mt-1"
                 >
                   <Plus className="w-3.5 h-3.5" />
-                  <span>Create dataset build</span>
+                  <span>Tạo bản dựng tập dữ liệu</span>
                 </button>
               </div>
             )}
@@ -574,7 +563,7 @@ export const NewTrainingFlowPage: React.FC = () => {
               onClick={() => setStep(2)}
               className="px-4 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors flex items-center gap-1.5"
             >
-              <span>Next: Choose model</span>
+              <span>Tiếp theo: Chọn mô hình</span>
               <ArrowRight className="w-3.5 h-3.5" />
             </button>
           </div>
@@ -586,10 +575,10 @@ export const NewTrainingFlowPage: React.FC = () => {
         <div className="space-y-4">
           <div>
             <h2 className="text-sm font-semibold text-[#f3f3f4]">
-              Choose a model
+              Chọn mô hình
             </h2>
             <p className="text-xs text-[#73737c] mt-0.5">
-              Select the neural network architecture configured for distributed training.
+              Chọn kiến trúc mạng nơ-ron được cấu hình cho huấn luyện phân tán.
             </p>
           </div>
 
@@ -617,7 +606,7 @@ export const NewTrainingFlowPage: React.FC = () => {
                       </span>
                       <span className="text-sm font-medium text-[#f3f3f4]">{m.name}</span>
                     </div>
-                    <span className="text-xs text-[#73737c]">{m.parameters} parameters</span>
+                    <span className="text-xs text-[#73737c]">{m.parameters} tham số</span>
                   </div>
 
                   <p className="text-xs text-[#a1a1a8] mt-2 pl-6 leading-relaxed">
@@ -636,7 +625,7 @@ export const NewTrainingFlowPage: React.FC = () => {
               className="px-3.5 py-1.5 rounded text-xs text-[#73737c] hover:text-[#f3f3f4] bg-[#121214] border border-white/[0.07] transition-colors flex items-center gap-1.5"
             >
               <ArrowLeft className="w-3.5 h-3.5" />
-              <span>Back</span>
+              <span>Quay lại</span>
             </button>
             <button
               type="button"
@@ -644,7 +633,7 @@ export const NewTrainingFlowPage: React.FC = () => {
               disabled={!selectedModel || !supportedModels.some(m => m.model_id === selectedModel)}
               className="px-4 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white transition-colors flex items-center gap-1.5"
             >
-              <span>Next: Training settings</span>
+              <span>Tiếp theo: Cấu hình huấn luyện</span>
               <ArrowRight className="w-3.5 h-3.5" />
             </button>
           </div>
@@ -656,23 +645,23 @@ export const NewTrainingFlowPage: React.FC = () => {
         <div className="space-y-4">
           <div>
             <h2 className="text-sm font-semibold text-[#f3f3f4]">
-              Training settings
+              Cấu hình huấn luyện
             </h2>
             <p className="text-xs text-[#73737c] mt-0.5">
-              Set training hyperparameters and distributed synchronization parameters.
+              Thiết lập siêu tham số huấn luyện và tham số đồng bộ phân tán.
             </p>
           </div>
 
           {/* Job Name */}
           <div className="p-4 bg-[#121214] border border-white/[0.07] rounded space-y-3">
             <label className="block text-xs font-semibold text-[#f3f3f4]">
-              Training name
+              Tên phiên huấn luyện
             </label>
             <input
               type="text"
               value={jobName}
               onChange={e => setJobName(e.target.value)}
-              placeholder="e.g. ResNet18 on CIFAR-10"
+              placeholder="Ví dụ: SmallCNN trên CIFAR-10"
               className="w-full px-3 py-1.5 bg-[#171719] border border-white/[0.07] rounded text-xs text-[#f3f3f4] focus:border-blue-500 focus:outline-hidden transition-colors"
             />
           </div>
@@ -680,13 +669,13 @@ export const NewTrainingFlowPage: React.FC = () => {
           {/* Job Description (Optional) */}
           <div className="p-4 bg-[#121214] border border-white/[0.07] rounded space-y-3">
             <label className="block text-xs font-semibold text-[#f3f3f4]">
-              Description <span className="text-[#73737c] font-normal">(Optional)</span>
+              Mô tả <span className="text-[#73737c] font-normal">(Tùy chọn)</span>
             </label>
             <textarea
               rows={2}
               value={jobDescription}
               onChange={e => setJobDescription(e.target.value)}
-              placeholder="Provide context or notes about this training specification..."
+              placeholder="Ghi chú hoặc ngữ cảnh về cấu hình huấn luyện này..."
               className="w-full px-3 py-1.5 bg-[#171719] border border-white/[0.07] rounded text-xs text-[#f3f3f4] focus:border-blue-500 focus:outline-hidden transition-colors resize-none"
             />
           </div>
@@ -694,13 +683,13 @@ export const NewTrainingFlowPage: React.FC = () => {
           {/* Hyperparameters */}
           <div className="p-4 bg-[#121214] border border-white/[0.07] rounded space-y-4">
             <div className="text-xs font-semibold text-[#f3f3f4]">
-              Hyperparameters
+              Siêu tham số
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
               <div>
                 <label className="block text-[#73737c] mb-1">
-                  Epochs
+                  Số epoch
                 </label>
                 <input
                   type="number"
@@ -729,7 +718,7 @@ export const NewTrainingFlowPage: React.FC = () => {
 
               <div>
                 <label className="block text-[#73737c] mb-1">
-                  Training seed
+                  Seed
                 </label>
                 <input
                   type="number"
@@ -741,7 +730,7 @@ export const NewTrainingFlowPage: React.FC = () => {
 
               <div>
                 <label className="block text-[#73737c] mb-1">
-                  Checkpoint every N epochs
+                  Lưu checkpoint mỗi N epoch
                 </label>
                 <input
                   type="number"
@@ -753,13 +742,13 @@ export const NewTrainingFlowPage: React.FC = () => {
                   className="w-full px-3 py-1.5 bg-[#171719] border border-white/[0.07] rounded text-xs text-[#f3f3f4] focus:border-blue-500 focus:outline-hidden transition-colors"
                 />
                 <span className="text-[11px] text-[#73737c] mt-1 block">
-                  Periodic snapshot cadence (default 5 epochs)
+                  Chu kỳ lưu checkpoint định kỳ (mặc định 5 epochs)
                 </span>
               </div>
 
               <div>
                 <label className="block text-[#73737c] mb-1">
-                  Dataset Batch Size (Configured in Build)
+                  Kích thước batch (Được cấu hình trong bản dựng)
                 </label>
                 <input
                   type="number"
@@ -768,7 +757,7 @@ export const NewTrainingFlowPage: React.FC = () => {
                   className="w-full px-3 py-1.5 bg-[#141416] border border-white/[0.05] rounded text-xs text-[#a1a1a8] cursor-not-allowed opacity-80"
                 />
                 <span className="text-[11px] text-[#73737c] mt-1 block">
-                  Determined by dataset build #{selectedBuildId.slice(-6)}
+                  Xác định bởi bản dựng #{selectedBuildId.slice(-6)}
                 </span>
               </div>
             </div>
@@ -778,7 +767,7 @@ export const NewTrainingFlowPage: React.FC = () => {
           <div className="p-4 bg-[#121214] border border-white/[0.07] rounded space-y-3">
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold text-[#f3f3f4]">
-                Distributed training strategy
+                Chiến lược phân tán
               </span>
               <span className="text-[11px] text-[#73737c]">Strict BSP</span>
             </div>
@@ -788,7 +777,7 @@ export const NewTrainingFlowPage: React.FC = () => {
                 Strict BSP (Bulk Synchronous Parallel)
               </div>
               <p className="text-[#a1a1a8] text-xs leading-relaxed">
-                All workers synchronize before each global model update. Guarantees deterministic convergence without stale gradients.
+                Tất cả worker đồng bộ trước mỗi lần cập nhật trọng số toàn cục. Đảm bảo hội tụ tất định và không có gradient trễ.
               </p>
             </div>
           </div>
@@ -797,10 +786,10 @@ export const NewTrainingFlowPage: React.FC = () => {
           <div className="p-4 bg-[#121214] border border-white/[0.07] rounded space-y-3">
             <div>
               <span className="text-xs font-semibold text-[#f3f3f4]">
-                Workload allocation policy
+                Chính sách phân bổ khối lượng công việc
               </span>
               <p className="text-[11px] text-[#73737c] mt-0.5">
-                Controls how work units are distributed across workers in each synchronized step under Strict BSP.
+                Kiểm soát cách phân bổ các đơn vị công việc cho các worker trong mỗi bước đồng bộ Strict BSP.
               </p>
             </div>
 
@@ -833,7 +822,7 @@ export const NewTrainingFlowPage: React.FC = () => {
                   <span className="text-xs font-semibold text-[#f3f3f4]">Equal</span>
                 </div>
                 <p className="text-[11px] text-[#a1a1a8] mt-2 leading-relaxed">
-                  Distributes an identical workload across all workers in each step. Standard baseline under Strict BSP.
+                  Phân bổ khối lượng công việc giống nhau cho mọi worker trong từng bước. Mặc định tiêu chuẩn trong Strict BSP.
                 </p>
               </div>
 
@@ -865,41 +854,221 @@ export const NewTrainingFlowPage: React.FC = () => {
                   <span className="text-xs font-semibold text-[#f3f3f4]">DBS Adaptive</span>
                 </div>
                 <p className="text-[11px] text-[#a1a1a8] mt-2 leading-relaxed">
-                  Dynamically balances work units based on worker compute speeds to prevent stragglers under Strict BSP.
+                  Tự động cân bằng các đơn vị công việc dựa trên tốc độ tính toán của từng worker để hạn chế worker chậm chân.
                 </p>
               </div>
             </div>
+            <div>
+              <label htmlFor="work-units-per-step" className="block text-xs text-[#a1a1a8] mb-1">
+                Work units per step (K)
+              </label>
+              <input
+                id="work-units-per-step"
+                name="work_units_per_step"
+                type="number"
+                min={1}
+                step={1}
+                required={workloadPolicy === 'dbs'}
+                value={existingWups ?? ''}
+                onChange={e => setExistingWups(e.target.value === '' ? undefined : Number(e.target.value))}
+                className="w-full px-3 py-1.5 bg-[#171719] border border-white/[0.07] rounded text-xs text-[#f3f3f4] focus:border-blue-500 focus:outline-hidden"
+              />
+              <p className="text-[11px] text-[#73737c] mt-1">
+                {workloadPolicy === 'dbs' ? 'K phải lớn hơn số lượng worker dự kiến.' : 'K phải bằng hoặc lớn hơn số lượng worker dự kiến. Để trống để sử dụng số lượng worker.'}
+              </p>
+            </div>
+          </div>
+
+          {/* Node Allocation Section */}
+          <div className="p-4 bg-[#121214] border border-white/[0.07] rounded space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
-                <label htmlFor="work-units-per-step" className="block text-xs text-[#a1a1a8] mb-1">
-                  Work units per step (K)
-                </label>
-                <input
-                  id="work-units-per-step"
-                  name="work_units_per_step"
-                  type="number"
-                  min={1}
-                  step={1}
-                  required={workloadPolicy === 'dbs'}
-                  value={existingWups ?? ''}
-                  onChange={e => setExistingWups(e.target.value === '' ? undefined : Number(e.target.value))}
-                  className="w-full px-3 py-1.5 bg-[#171719] border border-white/[0.07] rounded text-xs text-[#f3f3f4] focus:border-blue-500 focus:outline-hidden"
-                />
-                <p className="text-[11px] text-[#73737c] mt-1">
-                  {workloadPolicy === 'dbs' ? 'K must exceed the expected worker count.' : 'K must be at least the expected worker count. Leave empty to use that count.'}
+                <span className="text-xs font-semibold text-[#f3f3f4]">
+                  Phân bổ Node worker
+                </span>
+                <p className="text-[11px] text-[#73737c] mt-0.5">
+                  Chỉ định các máy thực thi cho {requiredNodes} phân vùng dữ liệu của phiên huấn luyện.
                 </p>
               </div>
-              <fieldset className="space-y-2">
-                <legend className="text-xs text-[#a1a1a8]">Nodes</legend>
-                <p className="text-[11px] text-[#73737c]">Choose {selectedBuild?.shard_count ?? 'the required number of'} ONLINE Nodes, or leave all unchecked for automatic placement.</p>
-                {nodes.length === 0 && <p className="text-xs text-[#73737c]">Chưa có dữ liệu</p>}
-                {nodes.map(node => (
-                  <label key={node.node_id} className="flex items-center gap-2 text-xs text-[#a1a1a8]">
-                    <input type="checkbox" disabled={node.state !== 'ONLINE'} checked={selectedNodeIds.includes(node.node_id)}
-                      onChange={e => setSelectedNodeIds(ids => e.target.checked ? [...ids, node.node_id] : ids.filter(id => id !== node.node_id))} />
-                    {node.display_name} · {node.node_id} · {node.state}
-                  </label>
-                ))}
-              </fieldset>
+              <div className="flex items-center gap-1.5 text-xs">
+                <span className="text-[11px] text-[#73737c]">
+                  Khả dụng:
+                </span>
+                <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-400">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                  {onlineNodes.length} Online
+                </span>
+                {offlineNodes.length > 0 && (
+                  <span className="inline-flex items-center gap-1 text-[11px] text-[#73737c]">
+                    · {offlineNodes.length} Offline
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Mode Selector Tabs/Pills */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setNodeSelectionMode('auto');
+                  setSelectedNodeIds([]);
+                }}
+                className={`p-3 rounded border text-left transition-all ${
+                  nodeSelectionMode === 'auto'
+                    ? 'bg-[#171719] border-blue-500/70 shadow-xs'
+                    : 'bg-[#141416] border-white/[0.07] hover:border-white/[0.15]'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center ${
+                      nodeSelectionMode === 'auto' ? 'border-blue-500 bg-blue-600' : 'border-white/20'
+                    }`}
+                  >
+                    {nodeSelectionMode === 'auto' && <span className="w-1.5 h-1.5 rounded-full bg-white" />}
+                  </span>
+                  <span className="text-xs font-semibold text-[#f3f3f4]">
+                    Tự động phân bổ (Khuyên dùng)
+                  </span>
+                </div>
+                <p className="text-[11px] text-[#73737c] mt-1.5 leading-relaxed">
+                  Coordinator tự động chọn {requiredNodes} node trực tuyến tối ưu khi khởi chạy.
+                </p>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setNodeSelectionMode('manual');
+                }}
+                className={`p-3 rounded border text-left transition-all ${
+                  nodeSelectionMode === 'manual'
+                    ? 'bg-[#171719] border-blue-500/70 shadow-xs'
+                    : 'bg-[#141416] border-white/[0.07] hover:border-white/[0.15]'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center ${
+                        nodeSelectionMode === 'manual' ? 'border-blue-500 bg-blue-600' : 'border-white/20'
+                      }`}
+                    >
+                      {nodeSelectionMode === 'manual' && <span className="w-1.5 h-1.5 rounded-full bg-white" />}
+                    </span>
+                    <span className="text-xs font-semibold text-[#f3f3f4]">
+                      Chỉ định node thủ công
+                    </span>
+                  </div>
+                  <span
+                    className={`text-[11px] font-mono px-1.5 py-0.5 rounded ${
+                      selectedNodeIds.length === requiredNodes
+                        ? 'bg-emerald-500/10 text-emerald-400'
+                        : 'bg-white/[0.05] text-[#a1a1a8]'
+                    }`}
+                  >
+                    {selectedNodeIds.length}/{requiredNodes}
+                  </span>
+                </div>
+                <p className="text-[11px] text-[#73737c] mt-1.5 leading-relaxed">
+                  Tự chọn chính xác danh sách các node thực thi theo ý bạn.
+                </p>
+              </button>
+            </div>
+
+            {/* Manual Node Selection List */}
+            {nodeSelectionMode === 'manual' && (
+              <div className="space-y-2 pt-2 border-t border-white/[0.06]">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-[#a1a1a8]">
+                    Chọn {requiredNodes} node trực tuyến ({selectedNodeIds.length} đã chọn):
+                  </span>
+                  {selectedNodeIds.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedNodeIds([])}
+                      className="text-[11px] text-[#73737c] hover:text-[#f3f3f4] transition-colors"
+                    >
+                      Bỏ chọn tất cả
+                    </button>
+                  )}
+                </div>
+
+                {nodes.length === 0 ? (
+                  <p className="text-xs text-[#73737c] py-2">Chưa có node nào được kết nối</p>
+                ) : (
+                  <div className="max-h-56 overflow-y-auto space-y-1 pr-1">
+                    {/* ONLINE NODES */}
+                    {onlineNodes.map(node => {
+                      const isChecked = selectedNodeIds.includes(node.node_id);
+                      return (
+                        <label
+                          key={node.node_id}
+                          className={`flex items-center justify-between px-3 py-2 rounded border cursor-pointer transition-colors ${
+                            isChecked
+                              ? 'bg-[#171719] border-blue-500/50'
+                              : 'bg-[#141416] border-white/[0.05] hover:border-white/[0.1]'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={e =>
+                                setSelectedNodeIds(ids =>
+                                  e.target.checked
+                                    ? [...ids, node.node_id]
+                                    : ids.filter(id => id !== node.node_id)
+                                )
+                              }
+                              className="rounded border-white/20 bg-transparent text-blue-600 focus:ring-0"
+                            />
+                            <div className="truncate">
+                              <span className="text-xs font-medium text-[#f3f3f4]">
+                                {node.display_name}
+                              </span>
+                              <span className="text-[11px] text-[#52525b] font-mono ml-2">
+                                #{node.node_id.slice(-8)}
+                              </span>
+                            </div>
+                          </div>
+                          <span className="inline-flex items-center gap-1 text-[11px] text-emerald-400 shrink-0">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                            Online
+                          </span>
+                        </label>
+                      );
+                    })}
+
+                    {/* OFFLINE NODES: Collapsible */}
+                    {offlineNodes.length > 0 && (
+                      <details className="group/offline pt-1">
+                        <summary className="cursor-pointer text-[11px] text-[#73737c] hover:text-[#a1a1a8] py-1 list-none flex items-center gap-1.5 select-none">
+                          <ChevronDown className="w-3 h-3 transition-transform group-open/offline:rotate-180" />
+                          <span>Node ngoại tuyến ({offlineNodes.length})</span>
+                        </summary>
+                        <div className="space-y-1 pt-1 opacity-60">
+                          {offlineNodes.map(node => (
+                            <div
+                              key={node.node_id}
+                              className="flex items-center justify-between px-3 py-1.5 rounded border border-white/[0.03] bg-[#121214] text-xs text-[#73737c]"
+                            >
+                              <div className="flex items-center gap-2.5 truncate">
+                                <input type="checkbox" disabled className="rounded border-white/10 opacity-30 cursor-not-allowed" />
+                                <span className="truncate">{node.display_name}</span>
+                                <span className="text-[10px] text-[#52525b] font-mono">#{node.node_id.slice(-8)}</span>
+                              </div>
+                              <span className="text-[10px] text-[#73737c] shrink-0">Offline</span>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Navigation */}
@@ -910,7 +1079,7 @@ export const NewTrainingFlowPage: React.FC = () => {
               className="px-3.5 py-1.5 rounded text-xs text-[#73737c] hover:text-[#f3f3f4] bg-[#121214] border border-white/[0.07] transition-colors flex items-center gap-1.5"
             >
               <ArrowLeft className="w-3.5 h-3.5" />
-              <span>Back</span>
+              <span>Quay lại</span>
             </button>
             <button
               type="button"
@@ -921,11 +1090,11 @@ export const NewTrainingFlowPage: React.FC = () => {
               {validating ? (
                 <>
                   <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                  <span>Validating contract...</span>
+                  <span>Đang xác thực hợp đồng...</span>
                 </>
               ) : (
                 <>
-                  <span>Next: Review & Validate</span>
+                  <span>Tiếp theo: Xem lại & Xác thực</span>
                   <ArrowRight className="w-3.5 h-3.5" />
                 </>
               )}
@@ -939,10 +1108,10 @@ export const NewTrainingFlowPage: React.FC = () => {
         <div className="space-y-4">
           <div>
             <h2 className="text-sm font-semibold text-[#f3f3f4]">
-              Review training specification
+              Xem lại cấu hình huấn luyện
             </h2>
             <p className="text-xs text-[#73737c] mt-0.5">
-              Contract validation completed with backend Parameter Server coordinator.
+              Đã hoàn tất xác thực hợp đồng với Coordinator Parameter Server.
             </p>
           </div>
 
@@ -951,7 +1120,7 @@ export const NewTrainingFlowPage: React.FC = () => {
             <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded text-xs text-amber-300 space-y-1">
               <div className="flex items-center gap-1.5 font-medium">
                 <AlertTriangle className="w-4 h-4 text-amber-400" />
-                <span>Contract Warnings</span>
+                <span>Cảnh báo hợp đồng</span>
               </div>
               <ul className="list-disc pl-5 text-[11px] space-y-0.5 text-amber-200">
                 {validationResult?.warnings.map((w, idx) => (
@@ -966,7 +1135,7 @@ export const NewTrainingFlowPage: React.FC = () => {
             <div className="p-3 bg-rose-500/10 border border-rose-500/20 rounded text-xs text-rose-300 space-y-1">
               <div className="flex items-center gap-1.5 font-medium">
                 <AlertCircle className="w-4 h-4 text-rose-400" />
-                <span>Contract Validation Errors (Cannot Start)</span>
+                <span>Lỗi xác thực hợp đồng (Không thể bắt đầu)</span>
               </div>
               <ul className="list-disc pl-5 text-[11px] space-y-0.5 text-rose-200">
                 {validationResult?.errors.map((e, idx) => (
@@ -980,33 +1149,33 @@ export const NewTrainingFlowPage: React.FC = () => {
             {/* Dataset Section */}
             <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
-                <div className="text-xs text-[#73737c]">Dataset Build</div>
+                <div className="text-xs text-[#73737c]">Bản dựng tập dữ liệu</div>
                 <div className="text-sm font-medium text-[#f3f3f4] mt-0.5 font-mono">
                   {selectedBuildId}
                 </div>
               </div>
               <div className="text-xs text-[#a1a1a8] sm:text-right">
-                {preview?.dataset?.total_train_samples ? `${preview.dataset.total_train_samples.toLocaleString()} samples` : 'Ready'} · batch size {preview?.dataset?.batch_size || selectedBuild?.batch_size || 64} · {preview?.dataset?.steps_per_epoch ? `${preview.dataset.steps_per_epoch} steps/epoch` : ''}
+                {preview?.dataset?.total_train_samples ? `${preview.dataset.total_train_samples.toLocaleString()} mẫu` : 'Sẵn sàng'} · Batch size {preview?.dataset?.batch_size || selectedBuild?.batch_size || 64} · {preview?.dataset?.steps_per_epoch ? `${preview.dataset.steps_per_epoch} bước/epoch` : ''}
               </div>
             </div>
 
             {/* Model Section */}
             <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
-                <div className="text-xs text-[#73737c]">Model Architecture</div>
+                <div className="text-xs text-[#73737c]">Kiến trúc mô hình</div>
                 <div className="text-sm font-medium text-[#f3f3f4] mt-0.5">
                   {preview?.model?.architecture_name || selectedModel}
                 </div>
               </div>
               <div className="text-xs text-[#a1a1a8] sm:text-right">
-                {preview?.model?.parameter_count ? `${(preview.model.parameter_count / 1_000_000).toFixed(1)}M parameters` : 'Neural Network'}
+                {preview?.model?.parameter_count ? `${(preview.model.parameter_count / 1_000_000).toFixed(1)}M tham số` : 'Mạng nơ-ron'}
               </div>
             </div>
 
             {/* Training Section */}
             <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
-                <div className="text-xs text-[#73737c]">Training Hyperparameters</div>
+                <div className="text-xs text-[#73737c]">Siêu tham số huấn luyện</div>
                 <div className="text-sm font-medium text-[#f3f3f4] mt-0.5">
                   {epochs} epochs
                 </div>
@@ -1019,27 +1188,44 @@ export const NewTrainingFlowPage: React.FC = () => {
             {/* Distributed Training Section */}
             <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
-                <div className="text-xs text-[#73737c]">Distributed Strategy & Workload</div>
+                <div className="text-xs text-[#73737c]">Chiến lược phân tán & Tải công việc</div>
                 <div className="text-sm font-medium text-[#f3f3f4] mt-0.5">
-                  Strict BSP · {workloadPolicy === 'dbs' ? 'DBS Adaptive' : 'Equal'} Workload
+                  Strict BSP · Phân bổ {workloadPolicy === 'dbs' ? 'DBS Adaptive' : 'Equal'}
                 </div>
               </div>
               <div className="text-xs text-[#a1a1a8] sm:text-right">
-                {preview?.synchronization?.expected_workers || 3} expected workers
-                {preview?.workload?.work_units_per_step ? ` · ${preview.workload.work_units_per_step} work units/step` : ''} · DTP v{preview?.protocols?.dtp_version ?? 1} / MCP v{preview?.protocols?.mcp_version ?? 1}
+                {preview?.synchronization?.expected_workers || 3} Worker dự kiến
+                {preview?.workload?.work_units_per_step ? ` · ${preview.workload.work_units_per_step} đơn vị công việc/bước` : ''} · DTP v{preview?.protocols?.dtp_version ?? 1} / MCP v{preview?.protocols?.mcp_version ?? 1}
+              </div>
+            </div>
+
+            {/* Node Allocation Section */}
+            <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <div className="text-xs text-[#73737c]">Phân bổ Node worker</div>
+                <div className="text-sm font-medium text-[#f3f3f4] mt-0.5">
+                  {selectedNodeIds.length > 0
+                    ? `Chỉ định thủ công (${selectedNodeIds.length} node)`
+                    : 'Tự động phân bổ'}
+                </div>
+              </div>
+              <div className="text-xs text-[#a1a1a8] sm:text-right">
+                {selectedNodeIds.length > 0
+                  ? selectedNodeIds.map(id => nodes.find(n => n.node_id === id)?.display_name || id.slice(-8)).join(', ')
+                  : `Coordinator tự động phân bổ ${requiredNodes} node trực tuyến`}
               </div>
             </div>
 
             {/* Checkpoint Section */}
             <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
-                <div className="text-xs text-[#73737c]">Checkpoint Policy</div>
+                <div className="text-xs text-[#73737c]">Lưu checkpoint</div>
                 <div className="text-sm font-medium text-[#f3f3f4] mt-0.5">
-                  Every {everyNEpochs} epochs (periodic)
+                  Mỗi {everyNEpochs} epoch
                 </div>
               </div>
               <div className="text-xs text-[#a1a1a8] sm:text-right">
-                Blocking write at epoch boundaries · Final save on complete
+                Lưu tại ranh giới epoch và khi hoàn tất huấn luyện
               </div>
             </div>
           </div>
@@ -1052,7 +1238,7 @@ export const NewTrainingFlowPage: React.FC = () => {
               className="px-3.5 py-1.5 rounded text-xs text-[#73737c] hover:text-[#f3f3f4] bg-[#121214] border border-white/[0.07] transition-colors flex items-center gap-1.5"
             >
               <ArrowLeft className="w-3.5 h-3.5" />
-              <span>Back</span>
+              <span>Quay lại</span>
             </button>
 
             <div className="flex items-center gap-2">
@@ -1061,7 +1247,7 @@ export const NewTrainingFlowPage: React.FC = () => {
                 onClick={() => setStep(5)}
                 className="px-3.5 py-1.5 rounded text-xs text-[#a1a1a8] hover:text-[#f3f3f4] bg-[#121214] border border-white/[0.07] transition-colors"
               >
-                {isEditMode ? 'Save Changes' : 'Save as Draft'}
+                {isEditMode ? 'Lưu thay đổi' : 'Save as Draft'}
               </button>
               <button
                 type="button"
@@ -1073,7 +1259,7 @@ export const NewTrainingFlowPage: React.FC = () => {
                 {actionLoading === 'start'
                   ? <RefreshCw aria-hidden="true" className="w-3.5 h-3.5 animate-spin motion-reduce:animate-none" />
                   : <Play aria-hidden="true" className="w-3.5 h-3.5 fill-current" />}
-                <span>{isEditMode ? 'Start Training' : 'Create & Start'}</span>
+                <span>{isEditMode ? 'Bắt đầu (Start)' : 'Tạo & Bắt đầu (Start)'}</span>
               </button>
             </div>
           </div>
@@ -1081,11 +1267,11 @@ export const NewTrainingFlowPage: React.FC = () => {
       )}
 
       {step >= 4 && activeAttempt === undefined && (
-        <p className="text-xs text-amber-400">Run availability is unverified. Reload this page if Start remains disabled.</p>
+        <p className="text-xs text-amber-400">Chưa xác thực được tính sẵn sàng của phiên chạy. Tải lại trang nếu nút Bắt đầu vẫn bị vô hiệu hóa.</p>
       )}
       {activeAttempt && (
         <p className="text-xs text-amber-400">
-          An attempt is active. <Link to={`/live?attempt_id=${encodeURIComponent(activeAttempt.attempt_id)}`} className="underline">View Run</Link> before starting training.
+          Một lần chạy đang diễn ra. <Link to={`/live?attempt_id=${encodeURIComponent(activeAttempt.attempt_id)}`} className="underline">Xem tiến trình</Link> trước khi bắt đầu huấn luyện mới.
         </p>
       )}
 
@@ -1098,10 +1284,10 @@ export const NewTrainingFlowPage: React.FC = () => {
 
           <div>
             <h2 className="text-base font-semibold text-[#f3f3f4]">
-              {isEditMode ? 'Training Job Updated' : 'Training Job Created'}
+              {isEditMode ? 'Đã cập nhật nhiệm vụ' : 'Đã tạo nhiệm vụ huấn luyện'}
             </h2>
             <p className="text-xs text-[#73737c] mt-1">
-              Job specification <strong className="text-[#f3f3f4]">{createdJob?.display_name}</strong> {isEditMode ? 'was updated on the server and remains in DRAFT.' : 'is registered on the server.'}
+              Nhiệm vụ <strong className="text-[#f3f3f4]">{createdJob?.display_name}</strong> {isEditMode ? 'đã được cập nhật và lưu ở trạng thái BẢN NHÁP.' : 'đã được đăng ký trên hệ thống.'}
             </p>
           </div>
 
@@ -1111,7 +1297,7 @@ export const NewTrainingFlowPage: React.FC = () => {
                 to={`/jobs/${createdJob?.job_id || jobId}`}
                 className="px-3.5 py-1.5 rounded text-xs text-[#73737c] hover:text-[#f3f3f4] bg-[#171719] border border-white/[0.07] transition-colors"
               >
-                View training details
+                Xem chi tiết nhiệm vụ
               </Link>
             )}
             <button
@@ -1124,7 +1310,7 @@ export const NewTrainingFlowPage: React.FC = () => {
               {actionLoading === 'start'
                 ? <RefreshCw aria-hidden="true" className="w-3.5 h-3.5 animate-spin motion-reduce:animate-none" />
                 : <Play aria-hidden="true" className="w-3.5 h-3.5 fill-current" />}
-              <span>Start training</span>
+              <span>Bắt đầu (Start)</span>
             </button>
           </div>
         </div>

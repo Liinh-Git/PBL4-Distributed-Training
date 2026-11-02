@@ -19,6 +19,7 @@ import { EditJobModal } from '../components/common/EditJobModal';
 import { jobsService, attemptsService, datasetsService, datasetBuildsService } from '../api';
 import { isActiveAttempt } from '../api/attempts';
 import { JobListItemData, JobState, AttemptListItemData } from '../types/api';
+import { formatDateOnly, formatStrategy } from '../utils/date';
 
 const formatModelName = (modelId?: string | null): string => {
   if (!modelId) return 'ResNet-18';
@@ -222,22 +223,22 @@ export const JobsPage: React.FC = () => {
   };
 
   return (
-    <div className="space-y-4 w-full pb-10 font-sans select-none">
+    <div className="space-y-4 w-full pb-10 font-sans">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-white/[0.07]">
         <div>
           <div className="flex items-center gap-2">
             <h1 className="text-base font-semibold text-[#f3f3f4]">
-              Training Jobs
+              Nhiệm vụ Huấn luyện
             </h1>
             {loading && (
               <span className="text-[11px] text-blue-400 font-mono animate-pulse">
-                Loading API...
+                Đang tải...
               </span>
             )}
           </div>
           <p className="text-xs text-[#73737c] mt-0.5">
-            Saved training configurations and execution history.
+            Theo dõi lần chạy gần nhất của từng nhiệm vụ. Nhấp vào nhiệm vụ để xem cấu hình chi tiết và lịch sử các lần chạy.
           </p>
         </div>
 
@@ -247,7 +248,8 @@ export const JobsPage: React.FC = () => {
             onClick={() => fetchJobs()}
             disabled={loading}
             className="p-1.5 rounded text-[#73737c] hover:text-[#f3f3f4] hover:bg-white/[0.05] transition-colors border border-white/[0.07]"
-            title="Refresh job list"
+            title="Làm mới danh sách"
+            aria-label="Làm mới danh sách"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
           </button>
@@ -256,7 +258,7 @@ export const JobsPage: React.FC = () => {
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition-colors w-fit"
           >
             <Plus className="w-3.5 h-3.5" />
-            <span>New training</span>
+            <span>Tạo nhiệm vụ mới</span>
           </Link>
         </div>
       </div>
@@ -264,7 +266,7 @@ export const JobsPage: React.FC = () => {
       {/* Error Banner */}
       {activeAttempt && (
         <p className="text-xs text-amber-400">
-          Training is already active. <Link to={`/live?attempt_id=${encodeURIComponent(activeAttempt.attempt_id)}`} className="underline">View Run</Link> before starting another.
+          Tiến trình huấn luyện đang hoạt động. <Link to={`/live?attempt_id=${encodeURIComponent(activeAttempt.attempt_id)}`} className="underline">View Run</Link> trước khi bắt đầu nhiệm vụ khác.
         </p>
       )}
       {error && (
@@ -278,7 +280,7 @@ export const JobsPage: React.FC = () => {
             onClick={() => fetchJobs()}
             className="px-2 py-1 bg-rose-500/20 hover:bg-rose-500/30 rounded text-rose-200 transition-colors"
           >
-            Retry
+            Thử lại
           </button>
         </div>
       )}
@@ -289,7 +291,8 @@ export const JobsPage: React.FC = () => {
           <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-[#73737c]" />
           <input
             type="text"
-            placeholder="Search jobs, models, datasets..."
+            aria-label="Search training jobs"
+            placeholder="Tìm kiếm nhiệm vụ, mô hình, dữ liệu..."
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
             className="w-full pl-8 pr-3 py-1.5 bg-[#121214] border border-white/[0.07] rounded text-xs text-[#f3f3f4] placeholder-[#73737c] focus:outline-hidden focus:border-blue-500 transition-colors"
@@ -297,17 +300,23 @@ export const JobsPage: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-0.5 bg-[#121214] border border-white/[0.07] rounded p-0.5 self-start sm:self-auto">
-          {['ALL', 'READY', 'DRAFT', 'ARCHIVED'].map(st => (
+          {[
+            { id: 'ALL', label: 'Tất cả' },
+            { id: 'READY', label: 'Sẵn sàng' },
+            { id: 'DRAFT', label: 'Bản nháp' },
+            { id: 'ARCHIVED', label: 'Lưu trữ' },
+          ].map(st => (
             <button
-              key={st}
+              key={st.id}
               type="button"
-              onClick={() => setStateFilter(st)}
-              className={`px-2.5 py-1 rounded text-xs transition-colors ${stateFilter === st
+              onClick={() => setStateFilter(st.id)}
+              aria-pressed={stateFilter === st.id}
+              className={`px-2.5 py-1 rounded text-xs transition-colors ${stateFilter === st.id
                   ? 'bg-white/[0.08] text-[#f3f3f4] font-medium'
                   : 'text-[#73737c] hover:text-[#a1a1a8]'
                 }`}
             >
-              {st}
+              {st.label}
             </button>
           ))}
         </div>
@@ -316,34 +325,33 @@ export const JobsPage: React.FC = () => {
       {/* Jobs Directory Table */}
       <div className="bg-[#121214] border border-white/[0.07] rounded overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs table-auto">
+          <table className="w-full text-left text-xs table-auto min-w-[1050px]">
             <thead>
               <tr className="border-b border-white/[0.07] text-[#73737c] bg-[#121214] text-[11px]">
-                <th className="py-2.5 px-3.5 font-medium w-[24%] min-w-[160px]">Job Name</th>
-                <th className="py-2.5 px-3 font-medium w-[9%] min-w-[80px]">State</th>
-                <th className="py-2.5 px-3 font-medium w-[18%] min-w-[150px]">Dataset</th>
-                <th className="py-2.5 px-3 font-medium w-[13%] min-w-[110px]">Model</th>
-                <th className="py-2.5 px-3 font-medium w-[11%] min-w-[100px]">Strategy</th>
-                <th className="py-2.5 px-3 font-medium text-center w-[7%] min-w-[70px]">Attempts</th>
-                <th className="py-2.5 px-3 font-medium w-[10%] min-w-[90px]">Latest Run</th>
-                <th className="py-2.5 px-3 font-medium w-[8%] min-w-[85px]">Created</th>
-                <th className="py-2.5 px-3.5 font-medium text-left w-[190px] min-w-[190px] shrink-0">Actions</th>
+                <th className="py-2.5 px-3.5 font-medium w-[24%] min-w-[160px]">Tên nhiệm vụ</th>
+                <th className="py-2.5 px-3 font-medium min-w-[140px]">Lần chạy gần nhất</th>
+                <th className="py-2.5 px-3 font-medium w-[18%] min-w-[150px]">Tập dữ liệu</th>
+                <th className="py-2.5 px-3 font-medium w-[13%] min-w-[110px]">Mô hình</th>
+                <th className="py-2.5 px-3 font-medium w-[11%] min-w-[100px]">Chiến lược</th>
+                <th className="py-2.5 px-3 font-medium min-w-[100px]">Cấu hình</th>
+                <th className="py-2.5 px-3 font-medium w-[8%] min-w-[85px]">Ngày tạo</th>
+                <th className="py-2.5 px-3.5 font-medium text-left w-[190px] min-w-[190px] shrink-0">Thao tác</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-white/[0.04]">
               {loading && jobs.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="py-12 text-center text-[#73737c]">
+                  <td colSpan={8} className="py-12 text-center text-[#73737c]">
                     <div className="flex items-center justify-center gap-2">
                       <RefreshCw className="w-4 h-4 animate-spin text-blue-400" />
-                      <span>Loading training jobs...</span>
+                      <span>Đang tải danh sách nhiệm vụ...</span>
                     </div>
                   </td>
                 </tr>
               ) : jobs.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="py-10 text-center text-[#73737c]">
-                    No training jobs found matching the selected filter.
+                  <td colSpan={8} className="py-10 text-center text-[#73737c]">
+                    Không tìm thấy nhiệm vụ nào phù hợp với bộ lọc.
                   </td>
                 </tr>
               ) : (
@@ -360,10 +368,24 @@ export const JobsPage: React.FC = () => {
                         <span>{job.display_name}</span>
                         <ChevronRight className="w-3 h-3 opacity-0 group-hover:opacity-100 text-[#73737c] transition-opacity" />
                       </Link>
+                      <span className="mt-1 block text-[11px] text-[#73737c]">
+                        {job.attempt_count === 0 ? 'Chưa chạy lần nào' : `${job.attempt_count} lần chạy`}
+                      </span>
                     </td>
 
                     <td className="py-2.5 px-3">
-                      <JobStateBadge state={job.state} />
+                      {(() => {
+                        const run = activeAttempt?.job_id === job.job_id ? activeAttempt : job.latest_attempt;
+                        return run ? (
+                          <Link to={isActiveAttempt(run.state)
+                            ? `/live?attempt_id=${encodeURIComponent(run.attempt_id)}`
+                            : `/jobs/${encodeURIComponent(job.job_id)}?attempt_id=${encodeURIComponent(run.attempt_id)}`}
+                            title={`View latest run for ${job.display_name}`}
+                            className="inline-flex items-center hover:opacity-85 focus-visible:outline-2 focus-visible:outline-blue-500">
+                            <AttemptStateBadge state={run.state} />
+                          </Link>
+                        ) : <span className="text-[#73737c]">{job.attempt_count > 0 ? 'Status unavailable' : 'No runs yet'}</span>;
+                      })()}
                     </td>
 
                     <td className="py-2.5 px-3">
@@ -390,29 +412,15 @@ export const JobsPage: React.FC = () => {
                     </td>
 
                     <td className="py-2.5 px-3 text-[#73737c]">
-                      {job.training_strategy === 'strict_bsp' ? 'Strict BSP' : (job.training_strategy || 'Strict BSP')}
-                    </td>
-
-                    <td className="py-2.5 px-3 text-center text-[#f3f3f4]">
-                      {job.attempt_count}
+                      {formatStrategy(job.training_strategy)}
                     </td>
 
                     <td className="py-2.5 px-3">
-                      {job.latest_attempt ? (
-                        <Link
-                          to={`/live?attempt_id=${job.latest_attempt.attempt_id}`}
-                          title="Inspect live training attempt"
-                          className="hover:opacity-85 transition-opacity inline-flex items-center"
-                        >
-                          <AttemptStateBadge state={job.latest_attempt.state} />
-                        </Link>
-                      ) : (
-                        <span className="text-[#73737c]">None</span>
-                      )}
+                      <JobStateBadge state={job.state} />
                     </td>
 
                     <td className="py-2.5 px-3 text-[#73737c] text-[11px]">
-                      {job.created_at ? job.created_at.slice(0, 10) : '—'}
+                      {formatDateOnly(job.created_at)}
                     </td>
 
                     <td className="py-2.5 px-3.5 text-left w-[190px] min-w-[190px] shrink-0">
@@ -554,6 +562,8 @@ export const JobsPage: React.FC = () => {
           </div>
         </div>
       </div>
+
+      <p className="text-[11px] text-[#73737c]">Configuration state describes the saved job settings. Training status comes from its latest Attempt. Run starts from scratch; use the job page to resume from a checkpoint.</p>
 
       {/* Start DRAFT Job Confirmation Modal */}
       <ConfirmationModal

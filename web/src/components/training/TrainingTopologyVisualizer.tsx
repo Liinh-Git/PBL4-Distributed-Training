@@ -1,15 +1,13 @@
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useMemo, useRef, useEffect } from 'react';
 import {
-  Server as ServerIcon,
-  ShieldCheck,
+  Terminal,
   CheckCircle2,
-  HardDrive,
-  Activity,
-  Radio,
-  Wifi,
+  AlertCircle,
+  Clock,
 } from 'lucide-react';
 import { TrainingStep, WorkerSession, Attempt } from '../../types';
-import { StrategyStateStrictBSPData } from '../../types/api';
+import { StrategyStateStrictBSPData, StepListItemData } from '../../types/api';
+import { EpochMetricData } from '../charts/LiveTrainingCharts';
 import { getPreparationStatus } from '../../utils/preparation';
 
 export interface TrainingTopologyVisualizerProps {
@@ -22,143 +20,36 @@ export interface TrainingTopologyVisualizerProps {
   isSimulating?: boolean;
   onToggleSimulating?: () => void;
   onSelectWorker?: (worker: WorkerSession) => void;
-  onOpenServerDetails?: () => void;
-}
-
-interface NodeCoord {
-  x: number;
-  y: number;
-  cardWidth: number;
-  cardHeight: number;
-}
-
-interface TopologyLayout {
-  serverCoord: { x: number; y: number; width: number; height: number };
-  workerCoords: NodeCoord[];
+  // Terminal training telemetry props
+  epochMetrics?: EpochMetricData[];
+  jobDisplayName?: string | null;
+  totalEpochs?: number;
+  stepsHistory?: StepListItemData[];
+  snapshot?: any;
 }
 
 /**
- * Dynamically computes balanced 2D coordinates for Parameter Server and N Workers.
- * Ensures zero vertical or horizontal collisions on 1000 x 580 canvas.
+ * Format accuracy percentage without abbreviations
  */
-function getTopologyLayout(count: number): TopologyLayout {
-  const serverWidth = 240;
-  const serverHeight = 145;
-  const monitorWidth = 220;
-  const monitorHeight = 135;
-
-  if (count <= 0) {
-    return {
-      serverCoord: { x: 500, y: 280, width: serverWidth, height: serverHeight },
-      workerCoords: [],
-    };
+function formatAccuracy(acc: number | null | undefined): string | null {
+  if (acc == null) return null;
+  if (acc > 1) {
+    return `${acc.toFixed(2)}%`;
   }
-
-  if (count === 1) {
-    // 1 Worker: Beautiful horizontal pipeline (Worker on left, Parameter Server on right)
-    // Completely eliminates vertical stacking collision!
-    return {
-      serverCoord: { x: 670, y: 280, width: serverWidth, height: serverHeight },
-      workerCoords: [
-        { x: 260, y: 280, cardWidth: monitorWidth, cardHeight: monitorHeight },
-      ],
-    };
-  }
-
-  if (count === 2) {
-    // 2 Workers: Symmetric horizontal pipeline (Worker 0 on Left, Server in Center, Worker 1 on Right)
-    return {
-      serverCoord: { x: 500, y: 280, width: serverWidth, height: serverHeight },
-      workerCoords: [
-        { x: 190, y: 280, cardWidth: monitorWidth, cardHeight: monitorHeight },
-        { x: 810, y: 280, cardWidth: monitorWidth, cardHeight: monitorHeight },
-      ],
-    };
-  }
-
-  if (count === 3) {
-    // 3 Workers: Balanced triangular topology
-    // W0: Top-Left (200, 130)
-    // W1: Top-Right (800, 130)
-    // Server: Center (500, 275)
-    // W2: Bottom-Center (500, 480) -> Gap of 70px from server bottom (347px) to W2 top (412px)!
-    return {
-      serverCoord: { x: 500, y: 275, width: serverWidth, height: serverHeight },
-      workerCoords: [
-        { x: 200, y: 130, cardWidth: monitorWidth, cardHeight: monitorHeight },
-        { x: 800, y: 130, cardWidth: monitorWidth, cardHeight: monitorHeight },
-        { x: 500, y: 480, cardWidth: monitorWidth, cardHeight: monitorHeight },
-      ],
-    };
-  }
-
-  if (count === 4) {
-    // 4 Workers: 4 corners around central server
-    return {
-      serverCoord: { x: 500, y: 280, width: serverWidth, height: serverHeight },
-      workerCoords: [
-        { x: 200, y: 130, cardWidth: 200, cardHeight: 125 },
-        { x: 800, y: 130, cardWidth: 200, cardHeight: 125 },
-        { x: 200, y: 440, cardWidth: 200, cardHeight: 125 },
-        { x: 800, y: 440, cardWidth: 200, cardHeight: 125 },
-      ],
-    };
-  }
-
-  // N >= 5: Adaptive radial distribution around central server
-  const rx = 350;
-  const ry = 190;
-  const cardW = count <= 6 ? 180 : 150;
-  const cardH = count <= 6 ? 115 : 100;
-
-  const coords: NodeCoord[] = [];
-  for (let i = 0; i < count; i++) {
-    const angle = -Math.PI / 2 + (2 * Math.PI * i) / count;
-    coords.push({
-      x: Math.round(500 + rx * Math.cos(angle)),
-      y: Math.round(280 + ry * Math.sin(angle)),
-      cardWidth: cardW,
-      cardHeight: cardH,
-    });
-  }
-
-  return {
-    serverCoord: { x: 500, y: 280, width: serverWidth, height: serverHeight },
-    workerCoords: coords,
-  };
+  return `${(acc * 100).toFixed(2)}%`;
 }
 
 /**
- * Computes visible link endpoints (x1, y1) and (x2, y2) between outer edges
- * of worker monitor and server rack chassis.
+ * Jupyter Notebook / Colab Terminal Component
+ * Features:
+ * - Dedicated scroll container (max-h-[360px]) with auto-scroll to latest active line
+ * - Graphical & numerical progress bar for active running epoch (never disappears while active)
+ * - Accurate realtime epoch progress % calculated from actual step & batch ordinal
+ * - Crisp monospace font size
+ * - No arbitrary prefix (removed 'Kiểm -')
+ * - Full words without abbreviations (accuracy, loss, samples, status)
+ * - Rich metrics: batch progress, sample counts, step compute duration, StrictBSP barrier state
  */
-function computeLinkEndpoints(
-  wx: number,
-  wy: number,
-  wWidth: number,
-  wHeight: number,
-  sx: number,
-  sy: number,
-  sWidth: number,
-  sHeight: number
-) {
-  const dx = sx - wx;
-  const dy = sy - wy;
-  const dist = Math.sqrt(dx * dx + dy * dy);
-  if (dist === 0) return { x1: wx, y1: wy, x2: sx, y2: sy };
-
-  // Offset cleanly past the boundaries
-  const wRadius = Math.min(wWidth, wHeight) / 2 + 4;
-  const sRadius = Math.min(sWidth, sHeight) / 2 + 6;
-
-  const x1 = Math.round(wx + (dx / dist) * wRadius);
-  const y1 = Math.round(wy + (dy / dist) * wRadius);
-  const x2 = Math.round(sx - (dx / dist) * sRadius);
-  const y2 = Math.round(sy - (dy / dist) * sRadius);
-
-  return { x1, y1, x2, y2 };
-}
-
 export const TrainingTopologyVisualizer: React.FC<TrainingTopologyVisualizerProps> = ({
   currentStep,
   workers,
@@ -166,625 +57,403 @@ export const TrainingTopologyVisualizer: React.FC<TrainingTopologyVisualizerProp
   attempt,
   strategyState,
   isStale = false,
-  onSelectWorker,
-  onOpenServerDetails,
+  epochMetrics = [],
+  jobDisplayName,
+  totalEpochs = 10,
+  stepsHistory = [],
+  snapshot,
 }) => {
-  const [showMetricsHud, setShowMetricsHud] = useState<boolean>(true);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const preparation = getPreparationStatus(attempt?.state || 'RUNNING', workers);
 
-  // Accessibility: detect prefers-reduced-motion
-  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
+  const total = totalEpochs > 0 ? totalEpochs : 10;
+  const totalDigits = total >= 100 ? 3 : total >= 10 ? 2 : 1;
+  const formatEpoch = (ep: number) => String(ep).padStart(totalDigits, '0');
+  const totalFormatted = formatEpoch(total);
+
+  // Derive Clean Header Prompt (No awkward cuts)
+  const headerPrompt = useMemo(() => {
+    if (jobDisplayName) {
+      const trimmed = jobDisplayName.trim();
+      return trimmed.startsWith('Huấn luyện')
+        ? `${trimmed}... (Tổng số: ${total} epochs)`
+        : `Huấn luyện mô hình: ${trimmed}... (Tổng số: ${total} epochs)`;
+    }
+    return `Huấn luyện mô hình phân tán... (Tổng số: ${total} epochs)`;
+  }, [jobDisplayName, total]);
+
+  // Completed Epochs List (Frozen lines without progress bar, full words, no abbreviations)
+  const completedEpochLines = useMemo(() => {
+    if (!epochMetrics || epochMetrics.length === 0) return [];
+    return [...epochMetrics]
+      .sort((a, b) => a.epoch_index - b.epoch_index)
+      .map((m) => {
+        const epochNum = m.epoch_index + 1; // 1-indexed for display
+        const epochStr = formatEpoch(epochNum);
+        const lossStr = m.training_loss != null ? m.training_loss.toFixed(4) : '—';
+        const accFormatted = formatAccuracy(m.training_accuracy);
+        const accPart = accFormatted ? ` - accuracy = ${accFormatted}` : '';
+        const samplesPart = m.sample_count > 0 ? ` - số mẫu: ${m.sample_count.toLocaleString()}` : '';
+
+        return {
+          epochNum,
+          text: `Epoch ${epochStr}/${totalFormatted}: loss = ${lossStr}${accPart}${samplesPart}`,
+        };
+      });
+  }, [epochMetrics, totalFormatted, totalDigits]);
+
+  // Lifecycle states
+  const isCompleted = attempt?.state === 'COMPLETED';
+  const isFailed = attempt?.state === 'FAILED' || attempt?.state === 'ABORTED';
+  const isRunning = !isCompleted && !isFailed;
+  const isPreparing = preparation.preparing && !isStale && !isCompleted && !isFailed;
+
+  // Active Running Epoch Number (1-indexed for display)
+  // Guarantee activeEpochNum is ALWAYS strictly greater than completedEpochLines.length
+  // so the active progress bar never gets hidden prematurely
+  const activeEpochNum = useMemo(() => {
+    const stepEpoch =
+      typeof (currentStep as any)?.epoch === 'number'
+        ? (currentStep as any).epoch + 1
+        : null;
+    const snapshotEpoch =
+      snapshot?.epoch != null
+        ? Number(snapshot.epoch) + 1
+        : null;
+    const attemptEpoch =
+      attempt?.epoch != null
+        ? Number(attempt.epoch) + 1
+        : null;
+
+    const observedMax = Math.max(
+      stepEpoch ?? 1,
+      snapshotEpoch ?? 1,
+      attemptEpoch ?? 1,
+      completedEpochLines.length + 1
+    );
+
+    return observedMax;
+  }, [currentStep, snapshot?.epoch, attempt?.epoch, completedEpochLines.length]);
+
+  // Pinned total batches in epoch (guaranteed stable across step lifecycles)
+  const pinnedTotalBatchesRef = useRef<number>(48);
+
+  const resolvedTotalBatches = useMemo(() => {
+    // 1. From max observed batch_ordinal in steps history (authoritative)
+    if (stepsHistory && stepsHistory.length > 0) {
+      const maxOrdinal = stepsHistory.reduce((max, s) => Math.max(max, s.batch_ordinal ?? -1), -1);
+      if (maxOrdinal > 0) {
+        pinnedTotalBatchesRef.current = Math.max(pinnedTotalBatchesRef.current, maxOrdinal + 1);
+        return pinnedTotalBatchesRef.current;
+      }
+    }
+
+    // 2. From completed epoch metrics sample count if known
+    if (epochMetrics && epochMetrics.length > 0 && epochMetrics[0].sample_count > 0) {
+      const sampleCount = epochMetrics[0].sample_count;
+      // In PBL4, standard batch_size is 64 samples per step
+      const calculated = Math.round(sampleCount / 64);
+      if (calculated > 0 && calculated <= 1000) {
+        pinnedTotalBatchesRef.current = Math.max(pinnedTotalBatchesRef.current, calculated);
+        return pinnedTotalBatchesRef.current;
+      }
+    }
+
+    return pinnedTotalBatchesRef.current;
+  }, [stepsHistory, epochMetrics]);
+
+  // Realtime Batch Ordinal for the active epoch
+  const currentBatchOrdinal = useMemo(() => {
+    if (currentStep) {
+      const stepEpoch = (currentStep as any).epoch;
+      if (typeof stepEpoch === 'number' && stepEpoch === activeEpochNum - 1) {
+        const val = (currentStep as any).batchOrdinal ?? (currentStep as any).batch_ordinal;
+        if (typeof val === 'number' && val >= 0) return val;
+      }
+    }
+    if (snapshot?.epoch != null && Number(snapshot.epoch) === activeEpochNum - 1) {
+      if (snapshot.current_batch_ordinal != null) {
+        const val = Number(snapshot.current_batch_ordinal);
+        if (val >= 0) return val;
+      }
+    }
+    // Fallback: check raw values if epoch matches
+    const rawEpoch = (currentStep as any)?.epoch ?? snapshot?.epoch;
+    if (rawEpoch != null && Number(rawEpoch) === activeEpochNum - 1) {
+      const fallbackVal = (currentStep as any)?.batchOrdinal ?? (currentStep as any)?.batch_ordinal;
+      if (typeof fallbackVal === 'number' && fallbackVal >= 0) return fallbackVal;
+    }
+
+    return 0;
+  }, [currentStep, snapshot, activeEpochNum]);
+
+  const rawBatch = currentBatchOrdinal + 1;
+
+  // Monotonic linear progress tracking (strictly non-decreasing within an epoch)
+  const lastProgressRef = useRef<{ epoch: number; maxBatch: number; maxPercent: number }>({
+    epoch: 0,
+    maxBatch: 0,
+    maxPercent: 0,
+  });
+
+  const { progressPercent, progressText, currentBatch } = useMemo(() => {
+    const total = resolvedTotalBatches > 0 ? resolvedTotalBatches : 48;
+
+    // Reset when moving to a new epoch
+    if (lastProgressRef.current.epoch !== activeEpochNum) {
+      const initialPercent = Math.min(100, Math.max(1, Math.round((Math.min(rawBatch, total) / total) * 100)));
+      lastProgressRef.current = {
+        epoch: activeEpochNum,
+        maxBatch: Math.min(rawBatch, total),
+        maxPercent: initialPercent,
+      };
+    }
+
+    // Ensure batch ordinal and percentage NEVER decrease within the active epoch
+    const monotonicBatch = Math.max(lastProgressRef.current.maxBatch, rawBatch);
+    const clampedBatch = Math.min(monotonicBatch, total);
+
+    const calculatedPercent = Math.min(100, Math.max(1, Math.round((clampedBatch / total) * 100)));
+    const monotonicPercent = Math.max(lastProgressRef.current.maxPercent, calculatedPercent);
+
+    // Save high-water mark for this epoch
+    lastProgressRef.current.maxBatch = clampedBatch;
+    lastProgressRef.current.maxPercent = monotonicPercent;
+
+    return {
+      progressPercent: monotonicPercent,
+      progressText: `${clampedBatch}/${total}`,
+      currentBatch: clampedBatch,
+    };
+  }, [activeEpochNum, rawBatch, resolvedTotalBatches]);
+
+  // Progress Bar ASCII (10 characters for tight square aspect ratio)
+  const progressBar = useMemo(() => {
+    const barLength = 10;
+    const filled = Math.min(barLength, Math.max(0, Math.round((progressPercent / 100) * barLength)));
+    const empty = barLength - filled;
+    return '█'.repeat(filled) + '░'.repeat(empty);
+  }, [progressPercent]);
+
+  // Worker contributions & timings
+  const contribs = useMemo<any[]>(() => {
+    return (currentStep as any)?.workerContributions ?? (currentStep as any)?.contributions ?? [];
+  }, [currentStep]);
+
+  // Step Loss
+  const currentStepLoss = useMemo(() => {
+    if (currentStep?.metrics?.loss != null) {
+      return currentStep.metrics.loss.toFixed(4);
+    }
+    if ((currentStep as any)?.loss != null) {
+      return Number((currentStep as any).loss).toFixed(4);
+    }
+    const valid = contribs.map((c) => c.loss).filter((l): l is number => typeof l === 'number');
+    if (valid.length > 0) {
+      const avg = valid.reduce((a, b) => a + b, 0) / valid.length;
+      return avg.toFixed(4);
+    }
+    return null;
+  }, [currentStep, contribs]);
+
+  // Step Compute Duration / Speed (in ms)
+  const stepComputeMs = useMemo(() => {
+    const timingMs = (currentStep as any)?.timings?.totalDurationMs;
+    if (typeof timingMs === 'number' && timingMs > 0) return Math.round(timingMs);
+
+    const validComputes = contribs
+      .map((c) => c.computeMs)
+      .filter((t): t is number => typeof t === 'number' && t > 0);
+    if (validComputes.length > 0) {
+      return Math.round(validComputes.reduce((a, b) => a + b, 0) / validComputes.length);
+    }
+    return null;
+  }, [currentStep, contribs]);
+
+  // Step Samples Count in Current Epoch
+  const sampleProgress = useMemo(() => {
+    const stepSampleCount =
+      (currentStep as any)?.totalSampleCount ??
+      (currentStep as any)?.total_sample_count ??
+      (contribs.length > 0
+        ? contribs.reduce((sum, c) => sum + (c.sampleCount || c.samples || 0), 0)
+        : null);
+
+    const totalSamplesInEpoch =
+      epochMetrics.length > 0 && epochMetrics[0].sample_count > 0
+        ? epochMetrics[0].sample_count
+        : stepSampleCount && resolvedTotalBatches
+        ? stepSampleCount * resolvedTotalBatches
+        : null;
+
+    if (stepSampleCount && totalSamplesInEpoch) {
+      const currentProcessed = Math.min(totalSamplesInEpoch, currentBatch * stepSampleCount);
+      return `${currentProcessed.toLocaleString()}/${totalSamplesInEpoch.toLocaleString()}`;
+    }
+    return null;
+  }, [currentStep, contribs, epochMetrics, currentBatch, resolvedTotalBatches]);
+
+  // StrictBSP Waiting / Gate Status Text (Full words, no abbreviations)
+  const barrierStatusText = useMemo(() => {
+    if (!currentStep) return '';
+    const acceptedIds = new Set(
+      contribs.filter((c) => c.contributionAccepted === true).map((c) => c.workerId)
+    );
+    const waitingWorkers = workers.filter((w) => !acceptedIds.has(w.workerId));
+
+    const isCollecting = strategyState?.state === 'COLLECTING' || !strategyState?.state;
+    const isUpdating = strategyState?.state === 'UPDATING';
+    const isBroadcasting = strategyState?.state === 'BROADCASTING';
+    const isCommitted = currentStep.state === 'COMMITTED';
+
+    if (isCollecting && waitingWorkers.length > 0) {
+      return `[Trạng thái StrictBSP: Đang chờ ${waitingWorkers.map((w) => `Worker-${w.workerId}`).join(', ')}]`;
+    }
+    if (isUpdating) {
+      return `[Trạng thái StrictBSP: Đang tổng hợp Gradient All-Reduce]`;
+    }
+    if (isBroadcasting) {
+      const versionStr = currentStep.outputModelVersion || attempt?.modelVersion || '';
+      return `[Trạng thái: Đang phát tán trọng số mô hình v${versionStr}]`;
+    }
+    if (isCommitted) {
+      return `[Trạng thái: Bước hoàn tất · Sẵn sàng bước tiếp theo]`;
+    }
+    return `[Trạng thái StrictBSP: Đang đồng bộ]`;
+  }, [currentStep, contribs, workers, strategyState, attempt?.modelVersion]);
+
+  // Auto-scroll to bottom of the terminal on new line or batch change
   useEffect(() => {
-    if (typeof window === 'undefined' || !window.matchMedia) return;
-    const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
-    setPrefersReducedMotion(mediaQuery.matches);
-    const handler = (e: MediaQueryListEvent) => setPrefersReducedMotion(e.matches);
-    mediaQuery.addEventListener('change', handler);
-    return () => mediaQuery.removeEventListener('change', handler);
-  }, []);
-
-  const observedWorkersCount = workers.length;
-  const preparation = getPreparationStatus(attempt?.state, workers);
-  const isPartialProjection = expectedWorkers > 0 && observedWorkersCount < expectedWorkers;
-
-  // Real step state derived strictly from currentStep
-  const stepState = currentStep?.state;
-  const isCollecting = stepState === 'COLLECTING_GRADIENTS';
-  const isUpdating = stepState === 'AGGREGATING' || stepState === 'UPDATING';
-  const isBroadcasting = stepState === 'BROADCASTING' || stepState === 'WAITING_PARAMETER_APPLIED';
-  const isCommitted = stepState === 'COMMITTED';
-
-  // Authoritative barrier sync counts from strategy_state or currentStep
-  const contributions = currentStep?.workerContributions || [];
-  const acceptedCount = strategyState?.accepted_contribution_count ?? (
-    contributions.length > 0
-      ? contributions.filter(c => c.contributionAccepted).length
-      : null
-  );
-  const expectedCount = strategyState?.expected_contribution_count ?? (
-    expectedWorkers > 0 ? expectedWorkers : null
-  );
-  const isSyncComplete = strategyState?.synchronization_complete ?? (isCommitted);
-
-  // Compute non-overlapping layout
-  const { serverCoord, workerCoords } = useMemo(
-    () => getTopologyLayout(observedWorkersCount),
-    [observedWorkersCount]
-  );
+    if (scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+    }
+  }, [completedEpochLines.length, currentBatchOrdinal, currentStep?.operationId, activeEpochNum]);
 
   return (
-    <div className="bg-[#121214] border border-white/[0.07] rounded p-4 space-y-3 font-sans select-none relative overflow-hidden">
-      {/* Header with Title and Status Badges */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-white/[0.07]">
-        <div className="space-y-0.5">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span
-              className={`w-2 h-2 rounded-full ${
-                isStale
-                  ? 'bg-amber-400'
-                  : attempt?.state === 'RUNNING' || isCommitted
-                  ? 'bg-emerald-400 animate-pulse'
-                  : 'bg-blue-400'
-              }`}
-              aria-hidden="true"
-            />
-            <h2 className="text-xs font-semibold text-[#f3f3f4] uppercase tracking-wider">
-              Cluster Training Topology
-            </h2>
-            <span className="text-[11px] text-[#73737c]" aria-hidden="true">·</span>
-            <span className="text-xs text-[#a1a1a8]">
-              Parameter Server & Worker Cluster (DTP/1)
-            </span>
-          </div>
-          <p className="text-xs text-[#73737c]">
-            {isStale
-              ? 'Telemetry snapshot is stale. Coordinator state may not reflect live workers.'
-              : attempt && ['COMPLETED', 'FAILED', 'ABORTED'].includes(attempt.state)
-              ? `Attempt ${attempt.state.toLowerCase()}. Worker sessions are retained for inspection.`
-              : preparation.preparing
-              ? preparation.description
-              : isCollecting
-              ? `Step #${currentStep?.operationId} · Workers computing backward pass & streaming gradients to Parameter Server.`
-              : isUpdating
-              ? `Step #${currentStep?.operationId} · Strict BSP barrier gate locked · Computing all-reduce gradient aggregation.`
-              : isBroadcasting
-              ? `Step #${currentStep?.operationId} · Broadcasting updated canonical model parameters to cluster workers.`
-              : isCommitted
-              ? `Step #${currentStep?.operationId} · Step barrier committed · All gradients applied · Awaiting next batch.`
-              : 'Workers compute gradients and exchange tensors with Parameter Server via DTP/1 persistent TCP.'}
-          </p>
+    <div className="bg-[#0b0c0e] rounded border border-white/[0.08] shadow-2xl overflow-hidden font-mono text-zinc-300">
+      {/* Terminal Title Bar */}
+      <div className="flex items-center justify-between px-3.5 py-2 bg-[#121317] border-b border-white/[0.06] text-xs">
+        <div className="flex items-center gap-2">
+          <Terminal className="w-3.5 h-3.5 text-zinc-400" />
+          <span className="text-zinc-300 font-medium tracking-wide text-[11px]">Training Output</span>
         </div>
-
-        {/* Live Controls: HUD toggle & Realtime Exchange Indicator */}
-        <div className="flex items-center gap-2 flex-wrap self-start sm:self-auto text-xs">
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#171719] border border-white/[0.07] text-[#a1a1a8]">
-            <Radio className="w-3 h-3 text-emerald-400" aria-hidden="true" />
-            <span>Auto Live Synced</span>
-          </div>
-
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#171719] border border-white/[0.07] text-xs">
-            <span
-              className={`w-2 h-2 rounded-full ${
-                isBroadcasting
-                  ? 'bg-emerald-400 animate-pulse'
-                  : isUpdating
-                  ? 'bg-amber-400 animate-pulse'
-                  : isCollecting || attempt?.state === 'RUNNING'
-                  ? 'bg-amber-400 animate-pulse'
-                  : 'bg-zinc-500'
-              }`}
-              aria-hidden="true"
-            />
-            <span className="text-[#f3f3f4] font-medium">
-              {isStale
-                ? 'Telemetry stale'
-                : preparation.preparing
-                ? preparation.label
-                : attempt && ['COMPLETED', 'FAILED', 'ABORTED'].includes(attempt.state)
-                ? attempt.state
-                : isBroadcasting
-                ? 'Phát tán trọng số (PS ➔ Worker)'
-                : isUpdating
-                ? 'Đồng bộ Barrier (All-Reduce)'
-                : isCollecting || attempt?.state === 'RUNNING'
-                ? 'Gửi Gradient (Worker ➔ PS)'
-                : isCommitted
-                ? 'Đã đồng bộ · Sẵn sàng bước tiếp'
-                : 'DTP/1 Sẵn sàng'}
-            </span>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => setShowMetricsHud(prev => !prev)}
-            className={`px-2.5 py-1 rounded transition-colors flex items-center gap-1 border border-white/[0.07] ${
-              showMetricsHud
-                ? 'bg-[#1a1a1e] text-[#f3f3f4]'
-                : 'bg-[#171719] text-[#73737c] hover:text-[#f3f3f4]'
+        <div className="flex items-center gap-3 text-[10px]">
+          <span className="text-zinc-400">
+            Tiến độ: <strong className="text-zinc-200">Epoch {Math.min(activeEpochNum, total)}/{total}</strong>
+          </span>
+          <span
+            className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded font-semibold uppercase ${
+              isCompleted
+                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                : isFailed
+                ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                : 'bg-blue-500/10 text-blue-400 border border-blue-500/20'
             }`}
-            title="Toggle transmission line telemetry badges"
           >
-            <Wifi className="w-3 h-3 text-blue-400" aria-hidden="true" />
-            <span>Metrics HUD</span>
-          </button>
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                isCompleted
+                  ? 'bg-emerald-400'
+                  : isFailed
+                  ? 'bg-rose-400'
+                  : 'bg-blue-400 animate-pulse'
+              }`}
+            />
+            <span>{attempt?.state || 'RUNNING'}</span>
+          </span>
         </div>
       </div>
 
-      {/* Main Canvas Area: Interactive SVG Link Layer with Computer Monitors & Server Chassis */}
-      <div className="relative w-full h-[540px] sm:h-[580px] bg-[#09090b] rounded border border-white/[0.07] overflow-hidden">
-        {/* Subtle grid pattern background */}
-        <div
-          className="absolute inset-0 opacity-[0.035] pointer-events-none"
-          style={{
-            backgroundImage: 'radial-gradient(#ffffff 1px, transparent 1px)',
-            backgroundSize: '24px 24px',
-          }}
-          aria-hidden="true"
-        />
-
-        {/* SVG Transmission Vector Paths & Moving Packet Signals (Rendered BEHIND nodes) */}
-        <svg
-          className="absolute inset-0 w-full h-full pointer-events-none"
-          viewBox="0 0 1000 580"
-          preserveAspectRatio="none"
-          aria-hidden="true"
-        >
-          {/* Radar orbit line when 0 workers */}
-          {observedWorkersCount === 0 && (
-            <ellipse
-              cx="500"
-              cy="280"
-              rx="320"
-              ry="160"
-              fill="none"
-              stroke="#27272a"
-              strokeWidth="1.5"
-              strokeDasharray="4 6"
-              opacity="0.6"
-            />
-          )}
-
-          {/* Dynamic SVG links between each worker monitor and server rack */}
-          {workers.map((worker, idx) => {
-            const coord = workerCoords[idx];
-            if (!coord) return null;
-
-            const isWorkerFailed = worker.state === 'FAILED' || worker.state === 'DISCONNECTED';
-            const { x1, y1, x2, y2 } = computeLinkEndpoints(
-              coord.x,
-              coord.y,
-              coord.cardWidth,
-              coord.cardHeight,
-              serverCoord.x,
-              serverCoord.y,
-              serverCoord.width,
-              serverCoord.height
-            );
-
-            // Flow configuration based strictly on currentStep state & running status
-            const isBroadcastingNow = isBroadcasting;
-            const shouldAnimate =
-              !prefersReducedMotion &&
-              (attempt?.state === 'RUNNING' || isCollecting || isBroadcastingNow || isUpdating);
-
-            let strokeColor = '#f59e0b';
-            let strokeDash = '4 4';
-            let pathD = `M ${x1} ${y1} L ${x2} ${y2}`; // worker -> server
-            let particleColor = '#fbbf24';
-
-            if (isWorkerFailed) {
-              strokeColor = '#f43f5e';
-              strokeDash = '3 3';
-            } else if (isBroadcastingNow) {
-              strokeColor = '#10b981';
-              strokeDash = '4 4';
-              pathD = `M ${x2} ${y2} L ${x1} ${y1}`; // server -> worker
-              particleColor = '#34d399';
-            } else if (isUpdating) {
-              strokeColor = '#f59e0b';
-              strokeDash = '2 2';
-              particleColor = '#f59e0b';
-            } else if (isCommitted) {
-              strokeColor = '#10b981';
-              strokeDash = 'none';
-              particleColor = '#34d399';
-            }
-
-            return (
-              <g key={`topo-link-${worker.sessionId || worker.workerId || idx}`}>
-                {/* Glow underlay line */}
-                <line
-                  x1={x1}
-                  y1={y1}
-                  x2={x2}
-                  y2={y2}
-                  stroke={strokeColor}
-                  strokeWidth="4"
-                  strokeOpacity="0.18"
-                />
-
-                {/* Main transmission line */}
-                <line
-                  x1={x1}
-                  y1={y1}
-                  x2={x2}
-                  y2={y2}
-                  stroke={strokeColor}
-                  strokeWidth="2.2"
-                  strokeOpacity="0.85"
-                  strokeDasharray={strokeDash}
-                />
-
-                {/* Realtime flowing data packet pulses along the transmission vector */}
-                {shouldAnimate && !isWorkerFailed && (
-                  <>
-                    <circle r="4" fill={particleColor} opacity="0.95">
-                      <animateMotion
-                        path={pathD}
-                        dur="1.5s"
-                        repeatCount="indefinite"
-                      />
-                    </circle>
-                    <circle r="2.5" fill={particleColor} opacity="0.75">
-                      <animateMotion
-                        path={pathD}
-                        dur="1.5s"
-                        begin="0.75s"
-                        repeatCount="indefinite"
-                      />
-                    </circle>
-                  </>
-                )}
-              </g>
-            );
-          })}
-        </svg>
-
-        {/* TRANSMISSION LINE TELEMETRY BADGES (Trao / Nhận) */}
-        {showMetricsHud && currentStep && attempt?.state === 'RUNNING' && !isStale && workers.map((worker, idx) => {
-          const coord = workerCoords[idx];
-          if (!coord) return null;
-
-          const midX = (coord.x + serverCoord.x) / 2;
-          const midY = (coord.y + serverCoord.y) / 2;
-          const contrib = contributions.find(c => c.workerId === worker.workerId);
-
-          const isTransferringToWorker = isBroadcasting;
-
-          return (
-            <div
-              key={`hud-badge-${worker.sessionId || worker.workerId || idx}`}
-              style={{
-                left: `${(midX / 1000) * 100}%`,
-                top: `${(midY / 580) * 100}%`,
-              }}
-              className="absolute -translate-x-1/2 -translate-y-1/2 z-10 pointer-events-none"
-            >
-              <div className="bg-[#121214]/95 backdrop-blur-xs border border-white/[0.1] px-2.5 py-1.5 rounded shadow-lg text-[10px] space-y-1 min-w-[125px] text-center">
-                <div className="flex items-center justify-between gap-2 border-b border-white/[0.06] pb-0.5">
-                  <span className="text-[#73737c]">DTP/1 Link:</span>
-                  <span className="text-emerald-400 font-medium">TCP Connected</span>
-                </div>
-                <div className="flex items-center justify-between gap-1 text-[9px]">
-                  <span className="text-[#73737c]">Trao/Nhận:</span>
-                  <span className={isTransferringToWorker ? 'text-emerald-400 font-medium' : 'text-amber-400 font-medium'}>
-                    {isTransferringToWorker
-                      ? `PS ➔ W: Trọng số v${currentStep?.outputModelVersion || attempt?.modelVersion || '—'}`
-                      : isUpdating
-                      ? 'PS: Đồng bộ Barrier'
-                      : contrib?.contributionAccepted
-                      ? 'W ➔ PS: Đã nộp Gradient'
-                      : 'W ➔ PS: Đang đẩy Gradient'}
-                  </span>
-                </div>
-              </div>
-            </div>
-          );
-        })}
-
-        {/* PARAMETER SERVER RACK CHASSIS */}
-        <div
-          onClick={onOpenServerDetails}
-          style={{
-            left: `${(serverCoord.x / 1000) * 100}%`,
-            top: `${(serverCoord.y / 580) * 100}%`,
-            width: `${serverCoord.width}px`,
-          }}
-          className="absolute -translate-x-1/2 -translate-y-1/2 z-20 cursor-pointer group transition-transform duration-200 hover:scale-[1.02]"
-          role="button"
-          tabIndex={0}
-          onKeyDown={e => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              onOpenServerDetails?.();
-            }
-          }}
-          aria-label="Inspect Parameter Server details"
-        >
-          <div
-            className={`w-full rounded-lg bg-[#141416] p-3 shadow-2xl border-2 transition-all duration-300 relative ${
-              isStale
-                ? 'border-amber-500/50 shadow-amber-500/10'
-                : isUpdating
-                ? 'border-amber-400 shadow-amber-400/20'
-                : isCommitted || isBroadcasting
-                ? 'border-emerald-500 shadow-emerald-500/20'
-                : 'border-emerald-500 shadow-emerald-500/10'
-            }`}
-          >
-            {/* Left & Right Rack Ears with screw indicators */}
-            <div className="absolute left-1 top-2 bottom-2 w-1 border-r border-zinc-700/60 flex flex-col justify-between py-1" aria-hidden="true">
-              <div className="w-1 h-1 rounded-full bg-zinc-600" />
-              <div className="w-1 h-1 rounded-full bg-zinc-600" />
-            </div>
-            <div className="absolute right-1 top-2 bottom-2 w-1 border-l border-zinc-700/60 flex flex-col justify-between py-1" aria-hidden="true">
-              <div className="w-1 h-1 rounded-full bg-zinc-600" />
-              <div className="w-1 h-1 rounded-full bg-zinc-600" />
-            </div>
-
-            {/* Server Faceplate Header */}
-            <div className="flex items-center justify-between pl-2 pr-2 pb-1.5 mb-1.5 border-b border-white/[0.08]">
-              <div className="flex items-center gap-1.5">
-                <ServerIcon
-                  className={`w-3.5 h-3.5 ${
-                    isUpdating
-                      ? 'text-amber-400'
-                      : isCommitted || isBroadcasting
-                      ? 'text-emerald-400'
-                      : 'text-emerald-400'
-                  }`}
-                  aria-hidden="true"
-                />
-                <span className="text-xs font-bold text-[#f3f3f4] tracking-wide">
-                  Parameter Server
-                </span>
-              </div>
-              <div className="flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" aria-hidden="true" />
-                <span className="text-[10px] font-mono text-[#73737c]">DTP/1</span>
-              </div>
-            </div>
-
-            {/* Server Console Status Panel */}
-            <div className="mx-1 bg-[#09090b] rounded p-2 border border-white/[0.04] space-y-1 font-mono text-[10px]">
-              <div className="flex items-center justify-between">
-                <span className="text-[#73737c]">Barrier:</span>
-                <span
-                  className={`font-semibold ${
-                    isCommitted
-                      ? 'text-emerald-400'
-                      : isUpdating
-                      ? 'text-amber-400'
-                      : 'text-emerald-400'
-                  }`}
-                >
-                  {isStale
-                    ? 'Unknown / Stale'
-                    : preparation.preparing
-                    ? 'Not started'
-                    : attempt?.state !== 'RUNNING'
-                    ? (attempt?.state ?? 'Unknown')
-                    : isBroadcasting
-                    ? 'Broadcasting Weights'
-                    : isSyncComplete
-                    ? 'Barrier Synced'
-                    : isUpdating
-                    ? 'All-Reduce Update'
-                    : acceptedCount != null && expectedCount != null
-                    ? `Syncing: ${acceptedCount}/${expectedCount} Workers`
-                    : 'Awaiting Gradients'}
-                </span>
-              </div>
-              <div className="flex items-center justify-between text-[#73737c]">
-                <span>Step:</span>
-                <span className="text-[#f3f3f4]">
-                  {currentStep ? `#${currentStep.operationId}` : 'Pending'}
-                </span>
-              </div>
-              <div className="flex items-center justify-between text-[#73737c]">
-                <span>Model:</span>
-                <span className="text-emerald-400">
-                  {currentStep?.outputModelVersion
-                    ? `v${currentStep.outputModelVersion}`
-                    : (attempt?.modelVersion || '—')}
-                </span>
-              </div>
-            </div>
-
-            {/* Server LED Drive Status Bar */}
-            <div className="mx-1 mt-2 pt-1.5 border-t border-white/[0.06] flex items-center justify-between text-[9px] text-[#73737c]">
-              <div className="flex items-center gap-1" aria-hidden="true">
-                <span className="w-1 h-1 rounded-full bg-emerald-400" />
-                <span className="w-1 h-1 rounded-full bg-emerald-400" />
-                <span className="w-1 h-1 rounded-full bg-amber-400" />
-              </div>
-              <span className="font-mono">Runtime Coordinator</span>
-            </div>
-          </div>
+      {/* Terminal Body — Dedicated Scroll Area with Auto-Scroll */}
+      <div
+        ref={scrollContainerRef}
+        className="p-3.5 sm:p-4 max-h-[360px] overflow-y-auto space-y-2 text-[11px] sm:text-xs leading-5 select-text"
+        style={{ scrollBehavior: 'smooth' }}
+      >
+        {/* Header line */}
+        <div className="text-zinc-200 font-semibold pb-1 border-b border-white/[0.04]">
+          {headerPrompt}
         </div>
 
-        {/* EMPTY STATE (When 0 workers are observed) */}
-        {observedWorkersCount === 0 && (
-          <div className="absolute left-1/2 bottom-[12%] -translate-x-1/2 z-20 text-center max-w-sm px-4 py-2.5 bg-[#121214]/90 border border-white/[0.08] rounded-lg shadow-xl text-xs space-y-1">
-            <div className="flex items-center justify-center gap-1.5 text-[#a1a1a8] font-medium">
-              <Radio className="w-3.5 h-3.5 text-zinc-500" aria-hidden="true" />
-              <span>0 Worker Sessions Observed</span>
-            </div>
-            <p className="text-[11px] text-[#73737c]">
-              Workers will appear here dynamically as they connect to the Parameter Server via DTP/1.
-            </p>
+        {/* Completed Epochs (No progress bar, full text, no 'Kiểm -') */}
+        {completedEpochLines.map((line) => (
+          <div key={`completed-epoch-${line.epochNum}`} className="text-zinc-300 hover:text-zinc-100 transition-colors">
+            {line.text}
+          </div>
+        ))}
+
+        {/* Current Active Epoch (Rendered directly in the terminal text flow, calm & non-jittery) */}
+        {isRunning && activeEpochNum <= total && (
+          <div className="text-emerald-400 font-medium flex items-center gap-2 flex-wrap">
+            <span>
+              Epoch {formatEpoch(activeEpochNum)}/{totalFormatted}:
+            </span>
+            <span className="font-mono text-[10px] leading-none py-0.5 text-zinc-400 tracking-tight inline-flex items-center">
+              [{progressBar}]
+            </span>
+            <span className="text-emerald-300 font-bold font-mono">
+              {progressPercent}%
+            </span>
+            <span className="text-zinc-600">|</span>
+            <span className="text-zinc-300 font-mono">
+              batch {progressText}
+            </span>
+            {sampleProgress && (
+              <>
+                <span className="text-zinc-600">|</span>
+                <span className="text-zinc-400 font-mono">
+                  mẫu: {sampleProgress}
+                </span>
+              </>
+            )}
+            {currentStepLoss != null && (
+              <>
+                <span className="text-zinc-600">|</span>
+                <span className="text-amber-300 font-mono">
+                  loss = {currentStepLoss}
+                </span>
+              </>
+            )}
+            {stepComputeMs != null && (
+              <>
+                <span className="text-zinc-600">|</span>
+                <span className="text-zinc-400 font-mono">
+                  thời gian bước: {stepComputeMs}ms
+                </span>
+              </>
+            )}
           </div>
         )}
 
-        {/* DYNAMIC WORKER NODES (Stylized Computer Monitors displaying machine parameters on screen) */}
-        {workers.map((worker, idx) => {
-          const coord = workerCoords[idx];
-          if (!coord) return null;
-
-          const isWorkerFailed = worker.state === 'FAILED' || worker.state === 'DISCONNECTED';
-          const isReady = worker.state === 'READY' || worker.state === 'RUNNING';
-          const contrib = contributions.find(c => c.workerId === worker.workerId);
-
-          const monitorBorderClass = isWorkerFailed
-            ? 'border-rose-500 shadow-rose-500/10'
-            : isCommitted || contrib?.contributionAccepted
-            ? 'border-emerald-500 shadow-emerald-500/10'
-            : 'border-amber-400 shadow-amber-400/10';
-
-          const statusColor = isWorkerFailed
-            ? 'text-rose-400'
-            : isCommitted || contrib?.contributionAccepted
-            ? 'text-emerald-400'
-            : 'text-amber-400';
-
-          let statusText = worker.state;
-          if (isBroadcasting) {
-            statusText = 'Receiving Weights';
-          } else if (isCommitted || contrib?.contributionAccepted) {
-            statusText = 'Gradients Pushed';
-          } else if (isCollecting || attempt?.state === 'RUNNING') {
-            statusText = 'Streaming Gradients';
-          } else if (isReady) {
-            statusText = 'Ready to train';
-          }
-
-          const machineName = worker.nodeLabel || `node-${worker.workerId}`;
-
-          return (
-            <div
-              key={worker.sessionId || `worker-monitor-${worker.workerId}`}
-              onClick={() => onSelectWorker?.(worker)}
-              style={{
-                left: `${(coord.x / 1000) * 100}%`,
-                top: `${(coord.y / 580) * 100}%`,
-                width: `${coord.cardWidth}px`,
-              }}
-              className="absolute -translate-x-1/2 -translate-y-1/2 z-20 cursor-pointer group transition-transform duration-200 hover:scale-[1.03]"
-              role="button"
-              tabIndex={0}
-              onKeyDown={e => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  onSelectWorker?.(worker);
-                }
-              }}
-              aria-label={`Inspect Worker ${worker.workerId} on ${machineName}`}
-            >
-              {/* Computer Workstation Monitor Illustration */}
-              <div className="flex flex-col items-center">
-                {/* Monitor Screen Frame */}
-                <div
-                  className={`w-full rounded-lg bg-[#141416] p-2.5 shadow-2xl border-2 transition-all duration-300 ${monitorBorderClass}`}
-                >
-                  {/* Top Bezel: Status dot + Worker ID + Machine Name (Tên máy) */}
-                  <div className="flex items-center justify-between pb-1.5 mb-1.5 border-b border-white/[0.08]">
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <span
-                        className={`w-2 h-2 rounded-full shrink-0 ${
-                          isWorkerFailed
-                            ? 'bg-rose-400'
-                            : isCommitted || contrib?.contributionAccepted
-                            ? 'bg-emerald-400'
-                            : 'bg-amber-400'
-                        }`}
-                        aria-hidden="true"
-                      />
-                      <span className="text-xs font-bold text-[#f3f3f4] group-hover:text-white truncate">
-                        Worker {worker.workerId}
-                      </span>
-                    </div>
-
-                    {/* Machine Name (Tên của máy hiển thị nổi bật) */}
-                    <span
-                      className="text-[10px] font-mono text-[#a1a1a8] truncate max-w-[105px] px-1 py-0.5 rounded bg-white/[0.04]"
-                      title={machineName}
-                    >
-                      {machineName}
-                    </span>
-                  </div>
-
-                  {/* Monitor Screen Internal Display */}
-                  <div className="bg-[#09090b] rounded p-2 border border-white/[0.04] space-y-1 font-mono text-[10px]">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[#73737c]">State:</span>
-                      <span className={`font-semibold ${statusColor}`}>{statusText}</span>
-                    </div>
-                    <div className="flex items-center justify-between text-[#73737c]">
-                      <span>Shard:</span>
-                      <span className="text-[#f3f3f4] truncate max-w-[100px]">
-                        {worker.assignedShard || (worker.shardId != null ? `shard-${worker.shardId}` : 'Ready')}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between text-[#73737c]">
-                      <span>Model:</span>
-                      <span className="text-emerald-400">
-                        {worker.currentModelVersion != null
-                          ? `v${worker.currentModelVersion}`
-                          : worker.localModelVersion != null
-                          ? `v${worker.localModelVersion}`
-                          : '—'}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Monitor Stand Neck & Base */}
-                <div className="w-5 h-2 bg-zinc-700 -mt-px" aria-hidden="true" />
-                <div className="w-16 h-1.5 bg-zinc-600 rounded-sm shadow-md" aria-hidden="true" />
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* FOOTER METRICS SUMMARY BAR */}
-      <div className="bg-[#171719] border border-white/[0.06] rounded p-3 text-xs flex flex-col md:flex-row md:items-center justify-between gap-3">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-[#73737c]">Transmission Protocol:</span>
-          <span className="font-mono text-[#f3f3f4] bg-white/[0.04] px-1.5 py-0.5 rounded border border-white/[0.06]">
-            DTP/1 · Persistent TCP
-          </span>
-          <span className="text-[#73737c]" aria-hidden="true">·</span>
-          <span className="text-[#73737c]">{isStale ? 'Last observed DTP connections:' : 'DTP connected:'}</span>
-          <span className="text-emerald-400 font-medium">
-            {expectedWorkers > 0
-              ? `${preparation.connected}/${expectedWorkers} Workers`
-              : `${preparation.connected} Workers`}
-          </span>
-          {isPartialProjection && (
-            <span className="px-1.5 py-0.2 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20 text-[10px] font-mono">
-              Partial Projection
-            </span>
-          )}
-        </div>
-
-        <div className="flex items-center gap-4 text-xs text-[#a1a1a8] flex-wrap">
-          <div>
-            <span className="text-[#73737c] mr-1.5">Step:</span>
-            <span className="font-mono text-[#f3f3f4]">
-              {currentStep ? `#${currentStep.operationId}` : '—'}
+        {/* Completed Run Message */}
+        {isCompleted && (
+          <div className="text-emerald-400 pt-1 flex items-center gap-1.5 font-semibold">
+            <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+            <span>
+              Quá trình huấn luyện đã hoàn tất thành công. Mô hình đã sẵn sàng.
             </span>
           </div>
-          <div>
-            <span className="text-[#73737c] mr-1.5">Epoch:</span>
-            <span className="font-mono text-[#f3f3f4]">
-              {currentStep?.epoch ?? attempt?.epoch ?? '—'}
+        )}
+
+        {/* Failed / Aborted Run Message */}
+        {isFailed && (
+          <div className="text-rose-400 pt-1 flex items-center gap-1.5 font-semibold">
+            <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+            <span>
+              Quá trình huấn luyện đã kết thúc ({attempt?.state}): {attempt?.failure?.message || 'Tiến trình bị dừng.'}
             </span>
           </div>
-          <div>
-            <span className="text-[#73737c] mr-1.5">Batch Samples:</span>
-            <span className="font-mono text-[#f3f3f4]">
-              {currentStep?.totalSampleCount != null
-                ? `${currentStep.totalSampleCount.toLocaleString()}`
-                : 'Pending'}
+        )}
+
+        {/* Preparing Environment Message */}
+        {isPreparing && (
+          <div className="text-blue-400 pt-1 flex items-center gap-1.5">
+            <Clock className="w-3.5 h-3.5 animate-spin shrink-0" />
+            <span>
+              Khởi tạo giao thức DTP/1: Đang chờ kết nối cụm {expectedWorkers > 0 ? `${preparation.connected}/${expectedWorkers}` : preparation.connected} Workers...
             </span>
           </div>
-          <div>
-            <span className="text-[#73737c] mr-1.5">Model Weights:</span>
-            <span className="font-mono text-emerald-400">
-              {currentStep?.outputModelVersion
-                ? `v${currentStep.outputModelVersion}`
-                : attempt?.modelVersion || 'Pending'}
-            </span>
-          </div>
-        </div>
+        )}
       </div>
     </div>
   );

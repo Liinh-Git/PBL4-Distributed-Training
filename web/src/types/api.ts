@@ -747,6 +747,7 @@ export interface CheckpointListItemData {
   state: CheckpointState;
   model_version: number;
   source_step_id?: number | null;
+  epoch?: number | null;
   created_at: string;
   completed_at?: string | null;
 }

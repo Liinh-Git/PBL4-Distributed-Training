@@ -8,6 +8,7 @@ import { useState, useEffect, useRef, useCallback, useContext } from 'react';
 import { AppContext } from '../context/AppContext';
 import { config } from '../config';
 import { EVENT_WINDOW, mergeRuntimeEvents } from '../utils/runtimeEvents';
+import { loadAttemptBaseline, loadRecentHistory, historyReads, HISTORY_CACHE_MS, isTerminalAttempt } from '../api/attemptHistory';
 import {
   attemptsService,
   workersService,
@@ -48,6 +49,10 @@ export interface UseAttemptStreamResult {
   gapDetected: boolean;
   loading: boolean;
   error: string | null;
+  hasMoreSteps: boolean;
+  loadingMoreSteps: boolean;
+  stepsError: string | null;
+  loadMoreSteps: () => Promise<void>;
   refreshSnapshot: () => Promise<void>;
   requestCheckpoint: (reason?: string) => Promise<void>;
   abortAttempt: (reason?: string) => Promise<void>;
@@ -67,6 +72,15 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
   const [gapDetected, setGapDetected] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [nextStepsCursor, setNextStepsCursor] = useState<string | null>(null);
+  const hasMoreSteps = nextStepsCursor != null;
+  const [loadingMoreSteps, setLoadingMoreSteps] = useState(false);
+  const [stepsError, setStepsError] = useState<string | null>(null);
+  const loadingMoreRef = useRef(false);
+  const stepPageCursorsRef = useRef(new Set<string>());
+  const lifecycleRef = useRef<AbortController | null>(null);
+  const attemptRef = useRef(attempt);
+  attemptRef.current = attempt;
 
   // Sync live stale/gap indicators into AppContext
   useEffect(() => {
@@ -113,16 +127,19 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
   const refreshSnapshot = useCallback(async () => {
     if (!attemptId) return;
     if (refreshInFlightRef.current) return refreshInFlightRef.current;
+    const signal = lifecycleRef.current?.signal;
+    const newestKnownStep = stepsRef.current[0]?.step_id ?? 0;
+    historyReads.invalidate(`baseline:${attemptId}`);
     const requestedAtSeq = lastSeqRef.current;
     const requestedAtSnapshot = snapshotRevisionRef.current;
     const request = (async () => {
       try {
         const [snapRes, workersRes, stepsRes] = await Promise.allSettled([
-          attemptsService.getSnapshot(attemptId),
-          workersService.listWorkers(attemptId),
-          stepsService.listAllSteps(attemptId, stepsRef.current[0]?.step_id ?? 0),
+          attemptsService.getSnapshot(attemptId, { signal }),
+          workersService.listWorkers(attemptId, { signal }),
+          stepsService.listStepUpdates(attemptId, newestKnownStep, { signal }),
         ]);
-        if (!isMountedRef.current || currentAttemptRef.current !== attemptId) return;
+        if (signal?.aborted || !isMountedRef.current || currentAttemptRef.current !== attemptId) return;
 
         if (snapRes.status === 'fulfilled' && requestedAtSnapshot === snapshotRevisionRef.current) {
           const snap = snapRes.value.data;
@@ -154,6 +171,10 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
         }
 
         if (stepsRes.status === 'fulfilled') {
+          setStepsError(null);
+          if (!newestKnownStep) {
+            setNextStepsCursor(stepsRes.value.page?.next_cursor ?? null);
+          }
           setSteps(prev => {
             const merged = new Map<number, LiveStep>(prev.map(step => [step.step_id, step]));
             for (const step of stepsRes.value.data || []) {
@@ -164,7 +185,7 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
             }
             return [...merged.values()].sort((a, b) => b.step_id - a.step_id);
           });
-        }
+        } else setStepsError('Không thể tải các step mới. Hãy thử làm mới.');
       } catch (err: any) {
         // Degraded state notification
         if (isMountedRef.current && currentAttemptRef.current === attemptId) setIsStale(true);
@@ -175,6 +196,50 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
       if (refreshInFlightRef.current === request) refreshInFlightRef.current = null;
     }
   }, [attemptId]);
+
+  const loadMoreSteps = useCallback(async () => {
+    if (!attemptId || loadingMoreRef.current) return;
+    const cursor = nextStepsCursor;
+    if (!cursor) return;
+    const signal = lifecycleRef.current?.signal;
+    const requestedAtSeq = lastSeqRef.current;
+    loadingMoreRef.current = true;
+    setLoadingMoreSteps(true);
+    setStepsError(null);
+    try {
+      const page = await historyReads.read(`steps:${attemptId}:${cursor}`,
+        sharedSignal => stepsService.listSteps(attemptId, { limit: 200, cursor }, { signal: sharedSignal }),
+        signal, isTerminalAttempt(attemptRef.current?.state) ? HISTORY_CACHE_MS : 0);
+      if (signal?.aborted || !isMountedRef.current || currentAttemptRef.current !== attemptId) return;
+      if (page.page?.next_cursor === cursor || (page.page?.next_cursor && stepPageCursorsRef.current.has(page.page.next_cursor))) {
+        throw new Error('Repeated steps pagination cursor');
+      }
+      setSteps(previous => {
+        const merged = new Map<number, LiveStep>(previous.map(step => [step.step_id, step]));
+        for (const step of page.data) {
+          const known = merged.get(step.step_id);
+          if (!known || lastSeqRef.current <= requestedAtSeq) merged.set(step.step_id, { ...known, ...step });
+        }
+        return [...merged.values()].sort((a, b) => b.step_id - a.step_id);
+      });
+      stepPageCursorsRef.current.add(cursor);
+      setNextStepsCursor(page.page?.next_cursor ?? null);
+    } catch {
+      if (!signal?.aborted && currentAttemptRef.current === attemptId) setStepsError('Không thể tải đầy đủ lịch sử. Hãy thử lại.');
+    } finally {
+      if (!signal?.aborted && currentAttemptRef.current === attemptId) {
+        loadingMoreRef.current = false;
+        setLoadingMoreSteps(false);
+      }
+    }
+  }, [attemptId, nextStepsCursor]);
+
+  // Show the baseline first, then read older pages one at a time in the background.
+  useEffect(() => {
+    if (!attemptId || loading || loadingMoreSteps || stepsError || !nextStepsCursor) return;
+    const timer = setTimeout(() => { void loadMoreSteps(); }, 150);
+    return () => clearTimeout(timer);
+  }, [attemptId, loading, loadingMoreSteps, stepsError, nextStepsCursor, loadMoreSteps]);
 
   // Keep fresh ref to avoid stale closures in WebSocket event callbacks
   const refreshSnapshotRef = useRef(refreshSnapshot);
@@ -197,34 +262,15 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
   /**
    * Initialize REST baseline data on attempt mount
    */
-  const loadInitialRestState = useCallback(async () => {
+  const loadInitialRestState = useCallback(async (signal: AbortSignal) => {
     if (!attemptId) return;
     try {
       setLoading(true);
       setError(null);
 
-      const snapshotRequest = attemptsService.getSnapshot(attemptId);
-      const recentEventsRequest = snapshotRequest.then(async response => {
-        let cursor = Math.max(0, (response.data.runtime_event_seq ?? 0) - EVENT_WINDOW);
-        let rows: RuntimeEventItemData[] = [];
-        while (true) {
-          const page = await attemptsService.getCatchUpEvents(attemptId, { after_seq: cursor, limit: 200 });
-          rows = mergeRuntimeEvents(rows, page.data);
-          const next = page.data.at(-1)?.runtime_event_seq;
-          if (next == null || next <= cursor || page.meta.complete || page.data.length < 200) return { data: rows };
-          cursor = next;
-          if (cursor >= (response.data.runtime_event_seq ?? 0)) return { data: rows };
-        }
-      });
-      const [attemptRes, snapRes, workersRes, stepsRes, eventsRes] =
-        await Promise.allSettled([
-          attemptsService.getAttempt(attemptId),
-          snapshotRequest,
-          workersService.listWorkers(attemptId),
-          stepsService.listAllSteps(attemptId),
-          recentEventsRequest,
-        ]);
-      if (!isMountedRef.current || currentAttemptRef.current !== attemptId) return;
+      const [attemptRes, snapRes, workersRes, stepsRes] =
+        await loadAttemptBaseline(attemptId, signal);
+      if (signal.aborted || !isMountedRef.current || currentAttemptRef.current !== attemptId) return;
 
       if (attemptRes.status === 'fulfilled') {
         setAttempt(attemptRes.value.data);
@@ -247,18 +293,26 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
 
       if (stepsRes.status === 'fulfilled') {
         setSteps(stepsRes.value.data || []);
-      }
+        setNextStepsCursor(stepsRes.value.page?.next_cursor ?? null);
+      } else setStepsError('Không thể tải lịch sử step. Hãy thử làm mới.');
 
-      if (eventsRes.status === 'fulfilled') {
-        const evts = eventsRes.value.data || [];
-        setEvents(mergeRuntimeEvents([], evts));
+      if (snapRes.status === 'fulfilled') {
+        void loadRecentHistory(attemptId, snapRes.value.data.runtime_event_seq ?? 0,
+          signal, isTerminalAttempt(attemptRes.value.data.state)).then(rows => {
+          if (!signal.aborted && isMountedRef.current && currentAttemptRef.current === attemptId) {
+            setEvents(previous => mergeRuntimeEvents(previous, rows));
+          }
+        }).catch(() => {});
       }
+      return !(isTerminalAttempt(attemptRes.value.data.state)
+        && snapRes.status === 'fulfilled' && !snapRes.value.data.stale
+        && snapRes.value.data.state === attemptRes.value.data.state);
     } catch (err: any) {
-      if (isMountedRef.current && currentAttemptRef.current === attemptId) {
+      if (!signal.aborted && isMountedRef.current && currentAttemptRef.current === attemptId) {
         setError(err?.message || `Failed to load attempt ${attemptId}`);
       }
     } finally {
-      if (isMountedRef.current && currentAttemptRef.current === attemptId) setLoading(false);
+      if (!signal.aborted && isMountedRef.current && currentAttemptRef.current === attemptId) setLoading(false);
     }
   }, [attemptId]);
 
@@ -531,6 +585,8 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
 
   // Main lifecycle effect
   useEffect(() => {
+    const controller = new AbortController();
+    lifecycleRef.current = controller;
     isMountedRef.current = true;
     snapshotRevisionRef.current += 1;
     lastSeqRef.current = 0;
@@ -538,6 +594,11 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
     pendingEventsRef.current = [];
     refreshInFlightRef.current = null;
     reconnectAttemptsRef.current = 0;
+    setNextStepsCursor(null);
+    loadingMoreRef.current = false;
+    stepPageCursorsRef.current.clear();
+    setLoadingMoreSteps(false);
+    setStepsError(null);
 
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
@@ -552,8 +613,9 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
       setEvents([]);
       setIsStale(false);
       setGapDetected(false);
-      loadInitialRestState().then(() => {
-        if (isMountedRef.current && currentAttemptRef.current === attemptId) {
+      setConnectionState('IDLE');
+      loadInitialRestState(controller.signal).then(shouldConnect => {
+        if (shouldConnect !== false && !controller.signal.aborted && isMountedRef.current && currentAttemptRef.current === attemptId) {
           connectWebSocket();
         }
       });
@@ -572,6 +634,7 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
     }
 
     return () => {
+      controller.abort();
       isMountedRef.current = false;
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
@@ -621,6 +684,10 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
     gapDetected,
     loading,
     error,
+    hasMoreSteps,
+    loadingMoreSteps,
+    stepsError,
+    loadMoreSteps,
     refreshSnapshot,
     requestCheckpoint: requestCheckpointAction,
     abortAttempt: abortAttemptAction,

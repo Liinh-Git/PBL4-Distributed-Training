@@ -3,6 +3,7 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard,
   Activity,
+  History,
   Briefcase,
   Database,
   Save,
@@ -55,40 +56,45 @@ export const Sidebar: React.FC = () => {
       label: null,
       items: [
         {
-          name: 'Overview',
+          name: 'Tổng quan',
           path: '/',
           icon: LayoutDashboard,
         },
       ],
     },
     {
-      label: 'Training',
+      label: 'Huấn luyện',
       items: [
         {
-          name: 'Live Training',
+          name: 'Huấn luyện Trực tiếp',
           path: '/live',
           icon: Activity,
           activeIndicator: hasRunningAttempt,
         },
         {
-          name: 'Jobs',
+          name: 'Lịch sử Huấn luyện',
+          path: '/runs',
+          icon: History,
+        },
+        {
+          name: 'Nhiệm vụ',
           path: '/jobs',
           icon: Briefcase,
         },
       ],
     },
     {
-      label: 'Data',
+      label: 'Dữ liệu',
       items: [
         {
-          name: 'Datasets',
+          name: 'Tập dữ liệu',
           path: '/datasets',
           icon: Database,
         },
       ],
     },
     {
-      label: 'Recovery',
+      label: 'Khôi phục',
       items: [
         {
           name: 'Checkpoints',
@@ -98,10 +104,10 @@ export const Sidebar: React.FC = () => {
       ],
     },
     {
-      label: 'System',
+      label: 'Hệ thống',
       items: [
         {
-          name: 'System',
+          name: 'Hệ thống',
           path: '/system',
           icon: Server,
         },
@@ -121,7 +127,7 @@ export const Sidebar: React.FC = () => {
           <>
             <div className="flex items-center gap-2 overflow-hidden pl-1">
               <span className="text-xs font-semibold text-[#f3f3f4] tracking-tight truncate">
-                Training Console
+                Console Training
               </span>
             </div>
             <button
@@ -216,16 +222,16 @@ export const Sidebar: React.FC = () => {
         ))}
       </div>
 
-      {/* Footer: Subtle Backend Connection Status */}
+      {/* Application identity; connection state is reported by the System view. */}
       <div className="px-3.5 py-2.5 border-t border-white/[0.14] bg-[#0d0d0f] text-xs text-[#73737c] flex items-center justify-between">
         {!isCollapsed ? (
           <div className="flex items-center gap-2">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-            <span className="text-[#a1a1a8] text-xs">Connected</span>
+            <span className="w-1.5 h-1.5 rounded-full bg-[#73737c]" />
+            <span className="text-[#a1a1a8] text-xs">Console quản trị</span>
           </div>
         ) : (
-          <div className="w-full flex items-center justify-center" title="Backend: Connected">
-            <span className="w-2 h-2 rounded-full bg-emerald-400" />
+          <div className="w-full flex items-center justify-center" title="Console quản trị">
+            <span className="w-2 h-2 rounded-full bg-[#73737c]" />
           </div>
         )}
       </div>

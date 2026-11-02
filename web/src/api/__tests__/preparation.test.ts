@@ -84,9 +84,11 @@ test('slow REST at cursor zero cannot replace newer WebSocket preparation data',
   const revision = { current: 0 };
   const refresh = callback('refreshSnapshot', {
     attemptId: 'attempt', refreshInFlightRef: { current: null }, lastSeqRef: { current: 0 }, snapshotRevisionRef: revision,
+    lifecycleRef: { current: null }, historyReads: { invalidate: () => {} },
     isMountedRef: { current: true }, currentAttemptRef: { current: 'attempt' }, stepsRef: { current: [] },
     attemptsService: { getSnapshot: () => pending }, workersService: { listWorkers: () => pending },
-    stepsService: { listAllSteps: async () => ({ data: [] }) },
+    stepsService: { listStepUpdates: async () => ({ data: [] }) },
+    setStepsError: () => {}, setNextStepsCursor: () => {},
     setSnapshot: () => assert.fail('old snapshot overwrote live snapshot'),
     setWorkers: () => assert.fail('old workers overwrote live workers'),
     setIsStale: () => {}, setAttempt: () => {}, setSteps: () => {},

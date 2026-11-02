@@ -215,3 +215,23 @@ closure before replacement. Abort-aware provisioning waits cannot report ready
 after abort. Terminal snapshots remain available until the next runner starts.
 WebSocket events/snapshots apply in order, including same-cursor preparation
 snapshots; ordinary REST refresh never advances the applied event cursor.
+
+Frontend history reads remain inside WebUI: shared GETs retain subscriber-local
+cancellation and do not share mutations. An Attempt baseline reads at most one
+200-step page, renders before diagnostic history, then loads older pages in the
+background with independent epoch/event cursors. History cache is bounded to
+24 entries with a 60-second TTL; terminal baselines require successful requests
+and a fresh matching-state snapshot. Active/stale/error baselines are not reused
+as fresh data. Disposal prevents old responses from updating the current Attempt;
+page failure preserves rows/cursor for retry. Chart selection follows step identity
+as pages arrive, without sampling away metrics or changing Backend API semantics.
+
+WebUI navigation separates frozen Job configuration (/jobs), execution history
+(/runs) and the active Attempt (/live); legacy training list URLs redirect to
+the corresponding resources. Job READY and Attempt execution state remain
+separate projections. Run metadata resolves Dataset through the Job's pinned
+Build, never by selecting an arbitrary catalogue entry. Run-list counts/filters
+are scoped to loaded records, with cursor pagination/retry and explicit unknowns
+for absent or inconsistent metadata. The checkpoint list projects nullable epoch
+from the existing recovery cursor, preserving zero; no persisted schema changes
+are needed for this presentation field.

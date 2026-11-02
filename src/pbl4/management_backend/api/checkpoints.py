@@ -26,6 +26,19 @@ router = APIRouter(tags=["Checkpoints"])
 
 
 def _row_to_list_item(row: dict) -> CheckpointListItem:
+    epoch_val = row.get("epoch")
+    if epoch_val is None:
+        rc = row.get("recovery_cursor_jsonb")
+        if isinstance(rc, str):
+            try:
+                import json
+
+                rc = json.loads(rc)
+            except Exception:
+                rc = {}
+        if isinstance(rc, dict):
+            epoch_val = rc.get("epoch")
+
     return CheckpointListItem(
         checkpoint_id=row["checkpoint_id"],
         job_id=row.get("job_id", ""),
@@ -33,6 +46,7 @@ def _row_to_list_item(row: dict) -> CheckpointListItem:
         state=row["state"],
         model_version=row["model_version"],
         source_step_id=row.get("source_step_id"),
+        epoch=epoch_val,
         created_at=row["created_at"],
         completed_at=row.get("completed_at"),
     )

@@ -70,7 +70,7 @@ export const RawContractDrawer: React.FC<RawContractDrawerProps> = ({
     >
       <div className="space-y-6 font-sans">
         {/* Toggle Switch */}
-        <div className="flex items-center gap-1 p-1 bg-[#171719] rounded-lg border border-white/[0.04] text-xs">
+        <div className="flex items-center gap-1 p-1 bg-[#171719] rounded border border-white/[0.04] text-xs">
           <button
             type="button"
             onClick={() => setActiveTab('summary')}
@@ -99,7 +99,7 @@ export const RawContractDrawer: React.FC<RawContractDrawerProps> = ({
         {activeTab === 'summary' && (
           <div className="space-y-5">
             {/* Section 1: Dataset */}
-            <div className="bg-[#171719] border border-white/[0.04] rounded-lg p-4 space-y-3">
+            <div className="bg-[#171719] border border-white/[0.04] rounded p-4 space-y-3">
               <div className="flex items-center gap-2 text-xs font-semibold text-[#f3f3f4]">
                 <Database className="w-3.5 h-3.5 text-blue-400" />
                 <span>Dataset</span>
@@ -126,7 +126,7 @@ export const RawContractDrawer: React.FC<RawContractDrawerProps> = ({
             </div>
 
             {/* Section 2: Model */}
-            <div className="bg-[#171719] border border-white/[0.04] rounded-lg p-4 space-y-3">
+            <div className="bg-[#171719] border border-white/[0.04] rounded p-4 space-y-3">
               <div className="flex items-center gap-2 text-xs font-semibold text-[#f3f3f4]">
                 <Cpu className="w-3.5 h-3.5 text-blue-400" />
                 <span>Model Architecture</span>
@@ -141,7 +141,7 @@ export const RawContractDrawer: React.FC<RawContractDrawerProps> = ({
             </div>
 
             {/* Section 3: Training Hyperparameters */}
-            <div className="bg-[#171719] border border-white/[0.04] rounded-lg p-4 space-y-3">
+            <div className="bg-[#171719] border border-white/[0.04] rounded p-4 space-y-3">
               <div className="flex items-center gap-2 text-xs font-semibold text-[#f3f3f4]">
                 <Activity className="w-3.5 h-3.5 text-emerald-400" />
                 <span>Training Parameters</span>
@@ -159,7 +159,7 @@ export const RawContractDrawer: React.FC<RawContractDrawerProps> = ({
             </div>
 
             {/* Section 4: Distributed Training */}
-            <div className="bg-[#171719] border border-white/[0.04] rounded-lg p-4 space-y-3">
+            <div className="bg-[#171719] border border-white/[0.04] rounded p-4 space-y-3">
               <div className="flex items-center gap-2 text-xs font-semibold text-[#f3f3f4]">
                 <ShieldCheck className="w-3.5 h-3.5 text-blue-400" />
                 <span>Distributed Training</span>
@@ -174,7 +174,7 @@ export const RawContractDrawer: React.FC<RawContractDrawerProps> = ({
             </div>
 
             {/* Section 5: Checkpoint Durability */}
-            <div className="bg-[#171719] border border-white/[0.04] rounded-lg p-4 space-y-3">
+            <div className="bg-[#171719] border border-white/[0.04] rounded p-4 space-y-3">
               <div className="flex items-center gap-2 text-xs font-semibold text-[#f3f3f4]">
                 <Save className="w-3.5 h-3.5 text-amber-400" />
                 <span>Checkpoint Policy</span>
@@ -189,7 +189,7 @@ export const RawContractDrawer: React.FC<RawContractDrawerProps> = ({
             </div>
 
             {/* Section 6: Technical Details (Default Collapsed) */}
-            <div className="bg-[#141417] border border-white/[0.04] rounded-lg overflow-hidden">
+            <div className="bg-[#141417] border border-white/[0.04] rounded overflow-hidden">
               <button
                 type="button"
                 onClick={() => setIsTechnicalExpanded(!isTechnicalExpanded)}
@@ -229,7 +229,7 @@ export const RawContractDrawer: React.FC<RawContractDrawerProps> = ({
 
         {/* VIEW 2: RAW JSON (Available on request) */}
         {activeTab === 'raw' && (
-          <div className="bg-[#171719] p-4 rounded-lg border border-white/[0.04] font-mono text-xs text-[#a1a1a8] overflow-x-auto leading-relaxed">
+          <div className="bg-[#171719] p-4 rounded border border-white/[0.04] font-mono text-xs text-[#a1a1a8] overflow-x-auto leading-relaxed">
             <pre className="text-[11px]">{jsonString}</pre>
           </div>
         )}

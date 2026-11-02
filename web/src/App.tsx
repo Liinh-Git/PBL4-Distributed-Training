@@ -5,6 +5,7 @@ import { AppLayout } from './components/layout/AppLayout';
 
 import { OverviewPage } from './pages/OverviewPage';
 import { LiveTrainingPage } from './pages/LiveTrainingPage';
+import { TrainingRunsPage } from './pages/TrainingRunsPage';
 import { JobsPage } from './pages/JobsPage';
 import { JobDetailPage } from './pages/JobDetailPage';
 import { NewTrainingFlowPage } from './pages/NewTrainingFlowPage';
@@ -24,6 +25,9 @@ export default function App() {
           <Route path="/" element={<AppLayout />}>
             <Route index element={<OverviewPage />} />
             <Route path="live" element={<LiveTrainingPage />} />
+            <Route path="runs" element={<TrainingRunsPage />} />
+            <Route path="training" element={<Navigate to="/jobs" replace />} />
+            <Route path="training/runs" element={<Navigate to="/runs" replace />} />
             <Route path="training/new" element={<NewTrainingFlowPage />} />
             <Route path="training/:jobId/edit" element={<NewTrainingFlowPage />} />
             <Route path="jobs" element={<JobsPage />} />

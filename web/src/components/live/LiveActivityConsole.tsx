@@ -32,12 +32,34 @@ export const LiveActivityConsole: React.FC<LiveActivityConsoleProps> = ({
   className,
 }) => {
   const [selectedCategory, setSelectedCategory] = useState<EventCategory>('all');
+  const [filterRoutineSteps, setFilterRoutineSteps] = useState<boolean>(true);
   const [autoFollow, setAutoFollow] = useState<boolean>(true);
   const [isScrolledUp, setIsScrolledUp] = useState<boolean>(false);
   const [clearedEventIds, setClearedEventIds] = useState<Set<string>>(new Set());
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const isAutoScrollingRef = useRef<boolean>(false);
+
+  // Check if an event is a high-frequency micro-step (routine step started/committed, parameter applied, model updated)
+  const isMicroStepEvent = (evt: any) => {
+    const rawType = String(evt.event || evt.eventType || evt.event_type || '').toLowerCase();
+    const normalized = rawType.replace(/[\._\-]/g, '');
+    return (
+      normalized.includes('stepstarted') ||
+      normalized.includes('stepcommitted') ||
+      normalized.includes('stepcompleted') ||
+      normalized.includes('gradientcontribution') ||
+      normalized.includes('contributionaccepted') ||
+      normalized.includes('parameterapplied') ||
+      normalized.includes('parametersapplied') ||
+      normalized.includes('modelupdated') ||
+      normalized.includes('workercompute')
+    );
+  };
+
+  const microStepCount = useMemo(() => {
+    return (events || []).filter(isMicroStepEvent).length;
+  }, [events]);
 
   // Filter events client-side
   const visibleEvents = useMemo(() => {
@@ -46,13 +68,17 @@ export const LiveActivityConsole: React.FC<LiveActivityConsoleProps> = ({
       if (clearedEventIds.has(evt.id)) {
         return false;
       }
+      // Smart projection: Hide repetitive micro-steps when filtering is active
+      if (filterRoutineSteps && isMicroStepEvent(evt)) {
+        return false;
+      }
       if (selectedCategory === 'all') return true;
       const formatted = formatDiagnosticEvent(evt);
       return formatted.category === selectedCategory;
     });
     // Cap visible items to the latest 200 to prevent DOM thrashing during long runs
     return filtered.length > 200 ? filtered.slice(filtered.length - 200) : filtered;
-  }, [events, selectedCategory, clearedEventIds]);
+  }, [events, selectedCategory, clearedEventIds, filterRoutineSteps]);
 
   // Counts for filter pills
   const counts = useMemo(() => {
@@ -62,6 +88,7 @@ export const LiveActivityConsole: React.FC<LiveActivityConsoleProps> = ({
     let warnings = 0;
 
     (events || []).forEach(evt => {
+      if (filterRoutineSteps && isMicroStepEvent(evt)) return;
       const { category } = formatDiagnosticEvent(evt);
       if (category === 'training') training++;
       else if (category === 'workers') workers++;
@@ -69,8 +96,9 @@ export const LiveActivityConsole: React.FC<LiveActivityConsoleProps> = ({
       else if (category === 'warnings') warnings++;
     });
 
-    return { all: (events || []).length, training, workers, checkpoints, warnings };
-  }, [events]);
+    const total = training + workers + checkpoints + warnings;
+    return { all: total, training, workers, checkpoints, warnings };
+  }, [events, filterRoutineSteps]);
 
   // Handle scroll detection to toggle auto-follow
   const handleScroll = () => {
@@ -206,6 +234,31 @@ export const LiveActivityConsole: React.FC<LiveActivityConsoleProps> = ({
               );
             })}
           </div>
+
+          <div className="h-3.5 w-px bg-white/[0.07] hidden sm:block" />
+
+          {/* Smart Milestone Projection Toggle */}
+          <button
+            type="button"
+            onClick={() => setFilterRoutineSteps(!filterRoutineSteps)}
+            className={`px-2 py-0.5 rounded text-[11px] transition-colors flex items-center gap-1 border ${
+              filterRoutineSteps
+                ? 'bg-blue-500/10 text-blue-400 border-blue-500/20 hover:bg-blue-500/20'
+                : 'bg-[#171719] text-[#73737c] border-white/[0.07] hover:text-[#f3f3f4]'
+            }`}
+            title={
+              filterRoutineSteps
+                ? 'Đang lọc các sự kiện quan trọng (Ẩn bớt step micro-events). Bấm để xem tất cả.'
+                : 'Đang hiện toàn bộ sự kiện bao gồm micro-steps. Bấm để ẩn bớt.'
+            }
+          >
+            <span>{filterRoutineSteps ? '✦ Sự kiện quan trọng' : 'Toàn bộ sự kiện'}</span>
+            {filterRoutineSteps && microStepCount > 0 && (
+              <span className="text-[10px] text-blue-400/80">
+                (-{microStepCount})
+              </span>
+            )}
+          </button>
         </div>
 
         {/* Right: Controls (Auto-follow toggle, Clear view) */}

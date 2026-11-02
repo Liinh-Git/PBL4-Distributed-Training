@@ -1,36 +1,27 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   RotateCcw,
   Search,
   RefreshCw,
   AlertCircle,
-  CheckCircle2,
-  Layers,
+  ChevronRight,
 } from 'lucide-react';
 import { CheckpointStateBadge } from '../components/common/Badge';
-import { CheckpointDetailDrawer } from '../components/drawers/CheckpointDetailDrawer';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
-import { CopyableId } from '../components/common/CopyableId';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { attemptsService, checkpointsService, jobsService } from '../api';
 import { CheckpointListItemData } from '../types/api';
+import { formatDateTime } from '../utils/date';
 
 function formatTimestamp(isoString?: string | null): string {
-  if (!isoString) return '—';
-  try {
-    const d = new Date(isoString);
-    if (isNaN(d.getTime())) return isoString;
-    return d.toLocaleString(undefined, {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    });
-  } catch {
-    return isoString;
-  }
+  return formatDateTime(isoString);
+}
+
+interface JobCheckpointGroup {
+  jobId: string;
+  jobName: string;
+  latestCheckpoint: CheckpointListItemData;
+  allCheckpoints: CheckpointListItemData[];
 }
 
 export const CheckpointsPage: React.FC = () => {
@@ -43,10 +34,21 @@ export const CheckpointsPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
 
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedCheckpoint, setSelectedCheckpoint] = useState<CheckpointListItemData | null>(null);
   const [checkpointToResume, setCheckpointToResume] = useState<CheckpointListItemData | null>(null);
   const [resuming, setResuming] = useState(false);
+  const [jobNames, setJobNames] = useState<Record<string, string>>({});
+  const [expandedJobIds, setExpandedJobIds] = useState<Set<string>>(new Set());
   const resumingRef = useRef(false);
+
+  useEffect(() => {
+    jobsService.listJobs({ limit: 100 }).then(res => {
+      const map: Record<string, string> = {};
+      res.data?.forEach(j => {
+        map[j.job_id] = j.display_name;
+      });
+      setJobNames(map);
+    }).catch(() => {});
+  }, []);
 
   const fetchCheckpoints = async (cursor?: string | null, append = false) => {
     try {
@@ -67,7 +69,7 @@ export const CheckpointsPage: React.FC = () => {
       });
       setNextCursor(res.page?.next_cursor || null);
     } catch (err: any) {
-      setError(err?.message || 'Failed to load checkpoints');
+      setError(err?.message || 'Không thể tải danh sách checkpoint');
     } finally {
       setLoading(false);
       setLoadingMore(false);
@@ -78,21 +80,70 @@ export const CheckpointsPage: React.FC = () => {
     fetchCheckpoints();
   }, []);
 
-  const filteredCheckpoints = checkpoints.filter(cp => {
+  const filteredCheckpoints = useMemo(() => {
     const query = searchQuery.toLowerCase().trim();
-    if (!query) return true;
-    return (
-      cp.checkpoint_id.toLowerCase().includes(query) ||
-      cp.job_id.toLowerCase().includes(query) ||
-      cp.created_by_attempt_id.toLowerCase().includes(query) ||
-      cp.state.toLowerCase().includes(query) ||
-      String(cp.model_version).includes(query) ||
-      (cp.source_step_id != null && String(cp.source_step_id).includes(query))
-    );
-  });
+    if (!query) return checkpoints;
+    return checkpoints.filter(cp => {
+      const jName = (jobNames[cp.job_id] || '').toLowerCase();
+      return (
+        cp.checkpoint_id.toLowerCase().includes(query) ||
+        cp.job_id.toLowerCase().includes(query) ||
+        jName.includes(query) ||
+        cp.created_by_attempt_id.toLowerCase().includes(query) ||
+        cp.state.toLowerCase().includes(query) ||
+        (cp.epoch != null && `epoch ${cp.epoch}`.includes(query)) ||
+        (cp.epoch != null && String(cp.epoch).includes(query))
+      );
+    });
+  }, [checkpoints, searchQuery, jobNames]);
 
-  // Latest usable checkpoint MUST strictly have state === 'COMPLETE'
-  const latestUsableCheckpoint = checkpoints.find(cp => cp.state === 'COMPLETE') || null;
+  // Group checkpoints by job_id, sorted latest first
+  const jobGroups = useMemo(() => {
+    const map = new Map<string, CheckpointListItemData[]>();
+    for (const cp of filteredCheckpoints) {
+      const list = map.get(cp.job_id);
+      if (!list) {
+        map.set(cp.job_id, [cp]);
+      } else {
+        list.push(cp);
+      }
+    }
+
+    const groups: JobCheckpointGroup[] = [];
+    for (const [jobId, list] of map.entries()) {
+      list.sort((a, b) => {
+        const timeA = new Date(a.completed_at || a.created_at).getTime();
+        const timeB = new Date(b.completed_at || b.created_at).getTime();
+        return timeB - timeA;
+      });
+      groups.push({
+        jobId,
+        jobName: jobNames[jobId] || jobId,
+        latestCheckpoint: list[0],
+        allCheckpoints: list,
+      });
+    }
+
+    groups.sort((a, b) => {
+      const timeA = new Date(a.latestCheckpoint.completed_at || a.latestCheckpoint.created_at).getTime();
+      const timeB = new Date(b.latestCheckpoint.completed_at || b.latestCheckpoint.created_at).getTime();
+      return timeB - timeA;
+    });
+
+    return groups;
+  }, [filteredCheckpoints, jobNames]);
+
+  const toggleJobExpand = (jobId: string) => {
+    setExpandedJobIds(prev => {
+      const next = new Set(prev);
+      if (next.has(jobId)) {
+        next.delete(jobId);
+      } else {
+        next.add(jobId);
+      }
+      return next;
+    });
+  };
 
   const handleConfirmResume = async () => {
     if (resumingRef.current || !checkpointToResume || !checkpointToResume.job_id || checkpointToResume.state !== 'COMPLETE') {
@@ -108,7 +159,7 @@ export const CheckpointsPage: React.FC = () => {
       setCheckpointToResume(null);
       navigate(`/live?attempt_id=${encodeURIComponent(response.data.attempt_id)}`);
     } catch (err: any) {
-      alert(`Failed to resume from checkpoint: ${err?.message || 'Unknown error'}`);
+      alert(`Không thể tiếp tục từ checkpoint: ${err?.message || 'Lỗi không xác định'}`);
     } finally {
       resumingRef.current = false;
       setResuming(false);
@@ -116,22 +167,22 @@ export const CheckpointsPage: React.FC = () => {
   };
 
   return (
-    <div className="space-y-4 w-full pb-10">
+    <div className="space-y-4 w-full pb-10 font-sans select-none">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-white/[0.07]">
         <div>
           <div className="flex items-center gap-2">
             <h1 className="text-base font-semibold text-[#f3f3f4]">
-              Saved Checkpoints
+              Danh sách Checkpoints đã lưu
             </h1>
             {loading && (
-              <span className="text-[11px] text-blue-400 animate-pulse">
-                Loading API...
+              <span className="text-[11px] text-blue-400 font-mono animate-pulse">
+                Đang tải...
               </span>
             )}
           </div>
           <p className="text-xs text-[#73737c] mt-0.5">
-            Verified model parameter snapshots, recovery cursors, and cryptographic manifests.
+            Ảnh chụp nhanh tham số mô hình đã xác thực, con trỏ phục hồi và chứng chỉ toàn vẹn.
           </p>
         </div>
 
@@ -140,10 +191,10 @@ export const CheckpointsPage: React.FC = () => {
           onClick={() => fetchCheckpoints()}
           disabled={loading}
           className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-[#121214] border border-white/[0.07] hover:bg-[#171719] text-[#73737c] hover:text-[#f3f3f4] text-xs font-medium transition-colors self-start sm:self-auto disabled:opacity-50"
-          title="Refresh checkpoints"
+          title="Làm mới danh sách"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-          <span>Refresh</span>
+          <span>Làm mới</span>
         </button>
       </div>
 
@@ -159,60 +210,10 @@ export const CheckpointsPage: React.FC = () => {
             onClick={() => fetchCheckpoints()}
             className="px-2 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 text-xs transition-colors"
           >
-            Retry
+            Thử lại
           </button>
         </div>
       )}
-
-      {/* High-level Recovery Status Banner */}
-      {latestUsableCheckpoint ? (
-        <div className="bg-[#121214] border border-white/[0.07] rounded p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="space-y-0.5 text-xs">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-[#73737c]">Latest usable checkpoint:</span>
-              <span className="font-semibold text-[#f3f3f4]">
-                {latestUsableCheckpoint.source_step_id != null
-                  ? `Step #${latestUsableCheckpoint.source_step_id}`
-                  : latestUsableCheckpoint.model_version != null
-                  ? `Model v${latestUsableCheckpoint.model_version}`
-                  : `Checkpoint ${latestUsableCheckpoint.checkpoint_id.slice(0, 8)}`}
-              </span>
-              {latestUsableCheckpoint.model_version != null && (
-                <span className="text-emerald-400">
-                  (v{latestUsableCheckpoint.model_version})
-                </span>
-              )}
-              <span className="text-[#73737c]">·</span>
-              <span className="text-[#a1a1a8]">
-                Job: {latestUsableCheckpoint.job_id}
-              </span>
-            </div>
-            <p className="text-[11px] text-[#73737c] flex items-center gap-1.5">
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-              <span>
-                Verified complete · Completed at{' '}
-                {formatTimestamp(latestUsableCheckpoint.completed_at || latestUsableCheckpoint.created_at)}
-              </span>
-            </p>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => setCheckpointToResume(latestUsableCheckpoint)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition-colors self-start sm:self-auto"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span>Resume from latest</span>
-          </button>
-        </div>
-      ) : !loading && checkpoints.length > 0 ? (
-        <div className="bg-[#121214] border border-white/[0.07] rounded p-3 text-xs text-[#73737c] flex items-center gap-2">
-          <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
-          <span>
-            No COMPLETE checkpoints found yet. Ongoing checkpoint writes must finish before recovery is available.
-          </span>
-        </div>
-      ) : null}
 
       {/* Search Bar */}
       <div className="flex items-center gap-2">
@@ -220,7 +221,7 @@ export const CheckpointsPage: React.FC = () => {
           <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-[#73737c]" />
           <input
             type="text"
-            placeholder="Search by checkpoint ID, job ID, attempt ID, step or model version..."
+            placeholder="Tìm kiếm theo nhiệm vụ, epoch hoặc trạng thái..."
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
             className="w-full pl-8 pr-3 py-1.5 bg-[#121214] border border-white/[0.07] rounded text-xs text-[#f3f3f4] placeholder-[#73737c] focus:outline-hidden focus:border-blue-500 transition-colors"
@@ -228,105 +229,183 @@ export const CheckpointsPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Checkpoints Table */}
+      {/* Checkpoints Table: Grouped by Job with Job column at the start */}
       <div className="bg-[#121214] border border-white/[0.07] rounded overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
+          <table className="w-full text-left text-xs min-w-[760px]">
             <thead>
               <tr className="border-b border-white/[0.07] text-[#73737c] bg-[#121214] text-[11px]">
-                <th className="py-2.5 px-3.5 font-medium">Checkpoint ID</th>
-                <th className="py-2.5 px-3 font-medium">State</th>
-                <th className="py-2.5 px-3 font-medium">Job ID</th>
-                <th className="py-2.5 px-3 font-medium">Model version</th>
-                <th className="py-2.5 px-3 font-medium">Source step</th>
-                <th className="py-2.5 px-3 font-medium">Created</th>
-                <th className="py-2.5 px-3.5 font-medium text-right">Actions</th>
+                <th className="py-2.5 px-3.5 font-medium">Nhiệm vụ</th>
+                <th className="py-2.5 px-3 font-medium">Epoch</th>
+                <th className="py-2.5 px-3 font-medium">Trạng thái</th>
+                <th className="py-2.5 px-3 font-medium">Thời gian hoàn tất</th>
+                <th className="py-2.5 px-3.5 font-medium text-right">Thao tác</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-white/[0.04]">
               {loading && checkpoints.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-12 text-center text-[#73737c]">
+                  <td colSpan={5} className="py-12 text-center text-[#73737c]">
                     <div className="flex flex-col items-center gap-2">
                       <RefreshCw className="w-5 h-5 animate-spin text-blue-400" />
-                      <span>Loading saved checkpoints from API...</span>
+                      <span>Đang tải danh sách checkpoints từ API...</span>
                     </div>
                   </td>
                 </tr>
-              ) : filteredCheckpoints.length === 0 ? (
+              ) : jobGroups.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-10 text-center text-[#73737c]">
-                    No checkpoints found matching current query.
+                  <td colSpan={5} className="py-10 text-center text-[#73737c]">
+                    Không tìm thấy checkpoint nào phù hợp với tìm kiếm.
                   </td>
                 </tr>
               ) : (
-                filteredCheckpoints.map(cp => {
+                jobGroups.map(group => {
+                  const cp = group.latestCheckpoint;
                   const isRecoverable = cp.state === 'COMPLETE';
+                  const isExpanded = expandedJobIds.has(group.jobId);
+                  const hasMultiple = group.allCheckpoints.length > 1;
+
                   return (
-                    <tr
-                      key={cp.checkpoint_id}
-                      className="hover:bg-[#171719] transition-colors"
-                    >
-                      {/* Checkpoint ID with Step Subtext */}
-                      <td className="py-2.5 px-3.5 font-medium text-[#f3f3f4]">
-                        <div className="space-y-0.5">
-                          <CopyableId value={cp.checkpoint_id} truncateLength={12} className="font-medium text-[#f3f3f4]" />
-                          {cp.source_step_id != null && (
-                            <div className="text-[11px] text-[#73737c]">
-                              Step #{cp.source_step_id}
+                    <React.Fragment key={group.jobId}>
+                      {/* Main row: Latest checkpoint for this Job */}
+                      <tr className="hover:bg-[#171719] transition-colors">
+                        {/* Column 1: Job (At the very front) */}
+                        <td className="py-3 px-3.5">
+                          <div className="flex items-center gap-2">
+                            {hasMultiple ? (
+                              <button
+                                type="button"
+                                onClick={() => toggleJobExpand(group.jobId)}
+                                className="p-1 rounded hover:bg-white/[0.08] text-[#73737c] hover:text-[#f3f3f4] transition-colors shrink-0"
+                                title={isExpanded ? 'Thu gọn các epoch cũ' : `Mở rộng xem tất cả ${group.allCheckpoints.length} epoch`}
+                              >
+                                <ChevronRight
+                                  className={`w-3.5 h-3.5 transition-transform ${
+                                    isExpanded ? 'rotate-90 text-[#f3f3f4]' : ''
+                                  }`}
+                                />
+                              </button>
+                            ) : (
+                              <span className="w-5 shrink-0" />
+                            )}
+                            <div>
+                              <Link
+                                to={`/jobs/${group.jobId}`}
+                                className="text-[#f3f3f4] hover:text-blue-400 font-medium transition-colors"
+                                title="Xem chi tiết nhiệm vụ"
+                              >
+                                {group.jobName}
+                              </Link>
+                              {hasMultiple && (
+                                <button
+                                  type="button"
+                                  onClick={() => toggleJobExpand(group.jobId)}
+                                  className="block text-[11px] text-[#73737c] hover:text-blue-400 transition-colors mt-0.5 text-left"
+                                >
+                                  {isExpanded
+                                    ? `Đang hiện toàn bộ ${group.allCheckpoints.length} epoch`
+                                    : `+ ${group.allCheckpoints.length - 1} epoch trước đó (bấm để xem)`}
+                                </button>
+                              )}
                             </div>
-                          )}
-                        </div>
-                      </td>
+                          </div>
+                        </td>
 
-                      {/* State */}
-                      <td className="py-2.5 px-3">
-                        <CheckpointStateBadge state={cp.state} />
-                      </td>
+                        {/* Column 2: Epoch */}
+                        <td className="py-3 px-3 font-medium text-[#f3f3f4]">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium text-[#f3f3f4]">
+                              {cp.epoch != null ? `Epoch ${cp.epoch}` : '—'}
+                            </span>
+                            {hasMultiple && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 font-normal">
+                                Gần nhất
+                              </span>
+                            )}
+                          </div>
+                        </td>
 
-                      {/* Job ID */}
-                      <td className="py-2.5 px-3 text-[#a1a1a8]">
-                        <CopyableId value={cp.job_id} truncateLength={16} className="text-[#a1a1a8]" />
-                      </td>
+                        {/* Column 3: Trạng thái */}
+                        <td className="py-3 px-3">
+                          <CheckpointStateBadge state={cp.state} />
+                        </td>
 
-                      {/* Model version */}
-                      <td className="py-2.5 px-3 text-[#a1a1a8]">
-                        {cp.model_version != null ? `v${cp.model_version}` : '—'}
-                      </td>
+                        {/* Column 4: Thời gian hoàn tất */}
+                        <td className="py-3 px-3 text-[#73737c] text-[11px]">
+                          {formatTimestamp(cp.completed_at || cp.created_at)}
+                        </td>
 
-                      {/* Source step */}
-                      <td className="py-2.5 px-3 text-[#a1a1a8]">
-                        {cp.source_step_id != null ? `#${cp.source_step_id}` : '—'}
-                      </td>
+                        {/* Column 5: Thao tác (chỉ nút Tiếp tục) */}
+                        <td className="py-3 px-3.5 text-right">
+                          <div className="flex items-center justify-end">
+                            {isRecoverable && cp.job_id ? (
+                              <button
+                                type="button"
+                                onClick={() => setCheckpointToResume(cp)}
+                                className="px-3 py-1 text-xs rounded bg-blue-600 hover:bg-blue-500 text-white font-medium transition-colors inline-flex items-center gap-1.5"
+                              >
+                                <RotateCcw className="w-3 h-3" />
+                                <span>Tiếp tục</span>
+                              </button>
+                            ) : (
+                              <span className="text-[11px] text-[#52525b]">—</span>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
 
-                      {/* Created */}
-                      <td className="py-2.5 px-3 text-[#73737c] text-[11px]">
-                        {formatTimestamp(cp.completed_at || cp.created_at)}
-                      </td>
-
-                      {/* Actions */}
-                      <td className="py-2.5 px-3.5 text-right">
-                        <div className="flex items-center justify-end gap-2">
-                          {isRecoverable && cp.job_id && (
-                            <button
-                              type="button"
-                              onClick={() => setCheckpointToResume(cp)}
-                              className="px-2.5 py-1 text-xs rounded bg-[#171719] hover:bg-[#202024] text-[#f3f3f4] border border-white/[0.07] transition-colors"
+                      {/* Sub-rows: Expanded remaining checkpoints */}
+                      {isExpanded &&
+                        group.allCheckpoints.slice(1).map((subCp, subIdx) => {
+                          const subRecoverable = subCp.state === 'COMPLETE';
+                          return (
+                            <tr
+                              key={subCp.checkpoint_id}
+                              className="bg-[#0e0e10] hover:bg-[#141416] transition-colors border-l-2 border-blue-500/40"
                             >
-                              Resume
-                            </button>
-                          )}
+                              {/* Indented Job sub-indicator */}
+                              <td className="py-2.5 px-3.5 pl-11 text-[#73737c] text-[11px]">
+                                <span className="font-mono text-[#52525b]">└</span> Checkpoint #{subIdx + 2}
+                              </td>
 
-                          <button
-                            type="button"
-                            onClick={() => setSelectedCheckpoint(cp)}
-                            className="px-2.5 py-1 text-xs text-[#73737c] hover:text-[#f3f3f4] hover:bg-white/[0.05] rounded transition-colors"
-                          >
-                            Inspect
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
+                              {/* Epoch */}
+                              <td className="py-2.5 px-3 font-medium text-[#f3f3f4]">
+                                <span className="text-[#a1a1a8]">
+                                  {subCp.epoch != null ? `Epoch ${subCp.epoch}` : '—'}
+                                </span>
+                              </td>
+
+                              {/* State */}
+                              <td className="py-2.5 px-3">
+                                <CheckpointStateBadge state={subCp.state} />
+                              </td>
+
+                              {/* Time */}
+                              <td className="py-2.5 px-3 text-[#73737c] text-[11px]">
+                                {formatTimestamp(subCp.completed_at || subCp.created_at)}
+                              </td>
+
+                              {/* Actions (chỉ nút Tiếp tục) */}
+                              <td className="py-2.5 px-3.5 text-right">
+                                <div className="flex items-center justify-end">
+                                  {subRecoverable && subCp.job_id ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => setCheckpointToResume(subCp)}
+                                      className="px-2.5 py-1 text-xs rounded bg-[#171719] hover:bg-[#202024] text-[#f3f3f4] border border-white/[0.07] transition-colors inline-flex items-center gap-1.5"
+                                    >
+                                      <RotateCcw className="w-3 h-3" />
+                                      <span>Tiếp tục</span>
+                                    </button>
+                                  ) : (
+                                    <span className="text-[11px] text-[#52525b]">—</span>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                    </React.Fragment>
                   );
                 })
               )}
@@ -344,21 +423,11 @@ export const CheckpointsPage: React.FC = () => {
               className="px-4 py-1.5 rounded bg-[#171719] hover:bg-[#1f1f23] text-xs text-[#f3f3f4] border border-white/[0.07] transition-colors flex items-center gap-2"
             >
               {loadingMore && <RefreshCw className="w-3 h-3 animate-spin" />}
-              <span>Load more checkpoints</span>
+              <span>Tải thêm checkpoints</span>
             </button>
           </div>
         )}
       </div>
-
-      {/* Checkpoint Detail Drawer */}
-      <CheckpointDetailDrawer
-        checkpoint={selectedCheckpoint}
-        onClose={() => setSelectedCheckpoint(null)}
-        onResume={cp => {
-          setSelectedCheckpoint(null);
-          setCheckpointToResume(cp);
-        }}
-      />
 
       {/* Resume Confirmation Modal */}
       <ConfirmationModal
@@ -366,19 +435,19 @@ export const CheckpointsPage: React.FC = () => {
         isLoading={resuming}
         closeOnConfirm={false}
         isDestructive={false}
-        title="Resume Training from Checkpoint"
+        title="Tiếp tục huấn luyện từ Checkpoint"
         message={
           checkpointToResume
-            ? `Are you sure you want to resume execution from ${
-                checkpointToResume.source_step_id != null
-                  ? `Step #${checkpointToResume.source_step_id}`
-                  : `Checkpoint ${checkpointToResume.checkpoint_id.slice(0, 8)}`
-              } (Model v${checkpointToResume.model_version}) for job ${
-                checkpointToResume.job_id
-              }? A new attempt will be created with restored model weights and optimizer state.`
+            ? `Bạn có chắc chắn muốn tiếp tục huấn luyện từ ${
+                checkpointToResume.epoch != null
+                  ? `Epoch ${checkpointToResume.epoch}`
+                  : 'checkpoint đã chọn'
+              } cho nhiệm vụ ${
+                jobNames[checkpointToResume.job_id] || checkpointToResume.job_id
+              }? Một phiên chạy mới sẽ được tạo với trọng số mô hình và trạng thái optimizer đã lưu.`
             : ''
         }
-        confirmLabel="Confirm & Resume"
+        confirmLabel="Xác nhận & Tiếp tục"
         onConfirm={handleConfirmResume}
         onClose={() => setCheckpointToResume(null)}
       />

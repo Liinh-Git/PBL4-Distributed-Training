@@ -35,8 +35,8 @@ function buttons(path: string, match: string, env: Record<string, any>) {
 
 test('Launch, Run, wizard Start and Resume keep their labels and show spinners while pending', () => {
   const cases: Array<[string, string, Record<string, any>, string]> = [
-    ['pages/JobDetailPage.tsx', 'Launch Run',
-      { canLaunch: false, actionLoading: 'launch', job: { state: 'READY' } }, 'Launch Run'],
+    ['pages/JobDetailPage.tsx', 'handleLaunch',
+      { canLaunch: false, actionLoading: 'launch', job: { state: 'READY' } }, 'Bắt đầu chạy'],
     ['pages/JobsPage.tsx', 'handleLaunch(job.job_id)',
       { loading: false, activeAttempt: null, actionLoading: 'launch_job-1', job: { job_id: 'job-1', state: 'READY' } }, 'Run'],
     ['pages/NewTrainingFlowPage.tsx', 'onClick={handleStartTraining}',

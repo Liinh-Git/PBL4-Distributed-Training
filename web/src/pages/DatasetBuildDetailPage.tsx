@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
-  ArrowLeft,
   ShieldCheck,
   CheckCircle2,
   HardDrive,
@@ -19,6 +18,7 @@ import { EmptyState } from '../components/common/EmptyState';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { datasetBuildsService } from '../api';
 import { DatasetBuildDetailData } from '../types/api';
+import { formatDateOnly } from '../utils/date';
 
 export const DatasetBuildDetailPage: React.FC = () => {
   const { buildId } = useParams<{ buildId: string }>();
@@ -132,27 +132,6 @@ export const DatasetBuildDetailPage: React.FC = () => {
 
   return (
     <div className="space-y-4 max-w-7xl mx-auto pb-10 select-none">
-      {/* Backlink & Refresh */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2 text-xs text-[#73737c]">
-          <Link to="/dataset-builds" className="hover:text-[#f3f3f4] flex items-center gap-1 transition-colors">
-            <ArrowLeft className="w-3 h-3" />
-            <span>Dataset Builds</span>
-          </Link>
-          <span>/</span>
-          <span className="text-[#a1a1a8] font-mono">{build?.dataset_build_id}</span>
-        </div>
-
-        <button
-          type="button"
-          onClick={fetchBuildDetail}
-          className="p-1.5 rounded bg-[#121214] border border-white/[0.07] text-[#73737c] hover:text-[#f3f3f4] transition-colors"
-          title="Refresh details"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-        </button>
-      </div>
-
       {/* Notifications / Alerts */}
       {error && (
         <div className="p-3 bg-rose-500/10 border border-rose-500/20 rounded flex items-center justify-between text-xs text-rose-300">
@@ -165,7 +144,7 @@ export const DatasetBuildDetailPage: React.FC = () => {
             onClick={() => setError(null)}
             className="text-rose-400 hover:text-rose-200 text-xs"
           >
-            Dismiss
+            Đóng
           </button>
         </div>
       )}
@@ -181,7 +160,7 @@ export const DatasetBuildDetailPage: React.FC = () => {
             onClick={() => setActionMessage(null)}
             className="text-emerald-400 hover:text-emerald-200 text-xs"
           >
-            Dismiss
+            Đóng
           </button>
         </div>
       )}
@@ -193,17 +172,17 @@ export const DatasetBuildDetailPage: React.FC = () => {
             <div>
               <div className="flex items-center gap-2 flex-wrap">
                 <h1 className="text-base font-semibold text-[#f3f3f4]">
-                  Dataset Build {build.dataset_build_id}
+                  Bản dựng phân vùng {build.dataset_name ? `— ${build.dataset_name}` : ''}
                 </h1>
                 <DatasetBuildStateBadge state={build.state as any} />
-                <Badge variant="neutral">Strategy: {build.partition_strategy || build.profile || 'HASH'}</Badge>
+                <Badge variant="neutral">Chiến lược: {build.partition_strategy || build.profile || 'HASH'}</Badge>
               </div>
               <div className="flex items-center gap-3 text-xs text-[#73737c] mt-1 flex-wrap">
                 <span>
-                  Dataset: <span className="text-[#f3f3f4] font-medium">{build.dataset_name || build.dataset_id}</span>
+                  Tập dữ liệu: <span className="text-[#f3f3f4] font-medium">{build.dataset_name || 'Tập dữ liệu'}</span>
                 </span>
                 <span>
-                  Materialized: <span className="text-[#a1a1a8]">{build.created_at || '2026-09-09'}</span>
+                  Khởi tạo: <span className="text-[#a1a1a8]">{formatDateOnly(build.created_at)}</span>
                 </span>
               </div>
             </div>
@@ -212,13 +191,23 @@ export const DatasetBuildDetailPage: React.FC = () => {
             <div className="flex items-center gap-2 flex-wrap">
               <button
                 type="button"
+                onClick={fetchBuildDetail}
+                disabled={loading}
+                className="p-1.5 rounded bg-[#171719] hover:bg-[#202024] text-[#73737c] hover:text-[#f3f3f4] border border-white/[0.07] text-xs transition-colors"
+                title="Làm mới chi tiết"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+              </button>
+
+              <button
+                type="button"
                 onClick={handleRebuild}
                 disabled={actionLoading}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-[#171719] hover:bg-[#202024] text-[#f3f3f4] border border-white/[0.07] text-xs font-medium transition-colors"
-                title="Trigger partition rebuild"
+                title="Khởi chạy dựng lại phân vùng"
               >
                 <RotateCcw className="w-3 h-3" />
-                <span>Rebuild</span>
+                <span>Dựng lại</span>
               </button>
 
               {build.state !== 'DEPRECATED' && (
@@ -227,10 +216,10 @@ export const DatasetBuildDetailPage: React.FC = () => {
                   onClick={() => setShowDeprecateModal(true)}
                   disabled={actionLoading}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-[#171719] hover:bg-[#202024] text-amber-300 border border-amber-500/20 text-xs font-medium transition-colors"
-                  title="Deprecate build"
+                  title="Ngừng dùng bản dựng"
                 >
                   <Archive className="w-3 h-3" />
-                  <span>Deprecate</span>
+                  <span>Ngừng dùng</span>
                 </button>
               )}
 
@@ -239,10 +228,10 @@ export const DatasetBuildDetailPage: React.FC = () => {
                 onClick={() => setShowDeleteModal(true)}
                 disabled={actionLoading}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/20 text-xs font-medium transition-colors"
-                title="Delete build partition"
+                title="Xóa bản dựng phân vùng"
               >
                 <Trash2 className="w-3 h-3" />
-                <span>Delete</span>
+                <span>Xóa</span>
               </button>
             </div>
           </div>
@@ -260,34 +249,34 @@ export const DatasetBuildDetailPage: React.FC = () => {
             </div>
             <div className="inline-flex items-center gap-1.5 text-emerald-400 text-xs">
               <CheckCircle2 className="w-3 h-3" />
-              <span>Verified</span>
+              <span>Đã xác thực</span>
             </div>
           </div>
 
           {/* Key Metrics: Unified Strip */}
           <div className="grid grid-cols-2 sm:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x divide-white/[0.07] bg-[#171719] rounded border border-white/[0.04]">
             <div className="p-3">
-              <div className="text-[11px] text-[#73737c]">Sample Count</div>
+              <div className="text-[11px] text-[#73737c]">Số mẫu</div>
               <div className="text-sm font-semibold text-[#f3f3f4] mt-0.5">
                 {build.sample_count?.toLocaleString() ?? '—'}
               </div>
             </div>
             <div className="p-3">
-              <div className="text-[11px] text-[#73737c]">Artifact Size</div>
+              <div className="text-[11px] text-[#73737c]">Kích thước dữ liệu</div>
               <div className="text-sm font-semibold text-[#f3f3f4] mt-0.5">
                 {sizeMb} MB
               </div>
             </div>
             <div className="p-3">
-              <div className="text-[11px] text-[#73737c]">Partitions</div>
+              <div className="text-[11px] text-[#73737c]">Phân vùng</div>
               <div className="text-sm font-semibold text-blue-400 mt-0.5">
-                {build.shard_count || shards.length} Shards
+                {build.shard_count || shards.length} Mảnh
               </div>
             </div>
             <div className="p-3">
-              <div className="text-[11px] text-[#73737c]">Distribution</div>
+              <div className="text-[11px] text-[#73737c]">Phân bổ</div>
               <div className="text-sm font-semibold text-emerald-400 mt-0.5">
-                Balanced (33.3% / worker)
+                Cân bằng (33.3% / worker)
               </div>
             </div>
           </div>
@@ -299,10 +288,10 @@ export const DatasetBuildDetailPage: React.FC = () => {
         <div className="bg-[#121214] border border-white/[0.07] rounded p-4 space-y-3">
           <div>
             <h2 className="text-xs font-semibold text-[#f3f3f4]">
-              Materialized Shards ({shards.length})
+              Các mảnh phân vùng ({shards.length})
             </h2>
             <p className="text-xs text-[#73737c] mt-0.5">
-              Deterministic, non-overlapping partitions assigned to cluster workers
+              Các phân vùng tiền xử lý độc lập phân bổ cho các worker
             </p>
           </div>
 
@@ -310,12 +299,12 @@ export const DatasetBuildDetailPage: React.FC = () => {
             <table className="w-full text-left text-xs">
               <thead>
                 <tr className="border-b border-white/[0.07] text-[#73737c] bg-[#121214] text-[11px]">
-                  <th className="py-2.5 px-3 font-medium">Shard ID</th>
-                  <th className="py-2.5 px-3 font-medium">Partition Key</th>
-                  <th className="py-2.5 px-3 font-medium text-right">Sample Count</th>
-                  <th className="py-2.5 px-3 font-medium text-right">File Size</th>
-                  <th className="py-2.5 px-3 font-medium">Storage Path</th>
-                  <th className="py-2.5 px-3 font-medium">Checksum</th>
+                  <th className="py-2.5 px-3 font-medium">Mã mảnh (Shard)</th>
+                  <th className="py-2.5 px-3 font-medium">Khóa phân vùng</th>
+                  <th className="py-2.5 px-3 font-medium text-right">Số mẫu</th>
+                  <th className="py-2.5 px-3 font-medium text-right">Kích thước tệp</th>
+                  <th className="py-2.5 px-3 font-medium">Đường dẫn lưu trữ</th>
+                  <th className="py-2.5 px-3 font-medium">Mã kiểm tra</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/[0.04]">

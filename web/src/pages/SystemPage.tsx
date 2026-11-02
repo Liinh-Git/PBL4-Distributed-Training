@@ -1,7 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
-  ChevronDown,
   ChevronRight,
   Search,
   CheckCircle2,
@@ -18,14 +17,13 @@ import { DiagnosticEvent, WorkerSession } from '../types';
 import { systemService, eventsService, attemptsService, workersService } from '../api';
 import { HealthData, CapabilitiesData, EventListItemData, WorkerSessionItemData, NodeItemData } from '../types/api';
 import { deriveHealthState, mapSubsystemStatus } from '../utils/health';
-import { config } from '../config';
+import { formatDateTime } from '../utils/date';
 
 export const SystemPage: React.FC = () => {
   const { isRuntimeStale, setSelectedWorker } = useApp();
   const [searchParams, setSearchParams] = useSearchParams();
   const activeTab = searchParams.get('tab') === 'diagnostics' ? 'diagnostics' : 'overview';
 
-  const [showTechnicalDetails, setShowTechnicalDetails] = useState(false);
   const [inspectEvent, setInspectEvent] = useState<DiagnosticEvent | null>(null);
 
   // System API states
@@ -99,7 +97,7 @@ export const SystemPage: React.FC = () => {
         id: 'backend',
         name: 'Backend API',
         status: backendStatus,
-        lastSeen: 'now',
+        lastSeen: 'Vừa xong',
         latency: 'Chưa có dữ liệu',
         protocol: 'HTTP REST',
       },
@@ -107,23 +105,23 @@ export const SystemPage: React.FC = () => {
         id: 'runtime',
         name: 'Coordinator Runtime',
         status: runtimeStatus,
-        lastSeen: isRuntimeStale ? 'Stale' : 'now',
+        lastSeen: isRuntimeStale ? 'Mất tín hiệu' : 'Vừa xong',
         latency: 'Chưa có dữ liệu',
         protocol: 'MCP/1',
       },
       {
         id: 'database',
-        name: 'PostgreSQL Database',
+        name: 'Cơ sở dữ liệu PostgreSQL',
         status: postgresStatus,
-        lastSeen: 'now',
+        lastSeen: 'Vừa xong',
         latency: 'Chưa có dữ liệu',
         protocol: 'PostgreSQL',
       },
       {
         id: 'dataset_mgr',
-        name: 'Dataset Manager',
+        name: 'Quản lý tập dữ liệu (Dataset Manager)',
         status: dmStatus,
-        lastSeen: 'now',
+        lastSeen: 'Vừa xong',
         latency: 'Chưa có dữ liệu',
         protocol: 'HTTP Service',
       },
@@ -136,8 +134,8 @@ export const SystemPage: React.FC = () => {
         id: `node-${w.worker_id}`,
         nodeLabel: w.node_label || `Compute Node 0${w.worker_id + 1}`,
         workerLabel: `Worker ${w.worker_id}`,
-        state: w.state === 'READY' ? 'Active · Synchronized' : w.state,
-        lastHeartbeat: w.last_heartbeat_at ? new Date(w.last_heartbeat_at).toLocaleTimeString() : 'Chưa có dữ liệu',
+        state: w.state === 'READY' ? 'Hoạt động · Đã đồng bộ' : w.state,
+        lastHeartbeat: w.last_heartbeat_at ? formatDateTime(w.last_heartbeat_at) : 'Chưa có dữ liệu',
         internalIp: 'Chưa có dữ liệu',
         protocol: 'dtp/v1.0',
         workerData: {
@@ -145,7 +143,7 @@ export const SystemPage: React.FC = () => {
           sessionId: w.session_id,
           nodeLabel: w.node_label || `Node ${w.worker_id}`,
           protocolVersion: 'dtp/v1.0',
-          connectedAt: w.connected_at || 'now',
+          connectedAt: w.connected_at || 'Vừa xong',
           state: (w.state as any) || 'READY',
           shardId: w.shard_id,
           localModelVersion: w.local_model_version ? String(w.local_model_version) : undefined,
@@ -209,11 +207,11 @@ export const SystemPage: React.FC = () => {
         <div>
           <div className="flex items-center gap-2">
             <h1 className="text-base font-semibold text-[#f3f3f4]">
-              System
+              Hệ thống
             </h1>
             {loading && (
               <span className="text-[11px] text-blue-400 font-mono animate-pulse">
-                Fetching API...
+                Đang tải dữ liệu...
               </span>
             )}
             {error && (
@@ -223,7 +221,7 @@ export const SystemPage: React.FC = () => {
             )}
           </div>
           <p className="text-xs text-[#73737c] mt-0.5">
-            Platform services, coordinator health, and worker connectivity
+            Dịch vụ nền tảng, tình trạng điều phối và kết nối worker
           </p>
         </div>
 
@@ -233,7 +231,7 @@ export const SystemPage: React.FC = () => {
             type="button"
             onClick={fetchSystemData}
             className="p-1.5 rounded bg-[#121214] border border-white/[0.07] text-[#73737c] hover:text-[#f3f3f4] transition-colors"
-            title="Refresh system state"
+            title="Làm mới trạng thái"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
           </button>
@@ -247,7 +245,7 @@ export const SystemPage: React.FC = () => {
                   : 'text-[#73737c] hover:text-[#f3f3f4]'
               }`}
             >
-              Overview
+              Tổng quan
             </button>
             <button
               type="button"
@@ -258,7 +256,7 @@ export const SystemPage: React.FC = () => {
                   : 'text-[#73737c] hover:text-[#f3f3f4]'
               }`}
             >
-              Diagnostics
+              Chẩn đoán
             </button>
           </div>
         </div>
@@ -266,27 +264,73 @@ export const SystemPage: React.FC = () => {
 
       {activeTab === 'overview' ? (
         <div className="space-y-6">
-          <section className="space-y-2">
-            <h2 className="text-xs font-semibold text-[#f3f3f4]">Node Agents</h2>
-            {nodes.length === 0 ? <p className="text-xs text-[#73737c]">Chưa có dữ liệu</p> : (
-              <ul className="space-y-2 text-xs text-[#a1a1a8]">
-                {nodes.map(node => <li key={node.node_id}>{node.display_name} · {node.node_id} · {node.state} · {node.last_seen_at ? new Date(node.last_seen_at).toLocaleString() : 'Chưa có dữ liệu'}</li>)}
-              </ul>
-            )}
-          </section>
-          {/* Core Services Table */}
+          {/* Node Agents Table */}
           <div className="space-y-2">
             <h2 className="text-xs font-semibold text-[#f3f3f4]">
-              Core Services
+              Danh sách Node Agent ({nodes.length})
             </h2>
 
             <div className="bg-[#121214] border border-white/[0.07] rounded overflow-hidden">
               <table className="w-full text-left text-xs">
                 <thead>
                   <tr className="border-b border-white/[0.07] text-[#73737c] bg-[#121214] text-[11px]">
-                    <th className="py-2.5 px-3.5 font-medium">Service</th>
-                    <th className="py-2.5 px-3 font-medium">Status</th>
-                    <th className="py-2.5 px-3.5 font-medium text-right">Last seen</th>
+                    <th className="py-2.5 px-3.5 font-medium">Node</th>
+                    <th className="py-2.5 px-3 font-medium">Trạng thái</th>
+                    <th className="py-2.5 px-3.5 font-medium text-right">Ghi nhận gần nhất</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/[0.04]">
+                  {nodes.length === 0 ? (
+                    <tr>
+                      <td colSpan={3} className="py-4 px-3.5 text-center text-[#73737c]">
+                        Chưa có Node Agent nào được ghi nhận
+                      </td>
+                    </tr>
+                  ) : (
+                    nodes.map(node => {
+                      const isOnline = node.state === 'ONLINE';
+                      return (
+                        <tr key={node.node_id} className="hover:bg-[#171719] transition-colors">
+                          <td className="py-2.5 px-3.5 font-medium text-[#f3f3f4]">
+                            <div>{node.display_name}</div>
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <span className="inline-flex items-center gap-1.5 text-xs">
+                              <span
+                                className={`w-1.5 h-1.5 rounded-full ${
+                                  isOnline ? 'bg-emerald-400' : 'bg-zinc-500'
+                                }`}
+                              />
+                              <span className={isOnline ? 'text-emerald-400 font-medium' : 'text-[#73737c]'}>
+                                {isOnline ? 'Online' : 'Offline'}
+                              </span>
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-3.5 text-right text-[#73737c]">
+                            {formatDateTime(node.last_seen_at)}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Core Services Table */}
+          <div className="space-y-2">
+            <h2 className="text-xs font-semibold text-[#f3f3f4]">
+              Dịch vụ Cốt lõi
+            </h2>
+
+            <div className="bg-[#121214] border border-white/[0.07] rounded overflow-hidden">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-white/[0.07] text-[#73737c] bg-[#121214] text-[11px]">
+                    <th className="py-2.5 px-3.5 font-medium">Dịch vụ</th>
+                    <th className="py-2.5 px-3 font-medium">Trạng thái</th>
+                    <th className="py-2.5 px-3.5 font-medium text-right">Ghi nhận gần nhất</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/[0.04]">
@@ -311,7 +355,7 @@ export const SystemPage: React.FC = () => {
           {/* Worker Connectivity Table */}
           <div className="space-y-2">
             <h2 className="text-xs font-semibold text-[#f3f3f4]">
-              Worker Connectivity
+              Kết nối Worker
             </h2>
 
             <div className="bg-[#121214] border border-white/[0.07] rounded overflow-hidden">
@@ -320,115 +364,55 @@ export const SystemPage: React.FC = () => {
                   <tr className="border-b border-white/[0.07] text-[#73737c] bg-[#121214] text-[11px]">
                     <th className="py-2.5 px-3.5 font-medium">Worker</th>
                     <th className="py-2.5 px-3 font-medium">Node</th>
-                    <th className="py-2.5 px-3 font-medium">Status</th>
-                    <th className="py-2.5 px-3.5 font-medium text-right">Heartbeat</th>
+                    <th className="py-2.5 px-3 font-medium">Trạng thái</th>
+                    <th className="py-2.5 px-3.5 font-medium text-right">Thời gian phản hồi</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/[0.04]">
-                  {clusterNodes.length === 0 ? <tr><td colSpan={4} className="py-4 px-3 text-[#73737c]">Chưa có dữ liệu Worker</td></tr> : null}
-                  {clusterNodes.map(node => (
-                    <tr
-                      key={node.id}
-                      onClick={() => node.workerData && setSelectedWorker(node.workerData)}
-                      className={`hover:bg-[#171719] transition-colors group ${
-                        node.workerData ? 'cursor-pointer' : ''
-                      }`}
-                    >
-                      <td className="py-2.5 px-3.5 font-medium text-[#f3f3f4] group-hover:text-blue-400 transition-colors">
-                        <div className="flex items-center gap-2">
-                          <span className={`w-1.5 h-1.5 rounded-full ${node.state.includes('Active') || node.state.includes('Operational') ? 'bg-emerald-400' : 'bg-zinc-500'}`} />
-                          <span>{node.workerLabel}</span>
-                        </div>
-                      </td>
-                      <td className="py-2.5 px-3 text-[#a1a1a8]">
-                        {node.nodeLabel}
-                      </td>
-                      <td className="py-2.5 px-3 text-[#f3f3f4]">
-                        {node.state}
-                      </td>
-                      <td className="py-2.5 px-3.5 text-right text-[#73737c]">
-                        {node.lastHeartbeat}
+                  {clusterNodes.length === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="py-4 px-3.5 text-center text-[#73737c]">
+                        Chưa có Worker nào kết nối
                       </td>
                     </tr>
-                  ))}
+                  ) : (
+                    clusterNodes.map(node => (
+                      <tr
+                        key={node.id}
+                        onClick={() => node.workerData && setSelectedWorker(node.workerData)}
+                        className={`hover:bg-[#171719] transition-colors group ${
+                          node.workerData ? 'cursor-pointer' : ''
+                        }`}
+                      >
+                        <td className="py-2.5 px-3.5 font-medium text-[#f3f3f4] group-hover:text-blue-400 transition-colors">
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`w-1.5 h-1.5 rounded-full ${
+                                node.state.includes('Hoạt động') ||
+                                node.state.includes('Active') ||
+                                node.state.includes('READY')
+                                  ? 'bg-emerald-400'
+                                  : 'bg-zinc-500'
+                              }`}
+                            />
+                            <span>{node.workerLabel}</span>
+                          </div>
+                        </td>
+                        <td className="py-2.5 px-3 text-[#a1a1a8]">
+                          {node.nodeLabel}
+                        </td>
+                        <td className="py-2.5 px-3 text-[#f3f3f4]">
+                          {node.state}
+                        </td>
+                        <td className="py-2.5 px-3.5 text-right text-[#73737c]">
+                          {node.lastHeartbeat}
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
-          </div>
-
-          {/* Collapsed Technical details */}
-          <div className="bg-[#121214] border border-white/[0.07] rounded overflow-hidden">
-            <button
-              type="button"
-              onClick={() => setShowTechnicalDetails(!showTechnicalDetails)}
-              className="w-full p-3 flex items-center justify-between text-left hover:bg-white/[0.02] transition-colors cursor-pointer"
-            >
-              <div className="flex items-center gap-2 text-xs">
-                <ChevronDown
-                  className={`w-3.5 h-3.5 text-[#73737c] transition-transform ${
-                    showTechnicalDetails ? 'rotate-180' : ''
-                  }`}
-                />
-                <span className="font-semibold text-[#f3f3f4]">Technical details</span>
-              </div>
-              <span className="text-xs text-[#73737c]">
-                {showTechnicalDetails ? 'Hide' : 'Expand'}
-              </span>
-            </button>
-
-            {showTechnicalDetails && (
-              <div className="p-3 pt-0 space-y-3 text-xs border-t border-white/[0.04]">
-                <div className="pt-3 overflow-x-auto">
-                  <table className="w-full text-left text-xs font-mono">
-                    <thead>
-                      <tr className="border-b border-white/[0.07] text-[#73737c] text-[11px]">
-                        <th className="py-2 px-3 font-medium">Service / Node</th>
-                        <th className="py-2 px-3 font-medium">Internal IP</th>
-                        <th className="py-2 px-3 font-medium">Protocol</th>
-                        <th className="py-2 px-3 font-medium text-right">Latency</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-white/[0.04] text-[#a1a1a8]">
-                      {coreServices.map(svc => (
-                        <tr key={svc.id}>
-                          <td className="py-2 px-3 text-[#f3f3f4]">{svc.name}</td>
-                          <td className="py-2 px-3">10.240.0.1</td>
-                          <td className="py-2 px-3">{svc.protocol}</td>
-                          <td className="py-2 px-3 text-right">{svc.latency}</td>
-                        </tr>
-                      ))}
-                      {clusterNodes.map(node => (
-                        <tr key={node.id}>
-                          <td className="py-2 px-3 text-[#f3f3f4]">{node.workerLabel} ({node.id})</td>
-                          <td className="py-2 px-3">{node.internalIp}</td>
-                          <td className="py-2 px-3">{node.protocol}</td>
-                          <td className="py-2 px-3 text-right">&lt; 1 ms</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-
-                <div className="p-2.5 rounded bg-[#171719] border border-white/[0.04] text-xs space-y-1">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[#73737c]">Supported Strategies</span>
-                    <span className="font-mono text-[#a1a1a8]">
-                      {capabilitiesData?.supported_training_strategies?.join(', ') || 'strict_bsp'}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-[#73737c]">Barrier Algorithm</span>
-                    <span className="text-[#a1a1a8]">Deterministic Strict BSP v1.0</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-[#73737c]">Transport Socket</span>
-                    <span className="font-mono text-[#a1a1a8]">
-                      {config.wsBaseUrl ? `${config.wsBaseUrl}/ws/v1/attempts` : '/ws/v1/attempts'}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
         </div>
       ) : (
@@ -439,7 +423,7 @@ export const SystemPage: React.FC = () => {
               <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-[#73737c]" />
               <input
                 type="text"
-                placeholder="Search diagnostic events..."
+                placeholder="Tìm kiếm sự kiện chẩn đoán..."
                 value={searchQuery}
                 onChange={e => setSearchQuery(e.target.value)}
                 className="w-full pl-8 pr-3 py-1.5 bg-[#121214] border border-white/[0.07] rounded text-xs text-[#f3f3f4] placeholder-[#73737c] focus:outline-hidden focus:border-blue-500 transition-colors"
@@ -447,18 +431,23 @@ export const SystemPage: React.FC = () => {
             </div>
 
             <div className="flex items-center gap-1.5">
-              {['ALL', 'INFO', 'WARN', 'ERROR'].map(sev => (
+              {[
+                { key: 'ALL', label: 'Tất cả' },
+                { key: 'INFO', label: 'Thông tin' },
+                { key: 'WARN', label: 'Cảnh báo' },
+                { key: 'ERROR', label: 'Lỗi' },
+              ].map(sev => (
                 <button
-                  key={sev}
+                  key={sev.key}
                   type="button"
-                  onClick={() => setSeverityFilter(sev)}
+                  onClick={() => setSeverityFilter(sev.key)}
                   className={`px-2.5 py-1 text-xs rounded transition-colors ${
-                    severityFilter === sev
+                    severityFilter === sev.key
                       ? 'bg-blue-600 text-white font-medium'
                       : 'bg-[#121214] border border-white/[0.07] text-[#73737c] hover:text-[#f3f3f4]'
                   }`}
                 >
-                  {sev}
+                  {sev.label}
                 </button>
               ))}
             </div>
@@ -468,7 +457,7 @@ export const SystemPage: React.FC = () => {
             <div className="divide-y divide-white/[0.05]">
               {filteredEvents.length === 0 ? (
                 <div className="p-8 text-center text-xs text-[#73737c]">
-                  No matching diagnostic events.
+                  Không tìm thấy sự kiện chẩn đoán phù hợp.
                 </div>
               ) : (
                 filteredEvents.map((evt, idx) => {

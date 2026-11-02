@@ -203,7 +203,24 @@ export function formatDiagnosticEvent(event: any): FormattedEventMessage {
     };
   }
 
-  // 4. Training (Steps, Models, Contract)
+  // 4. Training (Epochs, Steps, Models, Contract)
+  if (normalized.includes('epoch')) {
+    const epochIdx = payload.epoch_index ?? payload.epoch;
+    const epochDisplay = typeof epochIdx === 'number' ? `Epoch ${epochIdx + 1}` : 'Epoch';
+    const lossStr = payload.training_loss != null ? `Loss: ${Number(payload.training_loss).toFixed(4)}` : '';
+    const accVal = payload.training_accuracy;
+    const accStr = accVal != null ? `Accuracy: ${accVal > 1 ? `${accVal.toFixed(2)}%` : `${(accVal * 100).toFixed(2)}%`}` : '';
+    const sampleStr = payload.sample_count ? `${Number(payload.sample_count).toLocaleString()} mẫu` : '';
+    const metricsParts = [lossStr, accStr, sampleStr].filter(Boolean).join(' · ');
+
+    return {
+      humanText: `Hoàn tất ${epochDisplay}`,
+      category: 'training',
+      iconType: 'success',
+      secondaryInfo: metricsParts || undefined,
+    };
+  }
+
   if (normalized.includes('step')) {
     if (normalized.includes('committed') || normalized.includes('completed')) {
       return {

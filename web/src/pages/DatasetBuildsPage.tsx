@@ -11,6 +11,7 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import { DatasetBuildStateBadge } from '../components/common/Badge';
+import { formatDateOnly } from '../utils/date';
 import { datasetBuildsService } from '../api';
 import { DatasetBuildListItemData, DatasetBuildState } from '../types/api';
 
@@ -70,16 +71,16 @@ export const DatasetBuildsPage: React.FC = () => {
         <div>
           <div className="flex items-center gap-2">
             <h1 className="text-base font-semibold text-[#f3f3f4]">
-              Dataset Builds
+              Bản dựng phân vùng
             </h1>
             {loading && (
               <span className="text-[11px] text-blue-400 font-mono animate-pulse">
-                Loading API...
+                Đang tải...
               </span>
             )}
           </div>
           <p className="text-xs text-[#73737c] mt-0.5">
-            Materialized and sharded partitions prepared for training workers
+            Các phân vùng dữ liệu đã sẵn sàng cho các worker huấn luyện
           </p>
         </div>
 
@@ -89,16 +90,16 @@ export const DatasetBuildsPage: React.FC = () => {
             onClick={() => fetchBuilds()}
             disabled={loading}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-[#121214] hover:bg-[#171719] text-[#73737c] hover:text-[#f3f3f4] text-xs font-medium transition-colors border border-white/[0.07]"
-            title="Refresh builds"
+            title="Làm mới bản dựng"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-            <span>Refresh</span>
+            <span>Làm mới</span>
           </button>
           <Link
             to="/datasets"
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-[#171719] hover:bg-[#1f1f23] text-[#f3f3f4] text-xs font-medium transition-colors border border-white/[0.07] w-fit"
           >
-            <span>Datasets Catalog</span>
+            <span>Danh mục tập dữ liệu</span>
           </Link>
         </div>
       </div>
@@ -115,7 +116,7 @@ export const DatasetBuildsPage: React.FC = () => {
             onClick={() => fetchBuilds()}
             className="px-2 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 text-xs transition-colors"
           >
-            Retry
+            Thử lại
           </button>
         </div>
       )}
@@ -126,7 +127,7 @@ export const DatasetBuildsPage: React.FC = () => {
           <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-[#73737c]" />
           <input
             type="text"
-            placeholder="Search builds or dataset names..."
+            placeholder="Tìm kiếm bản dựng hoặc tên tập dữ liệu..."
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
             className="w-full pl-8 pr-3 py-1.5 bg-[#121214] border border-white/[0.07] rounded text-xs text-[#f3f3f4] placeholder-[#73737c] focus:outline-hidden focus:border-blue-500 transition-colors"
@@ -134,18 +135,23 @@ export const DatasetBuildsPage: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-0.5 bg-[#121214] border border-white/[0.07] rounded p-0.5 self-start sm:self-auto">
-          {['ALL', 'READY', 'DEPRECATED', 'FAILED'].map(st => (
+          {[
+            { key: 'ALL', label: 'Tất cả' },
+            { key: 'READY', label: 'Sẵn sàng' },
+            { key: 'DEPRECATED', label: 'Không dùng nữa' },
+            { key: 'FAILED', label: 'Thất bại' },
+          ].map(st => (
             <button
-              key={st}
+              key={st.key}
               type="button"
-              onClick={() => setStateFilter(st)}
+              onClick={() => setStateFilter(st.key)}
               className={`px-2.5 py-1 rounded text-xs transition-colors ${
-                stateFilter === st
+                stateFilter === st.key
                   ? 'bg-white/[0.08] text-[#f3f3f4] font-medium'
                   : 'text-[#73737c] hover:text-[#a1a1a8]'
               }`}
             >
-              {st}
+              {st.label}
             </button>
           ))}
         </div>
@@ -157,13 +163,13 @@ export const DatasetBuildsPage: React.FC = () => {
           <table className="w-full text-left text-xs">
             <thead>
               <tr className="border-b border-white/[0.07] text-[#73737c] bg-[#121214] text-[11px]">
-                <th className="py-2.5 px-3.5 font-medium">Dataset / Profile</th>
-                <th className="py-2.5 px-3 font-medium">State</th>
-                <th className="py-2.5 px-3 font-medium">Batch Size</th>
-                <th className="py-2.5 px-3 font-medium text-center">Shards</th>
-                <th className="py-2.5 px-3 font-medium text-right">Samples</th>
-                <th className="py-2.5 px-3 font-medium">Created</th>
-                <th className="py-2.5 px-3.5 font-medium text-right">Action</th>
+                <th className="py-2.5 px-3.5 font-medium">Tập dữ liệu / Hồ sơ</th>
+                <th className="py-2.5 px-3 font-medium">Trạng thái</th>
+                <th className="py-2.5 px-3 font-medium">Kích thước batch</th>
+                <th className="py-2.5 px-3 font-medium text-center">Phân mảnh</th>
+                <th className="py-2.5 px-3 font-medium text-right">Số mẫu</th>
+                <th className="py-2.5 px-3 font-medium">Ngày tạo</th>
+                <th className="py-2.5 px-3.5 font-medium text-right">Thao tác</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-white/[0.04]">
@@ -172,14 +178,14 @@ export const DatasetBuildsPage: React.FC = () => {
                   <td colSpan={7} className="py-12 text-center text-[#73737c]">
                     <div className="flex flex-col items-center gap-2">
                       <RefreshCw className="w-5 h-5 animate-spin text-blue-400" />
-                      <span>Loading materialized dataset builds...</span>
+                      <span>Đang tải danh sách bản dựng...</span>
                     </div>
                   </td>
                 </tr>
               ) : filteredBuilds.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="py-10 text-center text-[#73737c]">
-                    No dataset builds found matching query.
+                    Không tìm thấy bản dựng phù hợp.
                   </td>
                 </tr>
               ) : (
@@ -187,10 +193,10 @@ export const DatasetBuildsPage: React.FC = () => {
                   <tr key={b.dataset_build_id} className="hover:bg-[#171719] transition-colors group">
                     <td className="py-2.5 px-3.5">
                       <div className="font-medium text-[#f3f3f4] group-hover:text-blue-400 transition-colors">
-                        {b.dataset_name || 'Dataset'}
+                        {b.dataset_name || 'Tập dữ liệu'}
                       </div>
-                      <div className="text-[11px] text-[#73737c] mt-0.5 max-w-md truncate font-mono">
-                        {b.profile || b.dataset_build_id}
+                      <div className="text-[11px] text-[#73737c] mt-0.5 max-w-md truncate">
+                        {b.profile || 'Phân vùng chuẩn'}
                       </div>
                     </td>
 
@@ -211,7 +217,7 @@ export const DatasetBuildsPage: React.FC = () => {
                     </td>
 
                     <td className="py-2.5 px-3 text-[11px] text-[#73737c]">
-                      {b.created_at ? b.created_at.slice(0, 10) : '2026-09-09'}
+                      {formatDateOnly(b.created_at)}
                     </td>
 
                     <td className="py-2.5 px-3.5 text-right">
@@ -219,7 +225,7 @@ export const DatasetBuildsPage: React.FC = () => {
                         to={`/dataset-builds/${b.dataset_build_id}`}
                         className="inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 transition-colors"
                       >
-                        <span>Details</span>
+                        <span>Chi tiết</span>
                         <ChevronRight className="w-3 h-3" />
                       </Link>
                     </td>
@@ -240,7 +246,7 @@ export const DatasetBuildsPage: React.FC = () => {
               className="px-4 py-1.5 rounded bg-[#171719] hover:bg-[#1f1f23] text-xs text-[#f3f3f4] border border-white/[0.07] transition-colors flex items-center gap-2"
             >
               {loadingMore && <RefreshCw className="w-3 h-3 animate-spin" />}
-              <span>Load more builds</span>
+              <span>Tải thêm bản dựng</span>
             </button>
           </div>
         )}

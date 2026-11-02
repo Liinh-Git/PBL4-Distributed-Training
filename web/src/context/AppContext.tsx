@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState } from 'react';
+import React, { createContext, useContext, useState, useMemo } from 'react';
 import {
   Job,
   DatasetBuild,
@@ -45,27 +45,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [isRuntimeStale, setIsRuntimeStale] = useState<boolean>(false);
   const [hasEventHistoryGap, setHasEventHistoryGap] = useState<boolean>(false);
 
+  const contextValue = useMemo<AppContextType>(
+    () => ({
+      selectedWorker,
+      setSelectedWorker,
+      selectedStep,
+      setSelectedStep,
+      selectedEvent,
+      setSelectedEvent,
+      selectedCheckpoint,
+      setSelectedCheckpoint,
+      selectedDatasetBuild,
+      setSelectedDatasetBuild,
+      rawContractModalJob,
+      setRawContractModalJob,
+      isRuntimeStale,
+      setIsRuntimeStale,
+      hasEventHistoryGap,
+      setHasEventHistoryGap,
+    }),
+    [
+      selectedWorker,
+      selectedStep,
+      selectedEvent,
+      selectedCheckpoint,
+      selectedDatasetBuild,
+      rawContractModalJob,
+      isRuntimeStale,
+      hasEventHistoryGap,
+    ]
+  );
+
   return (
-    <AppContext.Provider
-      value={{
-        selectedWorker,
-        setSelectedWorker,
-        selectedStep,
-        setSelectedStep,
-        selectedEvent,
-        setSelectedEvent,
-        selectedCheckpoint,
-        setSelectedCheckpoint,
-        selectedDatasetBuild,
-        setSelectedDatasetBuild,
-        rawContractModalJob,
-        setRawContractModalJob,
-        isRuntimeStale,
-        setIsRuntimeStale,
-        hasEventHistoryGap,
-        setHasEventHistoryGap,
-      }}
-    >
+    <AppContext.Provider value={contextValue}>
       {children}
     </AppContext.Provider>
   );

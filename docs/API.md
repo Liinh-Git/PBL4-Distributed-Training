@@ -63,3 +63,45 @@ START_ATTEMPT chỉ thay runner cũ khi DTP resources đã cleanup xong. Runtime
 tối đa 5 giây ngoài state lock rồi kiểm tra lại; chưa xong trả ACTIVE_ATTEMPT_EXISTS.
 Abort trong provisioning/initialization vẫn chạy cleanup, không coi một predicate
 ready là hợp lệ sau abort. Terminal snapshot giữ tới lần khởi chạy tiếp theo.
+
+## Tải lịch sử huấn luyện trong WebUI
+
+Trang Attempt tải thông tin lần chạy, snapshot, Workers và page tối đa 200 step
+mới nhất để hiển thị trước. Các page step cũ được tải tuần tự ở nền; event chẩn
+đoán và epoch.metrics.finalized được đọc riêng theo cursor/filter, không phải
+đợi hết step history mới có metrics. Reconnect chỉ đọc thêm tới vùng step đã biết.
+
+Các GET trùng path/query/options/headers đang pending được chia sẻ. Mỗi nơi gọi
+có signal hủy riêng; chỉ hủy request nền khi không còn nơi nào chờ. POST và các
+mutation không được gộp. Cache history tối đa 24 entries, TTL 60 giây; baseline
+chỉ cache khi tất cả request thành công và terminal Attempt có snapshot fresh
+cùng state. Active/stale/error baseline không được dùng lại như dữ liệu fresh.
+
+Đổi Attempt hoặc rời trang hủy lượt tải cũ; response cũ không thay dữ liệu mới.
+Page lỗi giữ row đã tải và cursor để Retry, không làm mất lịch sử đang xem.
+Khi thêm step cũ, chart giữ step người dùng đang chọn; nếu đang theo newest thì
+tiếp tục theo newest. Metrics không bị sampling hay lấy trung bình để giảm request.
+
+## Điều hướng và dữ liệu WebUI
+
+/jobs quản lý cấu hình Job; READY là cấu hình đã chốt, không phải một lượt đang
+huấn luyện. Trang Job hiển thị riêng lần chạy hiện tại/gần nhất, execution mode,
+trạng thái và lỗi của Attempt; tải thêm lịch sử theo cursor của đúng Job.
+/runs là danh sách lượt huấn luyện, có lọc và tải thêm theo cursor; chọn lượt chạy
+mở metrics của attempt_id tương ứng. /live phục vụ Attempt hiện tại và hiển thị
+cluster idle khi không có lượt active. Các URL /training và /training/runs được
+chuyển tới /jobs và /runs để giữ đường dẫn điều hướng cũ.
+
+Metadata dòng history đi theo Job.dataset_build_id -> DatasetBuild.dataset_id
+-> Dataset.dataset_id. Thiếu metadata thì hiển thị không khả dụng, không lấy
+Dataset đầu tiên thay thế. Số thứ tự lượt chạy chỉ suy từ attempt_count khi
+latest_attempt khớp prefix history đã tải; thiếu/inconsistent metadata không đoán.
+Bộ đếm và bộ lọc trên /runs ghi rõ phạm vi các lượt đã tải. Tải page lỗi vẫn giữ
+các row hiện có và cho thử lại; thời gian thiếu/sai không hiển thị NaN hoặc giả
+báo một lượt terminal còn đang chạy.
+
+Checkpoint list bổ sung epoch nullable từ recovery_cursor_jsonb hiện có, nhận cả
+object và JSON string, giữ đúng epoch 0 và không suy giá trị khi metadata thiếu.
+Các trang Dataset/Build, charts, topology và drawer dùng chung format thời gian,
+nhãn trạng thái và thành phần hiển thị; không thay training lifecycle hoặc API
+điều khiển. WebUI tiếp tục chỉ gọi Management Backend.
