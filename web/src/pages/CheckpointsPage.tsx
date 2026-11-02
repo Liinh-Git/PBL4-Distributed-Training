@@ -7,6 +7,7 @@ import {
   ChevronRight,
 } from 'lucide-react';
 import { CheckpointStateBadge } from '../components/common/Badge';
+import { ModelDownloadLink } from '../components/common/ModelDownloadLink';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { useNavigate, Link } from 'react-router-dom';
 import { attemptsService, checkpointsService, jobsService } from '../api';
@@ -335,9 +336,11 @@ export const CheckpointsPage: React.FC = () => {
                           {formatTimestamp(cp.completed_at || cp.created_at)}
                         </td>
 
-                        {/* Column 5: Thao tác (chỉ nút Tiếp tục) */}
                         <td className="py-3 px-3.5 text-right">
-                          <div className="flex items-center justify-end">
+                          <div className="flex items-center justify-end gap-2">
+                            {isRecoverable && (
+                              <ModelDownloadLink checkpointId={cp.checkpoint_id} />
+                            )}
                             {isRecoverable && cp.job_id ? (
                               <button
                                 type="button"
@@ -385,9 +388,11 @@ export const CheckpointsPage: React.FC = () => {
                                 {formatTimestamp(subCp.completed_at || subCp.created_at)}
                               </td>
 
-                              {/* Actions (chỉ nút Tiếp tục) */}
                               <td className="py-2.5 px-3.5 text-right">
-                                <div className="flex items-center justify-end">
+                                <div className="flex items-center justify-end gap-2">
+                                  {subRecoverable && (
+                                    <ModelDownloadLink checkpointId={subCp.checkpoint_id} />
+                                  )}
                                   {subRecoverable && subCp.job_id ? (
                                     <button
                                       type="button"

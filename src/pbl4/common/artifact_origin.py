@@ -1,9 +1,12 @@
-"""Validation and safe URL resolution for immutable dataset artifacts."""
+"""Validation and safe URL resolution for immutable HTTP artifacts."""
 
 from __future__ import annotations
 
 import posixpath
 from urllib.parse import unquote, urlsplit, urlunsplit
+
+# Private model artifact HTTP uses the existing Backend/Runtime deployment identity.
+MODEL_ARTIFACT_PORT = 9002
 
 
 def _validated_http_url(value: str, *, name: str) -> tuple[str, str, str]:

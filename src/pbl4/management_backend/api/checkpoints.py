@@ -2,17 +2,27 @@
 
 GET /api/v1/checkpoints                 — list checkpoints
 GET /api/v1/checkpoints/{checkpoint_id} — get checkpoint detail
+GET /api/v1/checkpoints/{checkpoint_id}/model — download model export
 """
 
 from __future__ import annotations
 
+import json
 import logging
+from contextlib import ExitStack
 from typing import Annotated
 
+import httpx
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 
-from pbl4.management_backend import db
-from pbl4.management_backend.repositories import checkpoint_repository
+from pbl4.management_backend import config, db
+from pbl4.management_backend.repositories import (
+    attempt_repository,
+    checkpoint_repository,
+    job_repository,
+)
 from pbl4.management_backend.schemas.checkpoint import (
     CheckpointDetail,
     CheckpointIntegrity,
@@ -20,6 +30,7 @@ from pbl4.management_backend.schemas.checkpoint import (
     CheckpointRecoveryCursor,
 )
 from pbl4.management_backend.schemas.common import ItemResponse, ListResponse, PageInfo
+from pbl4.management_backend.services.checkpoint_artifacts import artifact_client, descriptor
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Checkpoints"])
@@ -31,8 +42,6 @@ def _row_to_list_item(row: dict) -> CheckpointListItem:
         rc = row.get("recovery_cursor_jsonb")
         if isinstance(rc, str):
             try:
-                import json
-
                 rc = json.loads(rc)
             except Exception:
                 rc = {}
@@ -53,8 +62,6 @@ def _row_to_list_item(row: dict) -> CheckpointListItem:
 
 
 def _row_to_detail(row: dict) -> CheckpointDetail:
-    import json
-
     rc = row.get("recovery_cursor_jsonb") or {}
     if isinstance(rc, str):
         rc = json.loads(rc)
@@ -131,12 +138,59 @@ def list_checkpoints(
 def get_checkpoint(checkpoint_id: str):
     with db.get_connection() as conn:
         row = checkpoint_repository.get_checkpoint(conn, checkpoint_id)
-        if row is None:
+        if row is None or row["artifact_retired"]:
             raise HTTPException(status_code=404, detail=f"Checkpoint '{checkpoint_id}' not found.")
         # Fetch job_id via attempt
-        from pbl4.management_backend.repositories import attempt_repository
-
         attempt = attempt_repository.get_attempt(conn, row["created_by_attempt_id"])
         if attempt:
             row["job_id"] = attempt["job_id"]
     return ItemResponse(data=_row_to_detail(row))
+
+
+@router.get("/api/v1/checkpoints/{checkpoint_id}/model", response_class=StreamingResponse)
+def download_model(checkpoint_id: str):
+    """Download a verified model export from a completed checkpoint."""
+    settings = config.get_settings()
+    if not settings.runtime_artifact_token:
+        raise HTTPException(503, "Model export is not configured")
+    with db.get_connection() as conn:
+        row = checkpoint_repository.get_checkpoint(conn, checkpoint_id)
+        if row is None:
+            raise HTTPException(404, "Checkpoint not found")
+        if row["state"] != "COMPLETE" or row["artifact_retired"]:
+            raise HTTPException(409, "Checkpoint artifact is unavailable")
+        attempt = attempt_repository.get_attempt(conn, row["created_by_attempt_id"])
+        job = job_repository.get_job(conn, attempt["job_id"])
+        contract = job["resolved_contract"]
+        if isinstance(contract, str):
+            contract = json.loads(contract)
+    stack = ExitStack()
+    try:
+        client = stack.enter_context(artifact_client(settings))
+        response = stack.enter_context(client.export(descriptor(row), contract))
+    except httpx.HTTPStatusError as exc:
+        stack.close()
+        status = 409 if exc.response.status_code in (404, 409) else 503
+        raise HTTPException(status, "Model export is unavailable") from exc
+    except (httpx.HTTPError, ValueError) as exc:
+        stack.close()
+        raise HTTPException(503, "Model export is unavailable") from exc
+
+    def chunks():
+        try:
+            yield from response.iter_bytes(65536)
+        finally:
+            stack.close()
+
+    filename = f"model-{row['model_sha256'][:12]}.zip"
+    return StreamingResponse(
+        chunks(),
+        media_type="application/zip",
+        background=BackgroundTask(stack.close),
+        headers={
+            "Content-Length": response.headers["Content-Length"],
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Accept-Ranges": "none",
+            "Cache-Control": "no-store",
+        },
+    )

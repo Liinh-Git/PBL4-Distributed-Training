@@ -48,6 +48,7 @@ from pbl4.management_backend.services.attempt_service import (
     JobNotReadyError,
     RuntimeUnavailableError,
 )
+from pbl4.management_backend.services.checkpoint_artifacts import maintenance_loop
 from pbl4.management_backend.services.cluster_scheduler import (
     NodeCapacityUnavailableError,
 )
@@ -232,6 +233,9 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Start periodic node & allocation maintenance loop
     maintenance_task = asyncio.create_task(_node_maintenance_loop(settings))
     snapshot_task = asyncio.create_task(_runtime_snapshot_loop(runtime_gateway))
+    artifact_task = None
+    if settings.database_url and settings.runtime_artifact_token:
+        artifact_task = asyncio.create_task(maintenance_loop(settings))
 
     # Initialize Dataset Manager client
     from pbl4.management_backend.clients.dataset_manager import init_client
@@ -245,6 +249,10 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
 
     # Shutdown
+    if artifact_task is not None:
+        artifact_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await artifact_task
     snapshot_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await snapshot_task

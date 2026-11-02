@@ -28,6 +28,7 @@ data model specifications.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 
 
@@ -69,3 +70,13 @@ def canonical_json_hash(value: object) -> str:
 def sha256_canonical_json(value: object) -> str:
     """Hash canonical JSON rather than presentation whitespace or key order."""
     return canonical_json_hash(value)
+
+
+def derive_model_artifact_token(secret: str) -> str:
+    """Create the Runtime/Backend model artifact token without sending their shared secret."""
+    if not secret:
+        raise ValueError("Shared secret is required")
+    # A fixed label gives model downloads/purge their own token, separate from Worker admission.
+    return hmac.new(
+        secret.encode("utf-8"), b"pbl4:model-artifact-http:v1", hashlib.sha256
+    ).hexdigest()

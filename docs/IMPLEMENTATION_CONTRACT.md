@@ -1,5 +1,24 @@
 # Implementation Contract — PBL4 Distributed Training
 
+User-approved checkpoint/model-export scope (2026-11-02): preserve the current
+periodic every_n_epochs policy, manual request and final save behavior. Keep the
+three newest verified COMPLETE artifacts per Job plus durable resume references.
+Retention count and maintenance cadence are implementation constants, not environment
+knobs. No new environment fields or CLI flags are introduced: the internal HTTP
+port is 9002, Backend reuses RUNTIME_HOST, and both sides derive an artifact-only
+HMAC credential from the existing PBL4_WORKER_ADMISSION_SECRET. The root secret is
+never transmitted by artifact HTTP; Worker admission signing is unchanged.
+Management maintenance coordinates cleanup over a dedicated authenticated artifact
+HTTP endpoint in the Runtime process, outside the training loop. Existing checkpoints
+and management events provide retry/replay protection; completed cleanup removes old
+checkpoint rows and bytes, without a new table, column, enum or migration.
+The user-approved exception allows Management Backend to stream a completed immutable
+model export bundle to WebUI. Training gradient/parameter traffic remains DTP/1 only;
+MCP/WS/Redis/SQL never carry model bytes. Runtime/Backend still do not import torch or
+each other's implementation. See docs/API.md for configuration and usage. This decision
+supersedes historical per-update cadence descriptions below for this feature only.
+
+
 Phase 2 execution update (user-approved scope, 2026-10-13): in the trusted test
 environment, `pbl4-agent start` auto-enrolls via `POST /api/v1/nodes/enroll`
 without an enrollment code, then persists/reuses Node identity. Periodic hardware
@@ -137,7 +156,7 @@ Runtime concurrency is organized by single-responsibility ownership rather than 
 | Worker session state | `WorkerRegistry` | Thread-safe session tracking and logical rank assignment |
 | Synchronization decisions | `SynchronizationPolicy` | Evaluates contribution admission and update readiness |
 | Canonical Model mutation | `UpdateEngine` & restore path | CanonicalModel mutation is restricted to the UpdateEngine update path and the approved restore path; no other component may mutate canonical parameters |
-| Checkpoint cadence | `CheckpointPolicy` | Evaluates when a checkpoint must be triggered (StrictBSP V1: after_each_model_update_blocking; step progression requires checkpoint COMPLETE) |
+| Checkpoint cadence | `CheckpointPolicy` | Current approved periodic every_n_epochs policy; manual/final saves use the existing safe boundaries. Historical per-update policy identity keeps its historical meaning. |
 | Checkpoint durability | `CheckpointManager` | Serializes/deserializes model weights to/from disk |
 | Event buffering | `EventEmitter` | Non-blocking bounded queue; background publisher ACKs queue entries after Redis XADD confirmation when configured, otherwise MCP/1 delivery |
 

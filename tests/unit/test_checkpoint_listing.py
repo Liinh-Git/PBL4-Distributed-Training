@@ -34,6 +34,8 @@ def test_complete_checkpoints_are_job_scoped_and_paginated_without_ambiguous_col
         database.row_factory = sqlite3.Row
         database.executescript("""
             CREATE TABLE attempts (attempt_id TEXT, job_id TEXT, state TEXT, created_at TEXT);
+            CREATE TABLE events (event_id INTEGER, attempt_id TEXT, scope_type TEXT,
+                                 scope_id TEXT, event_type TEXT, occurred_at TEXT);
             CREATE TABLE checkpoints (
                 checkpoint_id TEXT, created_by_attempt_id TEXT, state TEXT, created_at TEXT
             );

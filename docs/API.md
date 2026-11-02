@@ -36,6 +36,7 @@ Khi thay đổi semantics API, đối chiếu canonical owner trước; không c
 implementation là nguồn phê duyệt semantics mới. API contract lịch sử có thể
 tra cứu trong Git, không dùng làm contract hiện hành.
 
+
 ## Training preparation, launch và resume
 
 Launch/Resume kiểm tra không có active Attempt toàn hệ thống trước khi gửi lệnh;
@@ -105,3 +106,65 @@ object và JSON string, giữ đúng epoch 0 và không suy giá trị khi metad
 Các trang Dataset/Build, charts, topology và drawer dùng chung format thời gian,
 nhãn trạng thái và thành phần hiển thị; không thay training lifecycle hoặc API
 điều khiển. WebUI tiếp tục chỉ gọi Management Backend.
+
+## Checkpoint/model artifacts — quyết định người dùng 2026-11-02
+
+Cadence đang dùng là periodic mỗi N epoch, cùng manual/final checkpoint hiện có.
+Retention giữ 3 bản COMPLETE mới nhất mỗi Job, cộng bản còn được tham chiếu để resume.
+Cleanup chạy ngoài training loop và dùng checkpoints/events hiện có; không cần migration.
+File canonical nằm trên máy Runtime tại checkpoint root đã cấu hình:
+`<root>/<attempt_id>/<sha256(checkpoint_id)>/model.bin` và `checkpoint.json`.
+Launcher hiện có dùng `<PBL4_STATE_DIR>/checkpoints`, mặc định `var/checkpoints`
+dưới repo; chạy Runtime trực tiếp dùng `--checkpoint-dir` hiện có.
+Event quản trị checkpoint.artifact.retired ngăn resume/download mới và chống replay tạo lại
+checkpoint đã hết hạn. Khi file purge thành công, bản ghi checkpoint cũ bị xóa.
+List chỉ trả checkpoint chưa hết hạn; detail trả 404 ngay khi checkpoint đã được
+đánh dấu dọn, kể cả khi purge đang chờ. Không đưa trạng thái cleanup ra DTO/WebUI.
+
+GET /api/v1/checkpoints/{checkpoint_id}/model trả ZIP hoàn chỉnh qua Backend,
+theo ngoại lệ model export đã được người dùng duyệt. ZIP gồm model.bin,
+checkpoint.json, parameter-manifest.json, resolved-contract.json và README.
+Runtime/Backend không import torch; helper pbl4.adapter.model_export dùng model factory
+và adapter hiện có để nạp ZIP trên máy người dùng có worker dependencies.
+
+Response thành công: application/zip, Content-Length, Content-Disposition attachment,
+Cache-Control: no-store, Accept-Ranges: none. V1 không hỗ trợ tải tiếp bằng Range.
+404 khi không có checkpoint; 409 khi WRITING/FAILED/đang hết hạn hoặc artifact không
+thể xác minh/export; 503 khi chưa cấu hình hoặc Runtime artifact HTTP không sẵn sàng.
+Không trả đường dẫn filesystem hay token ra client.
+
+Inventory xác minh payload trước khi tính vào ba recovery point cần giữ. Retirement
+kiểm tra lại cùng inventory dưới khóa theo Job; resume khóa cùng row checkpoint và
+đọc lại retirement bằng statement mới sau khi chờ khóa. Purge thất bại được thử lại,
+không làm mất durable resume reference.
+
+HTTP nội bộ Runtime hỗ trợ GET /inventory?after=...&limit=..., POST /export và POST /purge.
+Các POST dùng descriptor checkpoint/attempt/hash; export kèm frozen contract đã pin.
+Endpoint dùng cổng nội bộ 9002 và Bearer credential dẫn xuất HMAC theo purpose riêng
+từ PBL4_WORKER_ADMISSION_SECRET đã có. Backend dùng RUNTIME_HOST hiện có; không thêm
+environment field hay CLI flag. Root secret không gửi qua HTTP. Browser chỉ gọi
+Backend; credential không đưa vào WebUI, MCP, Redis hoặc WebSocket.
+
+HTTP/1.1 tái sử dụng kết nối trong một lượt maintenance/download. Export hash và copy
+model vào ZIP bằng buffer cố định; Backend stream từng chunk. Inventory có cache xác
+minh tối đa 256 payload trong 5 phút, gắn với digest và file stat; file đổi phải xác
+minh lại, export/purge luôn kiểm tra bytes thực tế. Thư mục ZIP tạm được dọn sau tải
+hoặc lỗi/ngắt kết nối; HTTP chỉ cho tối đa bốn thao tác artifact đồng thời.
+
+Sau khi duyệt code, khởi động lại Runtime rồi Backend bằng cấu hình shared secret
+hiện có để bật HTTP và maintenance. Backend phải truy cập được Runtime ở cổng 9002.
+Maintenance chạy mỗi 30 giây. Muốn xem candidate trước khi Backend tự dọn, chạy
+trên máy Backend trước khi khởi động Backend bằng code mới:
+
+```powershell
+.venv/Scripts/python.exe -c "from pbl4.management_backend.config import get_settings; from pbl4.management_backend.services.checkpoint_artifacts import maintain_checkpoints; maintain_checkpoints(get_settings(), dry_run=True)"
+```
+
+Nếu shared secret để trống thì artifact HTTP/download/retention không bật.
+Save checkpoint vẫn giữ cadence hiện có. Máy nạp model cần worker dependencies
+của PBL4 tương ứng:
+
+```python
+from pbl4.adapter.model_export import load_exported_model
+model = load_exported_model('model.zip')
+```

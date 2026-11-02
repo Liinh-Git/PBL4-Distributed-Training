@@ -16,6 +16,7 @@ import {
   ArrowLeft,
 } from 'lucide-react';
 import { useAttemptStream } from '../hooks/useAttemptStream';
+import { ModelDownloadLink } from '../components/common/ModelDownloadLink';
 import { attemptsService, workersService, stepsService, systemService, jobsService, checkpointsService } from '../api';
 import { isActiveAttempt } from '../api/attempts';
 import { historyReads, HISTORY_CACHE_MS, isTerminalAttempt, loadEpochHistory } from '../api/attemptHistory';
@@ -390,11 +391,22 @@ export const LiveTrainingPage: React.FC<LiveTrainingPageProps> = ({
     };
   }, [attempt?.attempt_id, attempt?.state, attempt?.runtime_metadata, attempt?.resume_from_checkpoint_id, events, jobDetail]);
 
+  const checkpointSubmittingRef = useRef(false);
+  const [checkpointSubmitting, setCheckpointSubmitting] = useState(false);
+  const [checkpointFeedback, setCheckpointFeedback] = useState<string | null>(null);
   const handleRequestCheckpoint = async () => {
+    if (checkpointSubmittingRef.current) return;
+    checkpointSubmittingRef.current = true;
+    setCheckpointSubmitting(true);
+    setCheckpointFeedback(null);
     try {
       await stream.requestCheckpoint('manual');
+      setCheckpointFeedback('Đã gửi yêu cầu. Checkpoint hoàn tất sẽ xuất hiện trong danh sách.');
     } catch (err: any) {
-      alert(`Checkpoint request failed: ${err?.message || 'Unknown error'}`);
+      setCheckpointFeedback(`Không gửi được yêu cầu: ${err?.message || 'Lỗi không xác định'}`);
+    } finally {
+      checkpointSubmittingRef.current = false;
+      setCheckpointSubmitting(false);
     }
   };
 
@@ -540,6 +552,7 @@ export const LiveTrainingPage: React.FC<LiveTrainingPageProps> = ({
 
   return (
     <div className="space-y-4 w-full pb-10 font-sans select-none">
+      {checkpointFeedback && <p className="text-xs text-[#a1a1a8]" role="status">{checkpointFeedback}</p>}
       {/* Final Checkpoint Failure Persistent Warning */}
       {attempt.state === 'COMPLETED' && recoveryInfo.status === 'final_failed' && (
         <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded text-xs text-amber-200 space-y-2">
@@ -724,6 +737,10 @@ export const LiveTrainingPage: React.FC<LiveTrainingPageProps> = ({
 
           {/* Action buttons */}
           <div className="flex items-center gap-2 self-start sm:self-center">
+            {attempt.state === 'COMPLETED' && recoveryInfo.status === 'verified_final'
+              && recoveryInfo.checkpointId && (
+                <ModelDownloadLink checkpointId={recoveryInfo.checkpointId} />
+              )}
             {(() => {
               const manualCheckpointAllowed =
                 capabilities?.feature_flags?.manual_checkpoint_request !== false;
@@ -731,7 +748,7 @@ export const LiveTrainingPage: React.FC<LiveTrainingPageProps> = ({
                 <button
                   type="button"
                   onClick={handleRequestCheckpoint}
-                  disabled={attempt.state !== 'RUNNING' || !manualCheckpointAllowed}
+                  disabled={checkpointSubmitting || attempt.state !== 'RUNNING' || !manualCheckpointAllowed}
                   title={
                     !manualCheckpointAllowed
                       ? 'Manual checkpoint disabled by system capabilities'
@@ -740,7 +757,7 @@ export const LiveTrainingPage: React.FC<LiveTrainingPageProps> = ({
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-[#171719] hover:bg-[#202024] text-[#f3f3f4] text-xs font-normal transition-colors border border-white/[0.07] disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   <Save className="w-3.5 h-3.5 text-[#73737c]" />
-                  <span>Checkpoint</span>
+                  <span>{checkpointSubmitting ? 'Đang gửi...' : 'Lưu checkpoint'}</span>
                 </button>
               );
             })()}

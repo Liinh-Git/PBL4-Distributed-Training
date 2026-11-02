@@ -54,6 +54,9 @@ export const buildQueryString = (params?: QueryParams): string => {
 };
 
 export class ApiClient {
+  urlFor(path: string): string {
+    return `${this.baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
+  }
   private readonly baseUrl: string;
   private readonly reads = new SharedReads();
 
@@ -81,8 +84,7 @@ export class ApiClient {
 
     const method = fetchOptions.method || 'GET';
     const queryString = buildQueryString(params);
-    const cleanPath = path.startsWith('/') ? path : `/${path}`;
-    const url = `${this.baseUrl}${cleanPath}${queryString}`;
+    const url = `${this.urlFor(path)}${queryString}`;
 
     // Prepare headers with Idempotency-Key support and Content-Type
     const headers = withIdempotencyHeader(customHeaders, method, idempotencyKey);

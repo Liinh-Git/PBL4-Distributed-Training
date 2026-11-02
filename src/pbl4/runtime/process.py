@@ -15,16 +15,22 @@ from urllib.parse import unquote, urlsplit
 
 import numpy as np
 
-from pbl4.common.artifact_origin import derive_root_manifest_path, resolve_artifact_url
-from pbl4.common.hashing import canonical_json_bytes, sha256_bytes
+from pbl4.common.artifact_origin import (
+    MODEL_ARTIFACT_PORT,
+    derive_root_manifest_path,
+    resolve_artifact_url,
+)
+from pbl4.common.hashing import canonical_json_bytes, derive_model_artifact_token, sha256_bytes
 from pbl4.common.model_profiles import MODEL_PROFILES
 from pbl4.common.work_unit import WorkUnitRef
 from pbl4.protocol.messages import DatasetAssignment, StepStart
 from pbl4.protocol.parameter_manifest import ParameterManifest
 from pbl4.protocol.transfer import CompletedTensorTransfer
+from pbl4.runtime.artifact_http import ArtifactHTTP
 from pbl4.runtime.batch_scheduler import BatchScheduler, RecoveryCursor
 from pbl4.runtime.canonical_model import CanonicalModel, ModelSnapshot
 from pbl4.runtime.checkpoint import CheckpointManager, CompleteCheckpoint
+from pbl4.runtime.checkpoint_artifacts import CheckpointArtifacts
 from pbl4.runtime.checkpoint_policy import CheckpointPolicy
 from pbl4.runtime.checkpoint_v1 import CheckpointV1Serializer
 from pbl4.runtime.coordinator import Coordinator
@@ -145,6 +151,7 @@ class RuntimeProcess:
         self._checkpoint_dir = Path(checkpoint_dir)
         self._manifest = parameter_manifest
         self._manifests = dict(parameter_manifests or {})
+        self._artifact_http = None
         if parameter_manifest is None and not self._manifests:
             raise ValueError("At least one parameter manifest is required")
         self._heartbeat_timeout = heartbeat_timeout_seconds
@@ -173,6 +180,25 @@ class RuntimeProcess:
     def run(self) -> None:
         self._management.start()
         self._event_thread.start()
+        if self._worker_admission_secret:
+            token = derive_model_artifact_token(self._worker_admission_secret)
+            try:
+                manifests = list(self._manifests.values())
+                if self._manifest is not None:
+                    manifests.append(self._manifest)
+                self._artifact_http = ArtifactHTTP(
+                    self._host,
+                    MODEL_ARTIFACT_PORT,
+                    token,
+                    CheckpointArtifacts(
+                        self._checkpoint_dir,
+                        manifests,
+                        protected_ids=lambda: {str(self.snapshot().get("latest_checkpoint_id"))},
+                    ),
+                )
+                self._artifact_http.start()
+            except OSError:
+                logger.exception("Artifact HTTP unavailable; training remains available")
         logger.info(
             "Runtime ready MCP=%s DTP=%s:%s manifest=%s",
             self._management.bound_address,
@@ -192,6 +218,8 @@ class RuntimeProcess:
             self._stopping.set()
             self._event_thread.join(5.0)
             self._management.stop()
+            if self._artifact_http is not None:
+                self._artifact_http.stop()
 
     def stop(self) -> None:
         self._stopping.set()
