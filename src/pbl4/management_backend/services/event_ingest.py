@@ -1,4 +1,4 @@
-"""Event Ingest Service — processes and persists runtime events from MCP/1.
+"""Event Ingest Service — persists Runtime events independently of their transport.
 
 Guarantees:
 - Monotonic sequence tracking per attempt.
@@ -115,45 +115,6 @@ def ingest_runtime_event(
     now = datetime.now(UTC)
     norm_payload = payload or {}
 
-    # Check deduplication and payload integrity if sequence number is present
-    if attempt_id is not None and runtime_event_seq is not None:
-        existing = event_repository.get_event_by_seq(conn, attempt_id, runtime_event_seq)
-        if existing is not None:
-            if _is_semantic_event_equal(
-                existing,
-                attempt_id=attempt_id,
-                runtime_event_seq=runtime_event_seq,
-                event_type=event_type,
-                severity=severity,
-                occurred_at=occurred_at,
-                source_component=source_component,
-                scope_type=scope_type,
-                scope_id=scope_id,
-                norm_payload=norm_payload,
-            ):
-                logger.debug(
-                    "Idempotent duplicate runtime event skipped: attempt_id=%s seq=%s",
-                    attempt_id,
-                    runtime_event_seq,
-                )
-                return RuntimeEventIngestResult(existing, inserted=False)
-            logger.error(
-                "Conflicting semantic event: attempt_id=%s seq=%s existing=%s new=%s",
-                attempt_id,
-                runtime_event_seq,
-                existing,
-                {
-                    "event_type": event_type,
-                    "severity": severity,
-                    "source_component": source_component,
-                    "occurred_at": occurred_at,
-                    "payload": norm_payload,
-                },
-            )
-            raise ConflictingEventPayloadError(
-                f"Conflicting semantic event for attempt {attempt_id} event seq {runtime_event_seq}"
-            )
-
     row = event_repository.insert_event(
         conn,
         event_type=event_type,
@@ -188,6 +149,7 @@ def ingest_runtime_event(
             raise ConflictingEventPayloadError(
                 f"Conflicting semantic event for attempt {attempt_id} event seq {runtime_event_seq}"
             )
+        raise RuntimeError("Event insert returned no row and no existing event")
 
     return RuntimeEventIngestResult(row, inserted=row is not None)
 
@@ -214,12 +176,31 @@ def broadcast_runtime_event(
             "occurred_at": occurred_at.isoformat(),
             "payload": {
                 "event_type": event_type,
+                "event_schema_version": 1,
                 "severity": severity,
                 "source_component": source_component,
-                **(payload or {}),
+                "details": payload or {},
             },
         },
     )
+
+
+def snapshot_frame(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Canonical WS state wrapper, shared by live delivery and catch-up."""
+    state = dict(snapshot)
+    state["state"] = state.pop("attempt_state", state.get("state"))
+    return {
+        "kind": "SNAPSHOT",
+        "attempt_id": snapshot.get("attempt_id") or snapshot.get("active_attempt_id"),
+        "runtime_event_seq": None,
+        "occurred_at": datetime.now(UTC).isoformat(),
+        "payload": {
+            "snapshot_seq": snapshot.get(
+                "authoritative_snapshot_seq", snapshot.get("last_runtime_event_seq")
+            ),
+            "state": state,
+        },
+    }
 
 
 def ingest_management_event(
@@ -257,9 +238,10 @@ def ingest_management_event(
                     "occurred_at": now.isoformat(),
                     "payload": {
                         "event_type": event_type,
+                        "event_schema_version": 1,
                         "severity": severity,
                         "source_component": "Management",
-                        **(payload or {}),
+                        "details": payload or {},
                     },
                 },
             )

@@ -29,7 +29,6 @@ from pbl4.runtime.update_engine import UpdateEngine
 from pbl4.runtime.worker_registry import SessionState, WorkerRegistry
 from pbl4.runtime.workload_scheduler import WorkloadScheduler
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -152,8 +151,18 @@ class Coordinator:
                 and model_ver == self._model.snapshot().model_version
             )
 
+    def _strategy_snapshot(self) -> dict[str, object]:
+        return {**self._policy.snapshot(), "state": self._step_state}
 
     def _event(self, event_type: str, details: dict[str, object], severity: str = "INFO") -> None:
+        if event_type in {
+            "step.started",
+            "gradient.accepted",
+            "model.updated",
+            "parameter.applied",
+            "step.committed",
+        }:
+            details = {**details, "strategy_state": self._strategy_snapshot()}
         self._events.emit(event_type, details, _now(), "coordinator", severity)
 
     def _transition(self, state: str) -> None:
@@ -222,6 +231,7 @@ class Coordinator:
                     "batch_ordinal": operation.batch_ordinal,
                     "input_model_version": operation.input_model_version,
                     "training_strategy": self._context.training_strategy,
+                    "started_at": self._milestones["started_at"],
                     "assignments": [
                         {
                             "worker_id": item.worker_id,
@@ -251,6 +261,15 @@ class Coordinator:
                 return decision, None
             self._store.record(contribution, decision)
             plan = decision.update_plan
+            self._event(
+                "gradient.accepted",
+                {
+                    "step_id": contribution.step_id,
+                    "operation_id": contribution.operation_id,
+                    "worker_id": contribution.worker_id,
+                    "session_id": contribution.session_id,
+                },
+            )
             if plan is None:
                 return decision, None
             self._plan = plan
@@ -273,19 +292,16 @@ class Coordinator:
                         "input_model_version": plan.input_model_version,
                         "output_model_version": published.model_version,
                         "total_sample_count": plan.total_sample_count,
+                        "update_completed_at": self._milestones["update_completed_at"],
                         "contributions": [
                             {
                                 "worker_id": item.worker_id,
                                 "session_id": item.session_id,
                                 "shard_id": item.shard_id,
                                 "batch_id": item.batch_id,
-                                "batch_ordinal": item.batch_ordinal,
                                 "sample_count": item.sample_count,
-                                "tensor_id": item.tensor_id,
-                                "parameter_manifest_hash": item.parameter_manifest_hash,
                                 "loss": item.loss,
                                 "compute_ms": item.compute_ms,
-                                "correct_count": item.correct_count,
                             }
                             for item in plan.contributions
                         ],
@@ -367,7 +383,9 @@ class Coordinator:
             self._plan = None
             self._store.discard(self._context.attempt_id, operation.operation_id)
 
-            total_sample_count = sum(assignment.sample_count for assignment in operation.assignments)
+            total_sample_count = sum(
+                assignment.sample_count for assignment in operation.assignments
+            )
             self._event(
                 "step.committed",
                 {
@@ -376,8 +394,12 @@ class Coordinator:
                     "input_model_version": operation.input_model_version,
                     "output_model_version": output_model_version,
                     "epoch": operation.epoch,
-                    "batch_ordinal": operation.assignments[0].batch_ordinal if operation.assignments else 0,
+                    "batch_ordinal": operation.assignments[0].batch_ordinal
+                    if operation.assignments
+                    else 0,
                     "total_sample_count": total_sample_count,
+                    "started_at": self._milestones["started_at"],
+                    "update_completed_at": self._milestones["update_completed_at"],
                     "synchronization_completed_at": self._milestones.get(
                         "synchronization_completed_at", self._milestones["committed_at"]
                     ),
@@ -403,7 +425,9 @@ class Coordinator:
 
             return next_cursor
 
-    def save_checkpoint_for_current_revision(self, *, is_final: bool = False) -> CompleteCheckpoint | None:
+    def save_checkpoint_for_current_revision(
+        self, *, is_final: bool = False
+    ) -> CompleteCheckpoint | None:
         with self._lock:
             if self._state not in ("RUNNING", "COMPLETED"):
                 raise ValueError("Checkpoint safe boundary has not been reached")
@@ -502,7 +526,10 @@ class Coordinator:
         with self._lock:
             if self._state not in ("RUNNING", "COMPLETED"):
                 raise ValueError("Checkpoint safe boundary has not been reached")
-            if self._step_state == "WAITING_PARAMETER_APPLIED" and self._policy.synchronization_complete:
+            if (
+                self._step_state == "WAITING_PARAMETER_APPLIED"
+                and self._policy.synchronization_complete
+            ):
                 self.commit_synchronized_step()
             elif self._step_state != "COMMITTED" and not (self._step_state is None and is_final):
                 raise ValueError("Checkpoint safe boundary has not been reached")
@@ -555,7 +582,9 @@ class Coordinator:
 
     def complete(self) -> None:
         with self._lock:
-            if self._state != "RUNNING" or (self._step_state is not None and self._step_state != "COMMITTED"):
+            if self._state != "RUNNING" or (
+                self._step_state is not None and self._step_state != "COMMITTED"
+            ):
                 raise ValueError("Attempt still has uncommitted work")
             try:
                 self._scheduler.assignments(self._cursor)
@@ -585,7 +614,7 @@ class Coordinator:
                 "latest_checkpoint_id": self._latest.snapshot.checkpoint_id
                 if self._latest
                 else None,
-                "strategy_state": self._policy.snapshot(),
+                "strategy_state": self._strategy_snapshot(),
                 "milestones": dict(self._milestones),
                 **self._events.snapshot(),
             }

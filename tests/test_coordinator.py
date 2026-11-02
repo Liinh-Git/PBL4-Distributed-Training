@@ -314,7 +314,6 @@ def test_a1_abort_during_checkpoint_write_does_not_publish(tmp_path, monkeypatch
     coordinator, manager = running(tmp_path)
     op, _ = updated(coordinator)
     applied(coordinator, op)
-    before = coordinator.snapshot()
     entered, release = Event(), Event()
     original = manager.write
 
@@ -345,7 +344,6 @@ def test_a2_worker_failure_during_checkpoint_write_does_not_publish(tmp_path, mo
     coordinator, manager = running(tmp_path)
     op, _ = updated(coordinator)
     applied(coordinator, op)
-    before = coordinator.snapshot()
     entered, release = Event(), Event()
     original = manager.write
 
@@ -423,7 +421,7 @@ def test_a4_previous_valid_checkpoint_survives_aborted_step(tmp_path, monkeypatc
 
 
 def test_coordinator_complete_transitions_directly_to_completed_without_completing(tmp_path):
-    coordinator, manager = running(tmp_path)
+    coordinator, _ = running(tmp_path)
     coordinator._events.drain()
 
     # Step 0
@@ -463,7 +461,7 @@ def test_coordinator_complete_transitions_directly_to_completed_without_completi
 
 
 def test_coordinator_complete_rejected_if_step_not_committed(tmp_path):
-    coordinator, manager = running(tmp_path)
+    coordinator, _ = running(tmp_path)
     op = coordinator.open_step()
     coordinator.admit(contribution(op, 0))
     # Step is currently COLLECTING_GRADIENTS (not COMMITTED)
@@ -491,9 +489,8 @@ def test_model_updated_event_contains_metrics(tmp_path):
     details = updated_events[0].details
     assert "metrics" not in details
     assert len(details["contributions"]) == 3
-    assert details["contributions"][0]["correct_count"] == 1
-    assert details["contributions"][1]["correct_count"] == 1
-    assert details["contributions"][2]["correct_count"] == 0
+    assert [item["loss"] for item in details["contributions"]] == [2.0, 3.0, 4.0]
+    assert all("correct_count" not in item for item in details["contributions"])
 
     applied(coordinator, op)
     coordinator.commit_synchronized_step()
@@ -510,7 +507,12 @@ def test_model_updated_event_contains_metrics(tmp_path):
     epoch_events = [e for e in all_events if e.event_type == "epoch.metrics.finalized"]
     assert len(epoch_events) == 1
     epoch_details = epoch_events[0].details
-    assert set(epoch_details.keys()) == {"epoch_index", "sample_count", "training_loss", "training_accuracy"}
+    assert set(epoch_details.keys()) == {
+        "epoch_index",
+        "sample_count",
+        "training_loss",
+        "training_accuracy",
+    }
     assert epoch_details["epoch_index"] == 0
     assert epoch_details["sample_count"] == 8
     # (12 + (1*1 + 2*2 + 1*3)) / 8 = 20 / 8 = 2.5
@@ -575,5 +577,3 @@ def test_final_checkpoint_failure_completes_attempt_with_warning(tmp_path, monke
     # Training schedule exhausted and all steps committed -> Attempt must COMPLETE
     coordinator.complete()
     assert coordinator.snapshot()["state"] == "COMPLETED"
-
-

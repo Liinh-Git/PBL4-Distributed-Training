@@ -18,7 +18,7 @@ import contextlib
 import json
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -69,7 +69,9 @@ class DatabaseUnavailableError(Exception):
 class RuntimeGateway:
     """MCP/1 client boundary between Management Backend and Runtime."""
 
-    def __init__(self, port: McpClientPort | None = None) -> None:
+    def __init__(self, port: McpClientPort | None = None, *, redis_events: bool = False) -> None:
+        self._redis_events = redis_events
+        self.event_consumer = None
         self._port: McpClientPort = port or TruthfulDisconnectedMcpPort()
         self._runtime_instance_id: str | None = None
         self._connected_at: datetime | None = None
@@ -77,6 +79,7 @@ class RuntimeGateway:
         self._attempt_snapshots: dict[str, dict[str, Any]] = {}
         self._attempt_cursors: dict[str, AttemptRuntimeCursor] = {}
         self._pending_results: dict[str, concurrent.futures.Future[dict[str, Any]]] = {}
+        self._pretraining_attempt_id: str | None = None
         self._projection_lock = threading.RLock()
 
         self._port.set_message_handler(self._handle_inbound_message)
@@ -108,6 +111,21 @@ class RuntimeGateway:
     def get_cursor(self, attempt_id: str) -> AttemptRuntimeCursor:
         """Return the sequence cursor owned exclusively by one Attempt."""
         return self._attempt_cursors.setdefault(attempt_id, AttemptRuntimeCursor())
+
+    def _restore_event_cursor(self, attempt_id: str, conn: Any) -> None:
+        """Redis delivery resumes from committed projections, not a newer live snapshot."""
+        cursor = self.get_cursor(attempt_id)
+        if not self._redis_events or cursor.highest_contiguous_seq is not None:
+            return
+        from pbl4.management_backend.repositories import attempt_repository
+
+        attempt = attempt_repository.get_attempt(conn, attempt_id)
+        if attempt is None:
+            raise ValueError(f"Unknown attempt for Runtime event: {attempt_id}")
+        metadata = attempt.get("runtime_metadata") or {}
+        if isinstance(metadata, str):
+            metadata = json.loads(metadata)
+        cursor.highest_contiguous_seq = int(metadata.get("highest_contiguous_seq") or 0)
 
     def record_event_seq(self, attempt_id: str, seq: int, conn: Any) -> None:
         """Track one Attempt's event continuity and fence gaps."""
@@ -159,8 +177,6 @@ class RuntimeGateway:
             # Persisted events are not applied until their projection commits.  The
             # arriving event and any buffered successors use the same path, so a
             # duplicate delivery can retry a previously failed projection.
-            from pbl4.management_backend.services import event_ingest
-
             while True:
                 next_seq = expected
                 if next_seq > cursor.max_seen_seq:
@@ -169,6 +185,8 @@ class RuntimeGateway:
                     next_ev = event_repository.get_event_by_seq(conn, attempt_id, next_seq)
                 except Exception as read_err:
                     logger.warning("Failed to read event %s for projection: %s", next_seq, read_err)
+                    if self._redis_events:
+                        raise
                     break
                 if next_ev is not None:
                     details = next_ev.get("payload_jsonb")
@@ -192,37 +210,27 @@ class RuntimeGateway:
                         "event_type": next_ev.get("event_type"),
                         "severity": next_ev.get("severity", "INFO"),
                         "occurred_at": occurred_at_str,
+                        "source_component": next_ev.get("source_component", "Runtime"),
                         "details": details,
                     }
                     try:
                         self._project_runtime_event(conn, next_payload)
+                        if self._redis_events:
+                            from pbl4.management_backend.repositories import attempt_repository
+
+                            attempt_repository.record_event_projection_cursor(
+                                conn, attempt_id, next_seq
+                            )
                         conn.commit()
                     except Exception as proj_err:
                         logger.warning("Failed to project drained event %s: %s", next_seq, proj_err)
                         conn.rollback()
+                        if self._redis_events:
+                            raise
                         break
                     cursor.highest_contiguous_seq = next_seq
-                    if next_ev.get("event_type") == "model.updated":
-                        snapshot = self._attempt_snapshots.get(attempt_id)
-                        if snapshot is not None:
-                            snapshot["model_version"] = max(
-                                snapshot.get("model_version") or 0,
-                                int(details["output_model_version"]),
-                            )
                     expected = next_seq + 1
-                    event_ingest.broadcast_runtime_event(
-                        attempt_id=attempt_id,
-                        runtime_event_seq=next_seq,
-                        event_type=next_ev.get("event_type"),
-                        severity=next_ev.get("severity", "INFO"),
-                        occurred_at=(
-                            occurred_at_val
-                            if isinstance(occurred_at_val, datetime)
-                            else datetime.now(UTC)
-                        ),
-                        source_component=next_ev.get("source_component", "Runtime"),
-                        payload=details,
-                    )
+                    self._broadcast_projected_event(next_payload)
                 else:
                     break
 
@@ -282,7 +290,9 @@ class RuntimeGateway:
         snap["active_attempt_id"] = attempt_id
         snap["stale"] = bool(cursor.stale or snap.get("stale", False) or not self.connected)
         snap["observed_at"] = cursor.observed_at
-        snap["runtime_event_seq"] = cursor.authoritative_snapshot_seq
+        snap["runtime_event_seq"] = snap.get(
+            "last_runtime_event_seq", cursor.authoritative_snapshot_seq
+        )
         return snap
 
     def get_authoritative_snapshot(self, attempt_id: str) -> dict[str, Any] | None:
@@ -291,7 +301,7 @@ class RuntimeGateway:
         if cursor.authoritative_snapshot_seq is None:
             return None
         snap = self.get_snapshot(attempt_id)
-        snap["authoritative_snapshot_seq"] = cursor.authoritative_snapshot_seq
+        snap["authoritative_snapshot_seq"] = snap["runtime_event_seq"]
         snap["highest_contiguous_seq"] = cursor.highest_contiguous_seq
         snap["max_seen_seq"] = cursor.max_seen_seq
         return snap
@@ -320,6 +330,7 @@ class RuntimeGateway:
     def reset_runtime_context(self) -> None:
         """Clear in-memory snapshots, cursors, and abort pending waiters on instance change."""
         self._attempt_snapshots.clear()
+        self._pretraining_attempt_id = None
         self._attempt_cursors.clear()
         self._cached_snapshot = self._empty_snapshot()
         for cmd_id, future in list(self._pending_results.items()):
@@ -366,13 +377,15 @@ class RuntimeGateway:
                     created_at = active_attempt.get("created_at")
                     if created_at and (now - created_at).total_seconds() < 3.0:
                         logger.info(
-                            "Preserving recently created attempt %s during idle snapshot reconciliation",
+                            "Preserving recently created attempt %s during idle "
+                            "snapshot reconciliation",
                             attempt_id,
                         )
                         return
 
                 logger.warning(
-                    "Aborting active attempt %s due to runtime down/reconciliation: code=%s, reason=%s",
+                    "Aborting active attempt %s due to runtime down/reconciliation: "
+                    "code=%s, reason=%s",
                     attempt_id,
                     failure_code,
                     failure_message,
@@ -433,7 +446,8 @@ class RuntimeGateway:
         elif msg_type == "COMMAND_RESULT":
             self.handle_command_result(payload)
         elif msg_type == "RUNTIME_EVENT":
-            self.handle_runtime_event(payload)
+            if not self._redis_events:
+                self.handle_runtime_event(payload)
         elif msg_type == "DISCONNECTED":
             self.on_disconnect()
         else:
@@ -476,7 +490,9 @@ class RuntimeGateway:
         elif instance_changed:
             self._abort_active_attempts_on_runtime_down(
                 failure_code="RUNTIME_RESTARTED",
-                failure_message="Runtime restarted with new instance ID but provided no state snapshot",
+                failure_message=(
+                    "Runtime restarted with new instance ID but provided no state snapshot"
+                ),
             )
 
     def handle_state_snapshot(self, snapshot: dict[str, Any]) -> None:
@@ -492,22 +508,29 @@ class RuntimeGateway:
                 snapshot = StateSnapshot.from_dict(snapshot).to_dict()
         except ProtocolError as exc:
             logger.warning("Ignoring malformed STATE_SNAPSHOT: %s", exc)
+            if self._redis_events:
+                raise
             return
 
         attempt_id = snapshot["active_attempt_id"]
         snap_seq = snapshot["last_runtime_event_seq"]
         if attempt_id is None:
+            self._pretraining_attempt_id = None
             self.update_snapshot(snapshot)
             self._abort_active_attempts_on_runtime_down(
                 failure_code="RUNTIME_INSTANCE_IDLE",
-                failure_message="Runtime reported no active attempt; aborting stale active attempt in DB",
+                failure_message=(
+                    "Runtime reported no active attempt; aborting stale active attempt in DB"
+                ),
             )
             return
 
         cursor = self.get_cursor(attempt_id)
         authoritative_cursor_seq = cursor.authoritative_snapshot_seq
-        if authoritative_cursor_seq is None and cursor.highest_contiguous_seq is not None:
-            authoritative_cursor_seq = cursor.highest_contiguous_seq
+        if cursor.highest_contiguous_seq is not None:
+            authoritative_cursor_seq = max(
+                authoritative_cursor_seq or 0, cursor.highest_contiguous_seq
+            )
 
         if (
             authoritative_cursor_seq is not None
@@ -515,17 +538,35 @@ class RuntimeGateway:
             and snap_seq < authoritative_cursor_seq
         ):
             logger.warning(
-                "Ignoring stale STATE_SNAPSHOT for attempt '%s': snap_seq %s < authoritative cursor seq %s",
+                "Ignoring stale STATE_SNAPSHOT for attempt '%s': "
+                "snap_seq %s < authoritative cursor seq %s",
                 attempt_id,
                 snap_seq,
                 authoritative_cursor_seq,
             )
             return
 
+        previous = self._attempt_snapshots.get(attempt_id)
+        if (
+            previous
+            and previous.get("runtime_instance_id") == snapshot["runtime_instance_id"]
+            and previous.get("last_runtime_event_seq") == snap_seq
+        ):
+            # Preparation snapshots can share cursor zero. Capture time only
+            # breaks ties within one Runtime; event sequence remains primary.
+            with contextlib.suppress(TypeError, ValueError):
+                if datetime.fromisoformat(snapshot["captured_at"]) < datetime.fromisoformat(
+                    previous.get("captured_at")
+                ):
+                    return
+
         self._abort_active_attempts_on_runtime_down(
             expected_attempt_id=attempt_id,
             failure_code="RUNTIME_SUPERSEDED_ATTEMPT",
-            failure_message=f"Runtime reported active attempt '{attempt_id}'; aborting stale prior attempt in DB",
+            failure_message=(
+                f"Runtime reported active attempt '{attempt_id}'; "
+                "aborting stale prior attempt in DB"
+            ),
         )
 
         workers = snapshot.get("workers")
@@ -566,6 +607,8 @@ class RuntimeGateway:
                 metadata = attempt.get("runtime_metadata") or {}
                 if isinstance(metadata, str):
                     metadata = json.loads(metadata)
+                self._restore_event_cursor(attempt_id, conn)
+                event_cursor = snap_seq if not self._redis_events else cursor.highest_contiguous_seq
                 for key in (
                     "training_strategy",
                     "epoch",
@@ -582,7 +625,7 @@ class RuntimeGateway:
                 metadata.update(
                     {
                         "authoritative_snapshot_seq": snap_seq,
-                        "highest_contiguous_seq": snap_seq,
+                        "highest_contiguous_seq": event_cursor,
                         "stale": False,
                         "observed_at": observed_at.isoformat(),
                     }
@@ -597,6 +640,10 @@ class RuntimeGateway:
                     failure_message=snapshot.get("failure_message"),
                     runtime_metadata=metadata,
                 )
+                if self._redis_events:
+                    attempt_repository.record_event_projection_cursor(
+                        conn, attempt_id, event_cursor
+                    )
                 if updated and isinstance(updated, dict) and updated.get("state"):
                     reconciled["attempt_state"] = updated["state"]
 
@@ -670,6 +717,8 @@ class RuntimeGateway:
                             allocation_id=worker.get("allocation_id"),
                         )
         except (psycopg.OperationalError, psycopg_pool.PoolTimeout) as exc:
+            if self._redis_events:
+                raise
             logger.warning(
                 "PostgreSQL temporarily unavailable during STATE_SNAPSHOT reconciliation "
                 "for attempt '%s' (persistence degraded): %s",
@@ -677,6 +726,8 @@ class RuntimeGateway:
                 exc,
             )
         except Exception as exc:
+            if self._redis_events:
+                raise
             logger.error(
                 "Programming or data-integrity error during STATE_SNAPSHOT reconciliation "
                 "for attempt '%s': %s",
@@ -689,13 +740,24 @@ class RuntimeGateway:
         # DB succeeded or degraded: update in-memory cache and advance authoritative cursor:
         self._attempt_snapshots[attempt_id] = reconciled
         self._cached_snapshot.update(reconciled)
+        if reconciled["attempt_state"] in {
+            "CREATED",
+            "WAITING_WORKERS",
+            "PROVISIONING",
+            "INITIALIZING",
+        }:
+            self._pretraining_attempt_id = attempt_id
+        elif self._pretraining_attempt_id == attempt_id:
+            self._pretraining_attempt_id = None
         cursor = self.get_cursor(attempt_id)
         if snap_seq is not None:
             cursor.authoritative_snapshot_seq = snap_seq
             # A live snapshot can be newer than telemetry still buffered at the
             # Runtime. Only establish a baseline or recover an actual event gap;
             # routine polling must not skip unprojected Step/checkpoint history.
-            if cursor.highest_contiguous_seq is None or cursor.gap_fenced:
+            if not self._redis_events and (
+                cursor.gap_fenced or cursor.highest_contiguous_seq is None
+            ):
                 cursor.highest_contiguous_seq = max(cursor.highest_contiguous_seq or 0, snap_seq)
             cursor.max_seen_seq = max(cursor.max_seen_seq, snap_seq)
         cursor.gap_fenced = False
@@ -704,17 +766,12 @@ class RuntimeGateway:
 
         # Broadcast authoritative snapshot via WebSocket:
         try:
+            from pbl4.management_backend.services.event_ingest import snapshot_frame
             from pbl4.management_backend.websocket import hub
 
             hub.broadcast_sync(
                 attempt_id,
-                {
-                    "kind": "SNAPSHOT",
-                    "attempt_id": attempt_id,
-                    "runtime_event_seq": snap_seq,
-                    "occurred_at": observed_at.isoformat(),
-                    "payload": reconciled,
-                },
+                snapshot_frame(reconciled),
             )
         except Exception as exc:
             logger.debug("Failed to broadcast snapshot: %s", exc)
@@ -775,18 +832,181 @@ class RuntimeGateway:
         with self._projection_lock:
             self._handle_runtime_event(payload)
 
+    def handle_runtime_events(self, payloads: list[dict[str, Any]]) -> int:
+        """Commit one ordered prefix; snapshot fences are processed separately.
+
+        The Redis consumer ACKs only the returned prefix. A failure rolls back
+        the current transaction and leaves its entries pending for replay.
+        """
+        from pbl4.management_backend import db
+        from pbl4.management_backend.repositories import attempt_repository
+        from pbl4.management_backend.services import event_ingest
+
+        if not payloads:
+            return 0
+        with self._projection_lock:
+            payloads = [RuntimeEvent.from_dict(payload).to_dict() for payload in payloads]
+            if not self._redis_events or self._needs_event_snapshot(payloads[0]):
+                self._handle_runtime_event(payloads[0])
+                return 1
+
+            staged: dict[str, AttemptRuntimeCursor] = {}
+            changed: dict[str, int] = {}
+            projected = []
+            processed = 0
+            try:
+                with db.transaction() as conn:
+                    for payload in payloads:
+                        if self._needs_event_snapshot(payload):
+                            break
+                        attempt_id = payload["attempt_id"]
+                        if attempt_id not in staged:
+                            self._restore_event_cursor(attempt_id, conn)
+                            staged[attempt_id] = replace(self.get_cursor(attempt_id))
+                        cursor = staged[attempt_id]
+                        seq = payload["runtime_event_seq"]
+                        expected = (cursor.highest_contiguous_seq or 0) + 1
+                        if seq > expected:
+                            break  # Commit predecessors before reconciling this gap.
+                        event_ingest.ingest_runtime_event(
+                            conn,
+                            attempt_id=attempt_id,
+                            runtime_event_seq=seq,
+                            event_type=payload["event_type"],
+                            severity=payload["severity"],
+                            occurred_at=datetime.fromisoformat(payload["occurred_at"]),
+                            source_component=payload["source_component"],
+                            payload=payload["details"],
+                        )
+                        cursor.max_seen_seq = max(cursor.max_seen_seq, seq)
+                        if seq == expected:
+                            self._project_runtime_event(conn, payload)
+                            cursor.highest_contiguous_seq = seq
+                            changed[attempt_id] = seq
+                            projected.append(payload)
+                        processed += 1
+                    for attempt_id, seq in changed.items():
+                        attempt_repository.record_event_projection_cursor(conn, attempt_id, seq)
+
+                # Only committed state becomes visible to clients and live cursors.
+                for attempt_id, cursor in staged.items():
+                    cursor.observed_at = datetime.now(UTC)
+                    cursor.stale = not self.connected
+                    self._attempt_cursors[attempt_id] = cursor
+                for payload in projected:
+                    self._broadcast_projected_event(payload)
+                if not processed:
+                    self._ingest_stream_event(payloads[0])
+                    return 1
+                return processed
+            except Exception:
+                # COMMIT may have succeeded without returning its reply. Reload
+                # durable cursors before any retry instead of repeating mutations.
+                for attempt_id in staged:
+                    cursor = self.get_cursor(attempt_id)
+                    cursor.highest_contiguous_seq = None
+                    cursor.stale = True
+                raise
+
+    @staticmethod
+    def _needs_event_snapshot(payload: dict[str, Any]) -> bool:
+        return payload["event_type"] == "attempt.state_changed" and payload["details"].get(
+            "state"
+        ) in {"RUNNING", "COMPLETED", "FAILED", "ABORTED"}
+
+    def _broadcast_projected_event(self, payload: dict[str, Any]) -> None:
+        from pbl4.management_backend.services import event_ingest
+
+        attempt_id = payload["attempt_id"]
+        self._update_live_snapshot(payload)
+        event_ingest.broadcast_runtime_event(
+            attempt_id=attempt_id,
+            runtime_event_seq=payload["runtime_event_seq"],
+            event_type=payload["event_type"],
+            severity=payload["severity"],
+            occurred_at=datetime.fromisoformat(payload["occurred_at"]),
+            source_component=payload["source_component"],
+            payload=payload["details"],
+        )
+
+    def _update_live_snapshot(self, payload: dict[str, Any]) -> None:
+        """Apply committed events to the last Runtime snapshot, without polling MCP.
+
+        Buffered history must still reach clients, but cannot roll back a newer
+        Runtime snapshot. Both event transports use this path after SQL commits.
+        """
+        attempt_id = payload["attempt_id"]
+        cached = self._attempt_snapshots.get(attempt_id)
+        seq = payload["runtime_event_seq"]
+        if cached is None or seq <= (cached.get("last_runtime_event_seq") or 0):
+            return
+        details = payload["details"]
+        event_type = payload["event_type"]
+        snapshot = dict(cached)
+        if "strategy_state" in details:
+            snapshot["strategy_state"] = details["strategy_state"]
+        if event_type == "step.started":
+            snapshot.update(
+                epoch=details["epoch"],
+                current_batch_ordinal=details["batch_ordinal"],
+                current_operation_id=details["operation_id"],
+            )
+        elif event_type == "model.updated":
+            snapshot["model_version"] = details["output_model_version"]
+        elif event_type == "parameter.applied":
+            snapshot["workers"] = [
+                {**worker, "local_model_version": details["model_version"]}
+                if worker["worker_id"] == details["worker_id"]
+                and str(worker["session_id"]) == str(details["session_id"])
+                else worker
+                for worker in cached.get("workers", [])
+            ]
+        elif event_type == "step.committed" and details.get("recovery_cursor"):
+            progress = details["recovery_cursor"]
+            snapshot.update(
+                epoch=progress["epoch"],
+                current_batch_ordinal=progress["next_batch_ordinal"],
+                recovery_cursor=progress,
+            )
+        elif event_type == "attempt.state_changed":
+            snapshot["attempt_state"] = details["state"]
+        elif event_type.startswith("checkpoint."):
+            checkpoint_state = {
+                "checkpoint.started": "WRITING",
+                "checkpoint.saved": "COMPLETE",
+                "checkpoint.failed": "FAILED",
+            }.get(event_type)
+            if checkpoint_state is not None:
+                snapshot["checkpoint_state"] = checkpoint_state
+            if event_type == "checkpoint.saved":
+                snapshot["latest_checkpoint_id"] = details["checkpoint_id"]
+        snapshot.update(
+            last_runtime_event_seq=seq,
+            runtime_event_seq=seq,
+            observed_at=self.get_cursor(attempt_id).observed_at,
+            stale=not self.connected,
+        )
+        self._attempt_snapshots[attempt_id] = snapshot
+        if self._cached_snapshot.get("active_attempt_id") == attempt_id:
+            self._cached_snapshot.update(snapshot)
+
     def _handle_runtime_event(self, payload: dict[str, Any]) -> None:
         """RUNTIME_EVENT -> event ingestion / dedup / gap handling / projection / WS publish."""
         try:
             payload = RuntimeEvent.from_dict(payload).to_dict()
         except ProtocolError as exc:
             logger.warning("Ignoring malformed RUNTIME_EVENT: %s", exc)
+            if self._redis_events:
+                raise
             return
         attempt_id = payload["attempt_id"]
         seq = payload["runtime_event_seq"]
         event_type = payload["event_type"]
         severity = payload["severity"]
         occurred_at_raw = payload["occurred_at"]
+        if self._redis_events:
+            self._ingest_stream_event(payload)
+            return
         occurred_at = datetime.now(UTC)
         if occurred_at_raw:
             with contextlib.suppress(Exception):
@@ -819,6 +1039,7 @@ class RuntimeGateway:
             source_component = payload["source_component"]
             event_payload = payload["details"]
             with db.transaction() as conn:
+                self._restore_event_cursor(attempt_id, conn)
                 ingest_result = event_ingest.ingest_runtime_event(
                     conn,
                     attempt_id=attempt_id,
@@ -829,11 +1050,13 @@ class RuntimeGateway:
                     source_component=source_component,
                     payload=event_payload,
                 )
-            if attempt_id is not None and (ingest_result.inserted or is_contiguous):
+            if attempt_id is not None and (
+                self._redis_events or ingest_result.inserted or is_contiguous
+            ):
                 with db.get_connection() as conn:
                     self.record_event_seq(attempt_id, seq, conn)
             if (
-                ingest_result.inserted
+                (ingest_result.inserted or self._redis_events)
                 and event_type == "attempt.state_changed"
                 and event_payload.get("state") in {"RUNNING", "COMPLETED", "FAILED", "ABORTED"}
             ):
@@ -844,10 +1067,100 @@ class RuntimeGateway:
                 snapshot = self._port.request_state()
                 if snapshot and snapshot.get("active_attempt_id") == attempt_id:
                     self.handle_state_snapshot(snapshot)
+            if self._redis_events and self.get_cursor(attempt_id).gap_fenced:
+                snapshot = self._port.request_state()
+                if not snapshot or snapshot.get("active_attempt_id") != attempt_id:
+                    raise RuntimeUnavailableError("Event gap requires an authoritative snapshot")
+                self.handle_state_snapshot(snapshot)
         except event_ingest.ConflictingEventPayloadError:
             raise
         except Exception as exc:
             logger.exception("Failed to ingest runtime event: %s", exc)
+            if self._redis_events:
+                raise
+
+    def _ingest_stream_event(self, payload: dict[str, Any]) -> None:
+        """One SQL transaction per ordered event; publish only after commit.
+
+        A real gap reconciles current state, then skips only the missing prefix
+        and the gap event, rather than every queued event up to a newer snapshot.
+        """
+        from pbl4.management_backend import db
+        from pbl4.management_backend.repositories import attempt_repository
+        from pbl4.management_backend.services import event_ingest
+
+        attempt_id = payload["attempt_id"]
+        seq = payload["runtime_event_seq"]
+        occurred_at = datetime.fromisoformat(payload["occurred_at"].replace("Z", "+00:00"))
+        try:
+            with db.transaction() as conn:
+                self._restore_event_cursor(attempt_id, conn)
+                staged = replace(self.get_cursor(attempt_id))
+                staged.max_seen_seq = max(staged.max_seen_seq, seq)
+                expected = (staged.highest_contiguous_seq or 0) + 1
+                gap = seq > expected
+                event_ingest.ingest_runtime_event(
+                    conn,
+                    attempt_id=attempt_id,
+                    runtime_event_seq=seq,
+                    event_type=payload["event_type"],
+                    severity=payload["severity"],
+                    occurred_at=occurred_at,
+                    source_component=payload["source_component"],
+                    payload=payload["details"],
+                )
+                projected = seq == expected
+                if projected:
+                    self._project_runtime_event(conn, payload)
+                    attempt_repository.record_event_projection_cursor(conn, attempt_id, seq)
+                    staged.highest_contiguous_seq = seq
+            # SQL succeeded. No in-memory applied cursor or WebSocket update may
+            # precede this point, including when COMMIT itself fails.
+            staged.observed_at = datetime.now(UTC)
+            staged.stale = not self.connected
+            staged.gap_fenced = gap
+            self._attempt_cursors[attempt_id] = staged
+            if projected:
+                self._broadcast_projected_event(payload)
+            if gap or self._needs_event_snapshot(payload):
+                snapshot = self._port.request_state()
+                if not snapshot or snapshot.get("active_attempt_id") != attempt_id:
+                    if gap:
+                        raise RuntimeUnavailableError(
+                            "Event gap requires an authoritative snapshot"
+                        )
+                    return
+                self.handle_state_snapshot(snapshot)
+            if gap:
+                from pbl4.management_backend.websocket import hub
+
+                with db.transaction() as conn:
+                    attempt_repository.record_event_projection_cursor(conn, attempt_id, seq)
+                staged.highest_contiguous_seq = seq
+                staged.gap_fenced = False
+                self._attempt_cursors[attempt_id] = staged
+                hub.broadcast_sync(
+                    attempt_id,
+                    {
+                        "kind": "GAP",
+                        "attempt_id": attempt_id,
+                        "runtime_event_seq": None,
+                        "occurred_at": occurred_at.isoformat(),
+                        "payload": {
+                            "expected_seq": expected,
+                            "received_seq": seq,
+                            "snapshot_required": True,
+                            "reason": "Runtime history gap",
+                        },
+                    },
+                )
+        except Exception:
+            # The server may have committed before a connection lost its reply.
+            # Reload the durable cursor on retry rather than replaying a mutation.
+            cursor = self.get_cursor(attempt_id)
+            cursor.highest_contiguous_seq = None
+            cursor.stale = True
+            raise
 
     @staticmethod
     def _project_attempt_state_transition(
@@ -928,7 +1241,9 @@ class RuntimeGateway:
                 epoch=int(details["epoch"]),
                 batch_ordinal=int(details["batch_ordinal"]),
                 input_model_version=int(details["input_model_version"]),
-                started_at=occurred_at,
+                started_at=datetime.fromisoformat(
+                    details.get("started_at", payload["occurred_at"])
+                ),
             )
             step_repository.update_step(conn, attempt_id, step_id, state="COLLECTING_GRADIENTS")
             return
@@ -956,7 +1271,9 @@ class RuntimeGateway:
                 state="WAITING_PARAMETER_APPLIED",
                 output_model_version=int(details["output_model_version"]),
                 total_sample_count=int(details["total_sample_count"]),
-                update_completed_at=occurred_at,
+                update_completed_at=datetime.fromisoformat(
+                    details.get("update_completed_at", payload["occurred_at"])
+                ),
             )
             return
         if event_type == "step.committed":
@@ -1065,6 +1382,55 @@ class RuntimeGateway:
                     )
             return
 
+    def _mark_pretraining_snapshot_stale(
+        self, attempt_id: str, expected_observed_at: datetime | None
+    ) -> None:
+        """Keep the last observation visible without claiming it is current."""
+        with self._projection_lock:
+            if self._pretraining_attempt_id != attempt_id:
+                return
+            cursor = self.get_cursor(attempt_id)
+            if cursor.observed_at != expected_observed_at:
+                return  # A concurrent request has already supplied a newer observation.
+            snapshot = self._attempt_snapshots.get(attempt_id)
+            already_stale = cursor.stale and (snapshot is None or snapshot.get("stale"))
+            cursor.stale = True
+            if self._cached_snapshot.get("active_attempt_id") == attempt_id:
+                self._cached_snapshot["stale"] = True
+            if snapshot is None:
+                return
+            snapshot["stale"] = True
+            if already_stale:
+                return
+
+            from pbl4.management_backend.services.event_ingest import snapshot_frame
+            from pbl4.management_backend.websocket import hub
+
+            hub.broadcast_sync(attempt_id, snapshot_frame(self.get_snapshot(attempt_id)))
+
+    def refresh_pretraining_snapshot(self) -> None:
+        """Observe Worker preparation even before training events are emitted.
+
+        This management-only GET_STATE stops once training or a terminal state
+        is observed. It never advances the durable event projection cursor.
+        """
+        with self._projection_lock:
+            attempt_id = self._pretraining_attempt_id
+            observed_at = self.get_cursor(attempt_id).observed_at if attempt_id else None
+        if attempt_id is None or not self.connected:
+            return
+        try:
+            snapshot = self._port.request_state()
+        except Exception:
+            self._mark_pretraining_snapshot_stale(attempt_id, observed_at)
+            raise
+        if not snapshot or snapshot.get("active_attempt_id") != attempt_id:
+            self._mark_pretraining_snapshot_stale(attempt_id, observed_at)
+            return
+        with self._projection_lock:
+            if self._pretraining_attempt_id == attempt_id:
+                self._handle_state_snapshot(snapshot)
+
     # ─── Outbound Bounded Command Dispatch ────────────────────────────────────
 
     def send_command_and_wait_result(
@@ -1115,6 +1481,20 @@ class RuntimeGateway:
 
             # Wait for correlated COMMAND_RESULT from downstream
             result = fut.result(timeout=timeout)
+            if command_type == "START_ATTEMPT" and result.get("state") in {
+                "ACCEPTED",
+                "SUCCEEDED",
+                "DEFERRED",
+            }:
+                with self._projection_lock:
+                    cached = self._attempt_snapshots.get(target_id, {})
+                    if cached.get("attempt_state") not in {
+                        "RUNNING",
+                        "COMPLETED",
+                        "FAILED",
+                        "ABORTED",
+                    }:
+                        self._pretraining_attempt_id = target_id
             logger.info("Command %s accepted by runtime: %s", command_id, result.get("state"))
             return result
         except concurrent.futures.TimeoutError as exc:
@@ -1177,14 +1557,16 @@ def get_gateway() -> RuntimeGateway:
     return _gateway
 
 
-def init_gateway(host: str | None, port: int | None) -> RuntimeGateway:
+def init_gateway(
+    host: str | None, port: int | None, *, redis_events: bool = False
+) -> RuntimeGateway:
     global _gateway
     if host and port:
         real_port = RealMcpClientPort(host, port)
-        _gateway = RuntimeGateway(real_port)
+        _gateway = RuntimeGateway(real_port, redis_events=redis_events)
         real_port.start_reconnecting()
         logger.info("Runtime gateway configured: %s:%d", host, port)
     else:
-        _gateway = RuntimeGateway()
+        _gateway = RuntimeGateway(redis_events=redis_events)
         logger.warning("Runtime host/port not configured; gateway running in disconnected mode.")
     return _gateway

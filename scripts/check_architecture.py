@@ -93,6 +93,18 @@ def main() -> int:
 
     violations: list[str] = []
 
+    # Redis is an approved management-event transport, never training infrastructure.
+    redis_adapters = {
+        "runtime/redis_events.py",
+        "management_backend/gateways/redis_events.py",
+    }
+    for path in get_python_files(SRC_ROOT):
+        imports, _ = extract_imports(path)
+        if path.relative_to(SRC_ROOT).as_posix() not in redis_adapters and any(
+            imp == "redis" or imp.startswith("redis.") for imp in imports
+        ):
+            violations.append(f"  [VIOLATION] {path}: Redis imports belong only in event adapters")
+
     # 1. Protocol isolation (wire-only)
     violations.extend(
         check_forbidden_imports(

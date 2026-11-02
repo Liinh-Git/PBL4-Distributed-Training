@@ -24,7 +24,7 @@ from pbl4.protocol.parameter_manifest import ParameterManifest
 from pbl4.protocol.transfer import CompletedTensorTransfer
 from pbl4.runtime.batch_scheduler import BatchScheduler, RecoveryCursor
 from pbl4.runtime.canonical_model import CanonicalModel, ModelSnapshot
-from pbl4.runtime.checkpoint import CheckpointManager
+from pbl4.runtime.checkpoint import CheckpointManager, CompleteCheckpoint
 from pbl4.runtime.checkpoint_policy import CheckpointPolicy
 from pbl4.runtime.checkpoint_v1 import CheckpointV1Serializer
 from pbl4.runtime.coordinator import Coordinator
@@ -47,6 +47,81 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _forward_event_queue(process, management, event_source, terminal) -> None:
+    """One background transport owner; the queue contains metadata, never models."""
+    publisher = None
+    if getattr(process, "_redis_url", None):
+        from pbl4.runtime.redis_events import RedisEventPublisher
+
+        publisher = RedisEventPublisher(process._redis_url, process._redis_event_stream)
+    try:
+        delay = 0.5
+        degraded = False
+        while not process._stopping.is_set() and (
+            not terminal()
+            or (event_source() is not None and event_source().snapshot()["queued_event_count"] > 0)
+        ):
+            events = event_source()
+            if events is None or (publisher is None and not management.backend_connected):
+                process._stopping.wait(0.1)
+                continue
+            batch = events.peek(limit=64)
+            if not batch:
+                events.wait()
+                continue
+            payloads = [
+                {
+                    "attempt_id": event.attempt_id,
+                    "job_id": event.job_id,
+                    "runtime_event_seq": event.runtime_event_seq,
+                    "event_type": event.event_type,
+                    "event_schema_version": event.event_schema_version,
+                    "occurred_at": event.occurred_at,
+                    "source_component": event.source_component,
+                    "severity": event.severity,
+                    "details": event.details,
+                }
+                for event in batch
+            ]
+            if publisher is not None:
+                try:
+                    publisher.publish(payloads)
+                except Exception as exc:
+                    degraded = True
+                    logger.warning(
+                        "Redis event publisher degraded (%s); bounded queue=%s",
+                        type(exc).__name__,
+                        events.snapshot(),
+                    )
+                    process._stopping.wait(delay)
+                    delay = min(delay * 2, 30.0)
+                    continue
+                for event in batch:
+                    events.ack(event.runtime_event_seq, attempt_id=event.attempt_id)
+                if degraded:
+                    logger.info("Redis event publisher recovered")
+                degraded = False
+                delay = 0.5
+                continue
+            for event, payload in zip(batch, payloads, strict=True):
+                if process._stopping.is_set() or not management.backend_connected:
+                    break
+                if management.send_runtime_event(payload):
+                    events.ack(event.runtime_event_seq, attempt_id=event.attempt_id)
+                else:
+                    logger.warning(
+                        "Failed to send runtime event seq=%s (%s), stopping batch for retry",
+                        event.runtime_event_seq,
+                        event.event_type,
+                    )
+                    process._stopping.wait(0.1)
+                    break
+
+    finally:
+        if publisher is not None:
+            publisher.close()
+
+
 class RuntimeProcess:
     def __init__(
         self,
@@ -61,6 +136,8 @@ class RuntimeProcess:
         heartbeat_timeout_seconds: float = 120.0,
         worker_admission_secret: str | None = None,
         require_worker_admission: bool = True,
+        redis_url: str | None = None,
+        redis_event_stream: str = "pbl4:runtime-events",
     ) -> None:
         self._host = host
         self._dtp_port = dtp_port
@@ -73,9 +150,19 @@ class RuntimeProcess:
         self._heartbeat_timeout = heartbeat_timeout_seconds
         self._worker_admission_secret = worker_admission_secret
         self._require_worker_admission = require_worker_admission
+        self._redis_url = redis_url
+        self._redis_event_stream = redis_event_stream
         self._lock = threading.Lock()
         self._active: _AttemptRunner | None = None
         self._stopping = threading.Event()
+        self._event_outbox = EventEmitter("", "")
+        self._event_thread = threading.Thread(
+            target=lambda: _forward_event_queue(
+                self, self._management, lambda: self._event_outbox, lambda: False
+            ),
+            name="pbl4-event-publisher",
+            daemon=True,
+        )
         self._management = ManagementEndpoint(
             host,
             management_port,
@@ -85,6 +172,7 @@ class RuntimeProcess:
 
     def run(self) -> None:
         self._management.start()
+        self._event_thread.start()
         logger.info(
             "Runtime ready MCP=%s DTP=%s:%s manifest=%s",
             self._management.bound_address,
@@ -101,6 +189,8 @@ class RuntimeProcess:
             if active is not None:
                 active.abort()
                 active.join(10.0)
+            self._stopping.set()
+            self._event_thread.join(5.0)
             self._management.stop()
 
     def stop(self) -> None:
@@ -239,10 +329,14 @@ class _AttemptRunner:
         self._model_init_transfer: CompletedTensorTransfer | None = None
         self._failure: str | None = None
         self._final_workers: tuple[dict[str, object], ...] = ()
-        self._event_thread = threading.Thread(
-            target=self._forward_events,
-            name=f"pbl4-events-{self.attempt_id}",
-            daemon=True,
+        self._event_thread = (
+            threading.Thread(
+                target=self._forward_events,
+                name=f"pbl4-events-{self.attempt_id}",
+                daemon=True,
+            )
+            if not hasattr(process, "_event_outbox")
+            else None
         )
 
     @property
@@ -254,7 +348,8 @@ class _AttemptRunner:
 
     def start(self) -> None:
         self._thread.start()
-        self._event_thread.start()
+        if self._event_thread is not None:
+            self._event_thread.start()
 
     def join(self, timeout: float) -> None:
         self._thread.join(timeout)
@@ -363,10 +458,7 @@ class _AttemptRunner:
                 if transfer is None:
                     raise ValueError("Canonical initialization transfer is unavailable")
                 initial = np.frombuffer(transfer.data, dtype="<f4").astype(np.float32, copy=True)
-                if (
-                    initial.size != self._manifest.total_numel
-                    or not np.isfinite(initial).all()
-                ):
+                if initial.size != self._manifest.total_numel or not np.isfinite(initial).all():
                     raise ValueError("Canonical initialization tensor is invalid")
 
             members = tuple(Member(item.worker_id, item.session_id) for item in registry.snapshot())
@@ -413,7 +505,7 @@ class _AttemptRunner:
                 worker_ids=worker_ids,
                 work_units_per_step=work_units_per_step,
             )
-            events = EventEmitter(self.attempt_id, self.job_id)
+            events = EventEmitter(self.attempt_id, self.job_id, buffer=self._process._event_outbox)
             self._events = events
             checkpoint_template = CheckpointSnapshot(
                 checkpoint_id="pending",
@@ -432,9 +524,7 @@ class _AttemptRunner:
                 source_step_id=None,
                 optimizer=str(contract["update_policy"]["type"]),
                 created_at=_now(),
-                model=ModelSnapshot(
-                    0, self._manifest.parameter_manifest_hash, initial.tobytes()
-                ),
+                model=ModelSnapshot(0, self._manifest.parameter_manifest_hash, initial.tobytes()),
                 recovery_cursor=RecoveryCursor(0, 0),
             )
             resume_cursor: RecoveryCursor | None = None
@@ -593,9 +683,7 @@ class _AttemptRunner:
                             "batch_id": assignment.batch_id,
                             "expected_sample_count": assignment.sample_count,
                             "training_strategy": "strict_bsp",
-                            "parameter_manifest_hash": (
-                                self._manifest.parameter_manifest_hash
-                            ),
+                            "parameter_manifest_hash": (self._manifest.parameter_manifest_hash),
                             "work_units": [u.to_dict() for u in assignment.work_units],
                         }
                     ),
@@ -661,42 +749,9 @@ class _AttemptRunner:
             coordinator.worker_failed(worker_id, session_id)
 
     def _forward_events(self) -> None:
-        while not self._process._stopping.is_set() and (
-            not self.terminal
-            or (self._events is not None and self._events.snapshot()["queued_event_count"] > 0)
-        ):
-            events = self._events
-            if events is None or not self._management.backend_connected:
-                time.sleep(0.1)
-                continue
-            batch = events.peek(limit=64)
-            if not batch:
-                time.sleep(0.05)
-                continue
-            for event in batch:
-                if self._process._stopping.is_set() or not self._management.backend_connected:
-                    break
-                payload = {
-                    "attempt_id": event.attempt_id,
-                    "job_id": event.job_id,
-                    "runtime_event_seq": event.runtime_event_seq,
-                    "event_type": event.event_type,
-                    "event_schema_version": event.event_schema_version,
-                    "occurred_at": event.occurred_at,
-                    "source_component": event.source_component,
-                    "severity": event.severity,
-                    "details": event.details,
-                }
-                if self._management.send_runtime_event(payload):
-                    events.ack(event.runtime_event_seq)
-                else:
-                    logger.warning(
-                        "Failed to send runtime event seq=%s (%s), stopping batch for retry",
-                        event.runtime_event_seq,
-                        event.event_type,
-                    )
-                    break
-            time.sleep(0.05)
+        _forward_event_queue(
+            self._process, self._management, lambda: self._events, lambda: self.terminal
+        )
 
     def snapshot(self, runtime_instance_id: str) -> dict[str, object]:
         coordinator = self._coordinator
@@ -799,8 +854,7 @@ class _AttemptRunner:
             or model.get("model_id") not in MODEL_PROFILES
             or model.get("profile") != MODEL_PROFILES.get(model.get("model_id"))
             or self._manifest is None
-            or model.get("parameter_manifest_hash")
-            != self._manifest.parameter_manifest_hash
+            or model.get("parameter_manifest_hash") != self._manifest.parameter_manifest_hash
             or not isinstance(sync, dict)
             or sync.get("training_strategy") != "strict_bsp"
             or type(sync.get("expected_workers")) is not int

@@ -43,7 +43,7 @@ def list_events(
             cursor=cursor,
         )
     has_more = len(rows) > limit
-    next_cursor = str(rows[limit]["event_id"]) if has_more else None
+    next_cursor = str(rows[limit - 1]["event_id"]) if has_more else None
     items = [
         EventListItem(
             event_id=str(r["event_id"]),

@@ -23,10 +23,13 @@ worker = [
 # Runtime-specific dependencies
 runtime = [
     "numpy>=1.26.0",
+    "redis>=5.0,<8.0",
+    "python-dotenv>=1.0",
 ]
 
 # Management Backend-specific dependencies (psycopg repository stack + migration tooling)
 management-backend = [
+    "redis>=5.0,<8.0",
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.27.0",
     "psycopg[binary,pool]>=3.1.0",

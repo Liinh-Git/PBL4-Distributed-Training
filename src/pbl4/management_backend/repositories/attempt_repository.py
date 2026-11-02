@@ -95,6 +95,22 @@ def get_attempt(conn: psycopg.Connection, attempt_id: str) -> dict | None:
     return _row_to_dict(row) if row else None
 
 
+def record_event_projection_cursor(conn: psycopg.Connection, attempt_id: str, seq: int) -> None:
+    """Commit this existing metadata cursor in the same transaction as its projection."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE attempts SET runtime_metadata =
+                COALESCE(runtime_metadata, '{}'::jsonb) ||
+                jsonb_build_object('highest_contiguous_seq', %s::bigint)
+            WHERE attempt_id = %s RETURNING attempt_id
+            """,
+            (seq, attempt_id),
+        )
+        if cur.fetchone() is None:
+            raise ValueError(f"Unknown attempt for event projection: {attempt_id}")
+
+
 def list_attempts(
     conn: psycopg.Connection,
     *,
@@ -163,10 +179,13 @@ def update_attempt_state(
     if current is None:
         return None
 
-    current_state = current.get("state") if isinstance(current, dict) else getattr(current, "state", None)
+    current_state = (
+        current.get("state") if isinstance(current, dict) else getattr(current, "state", None)
+    )
     if current_state and not is_valid_attempt_transition(current_state, new_state):
         logger.warning(
-            "Attempt %s: ignoring invalid state transition '%s' -> '%s' (terminal monotonicity violated or backward transition)",
+            "Attempt %s: ignoring invalid state transition '%s' -> '%s' "
+            "(terminal monotonicity violated or backward transition)",
             attempt_id,
             current_state,
             new_state,

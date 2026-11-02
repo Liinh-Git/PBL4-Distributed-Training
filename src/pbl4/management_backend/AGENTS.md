@@ -8,7 +8,7 @@ The Management Backend is the **management/application layer**. It provides REST
 
 ## Invariants
 
-1. **No runtime implementation imports** — Management Backend must not import `ParameterServer`, `CanonicalModel`, `UpdateEngine`, `GradientStore`, `Aggregator`, or any runtime training implementation. It communicates with Runtime only through `RuntimeGateway` (MCP/1).
+1. **No runtime implementation imports** — Management Backend must not import `ParameterServer`, `CanonicalModel`, `UpdateEngine`, `GradientStore`, `Aggregator`, or any runtime training implementation. It communicates with Runtime through `RuntimeGateway` (MCP/1 Commands/results/state) and, when configured, a single Redis Streams event consumer that reuses the gateway ingestion/projection pipeline. Only ACK committed processing; DB/projection errors must propagate to retain pending entries. PostgreSQL owns official history; Redis is management-only buffering, never a training dependency.
 
 2. **No gradient/tensor path** — Management Backend must never handle raw gradient or parameter tensors. That traffic flows exclusively through DTP/1.
 

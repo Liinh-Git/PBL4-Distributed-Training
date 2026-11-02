@@ -29,7 +29,7 @@ If a lower layer contradicts a higher layer, **the higher layer wins**.
 When implementation conflicts with approved design documents, the canonical document is authoritative. Do not guess — open an issue in `docs/OPEN_ISSUES.md` only if genuinely unresolved.
 
 ### 2. No cross-process object calls
-Processes (`pbl4-runtime`, `pbl4-worker`, `pbl4-dataset-manager`, `pbl4-backend`, `pbl4-agent`, `pblctl`, WebUI) communicate ONLY through defined network protocols (DTP/1, MCP/1, HTTP, WebSocket/WSS). No shared memory, no direct function calls across process boundaries.
+Processes (`pbl4-runtime`, `pbl4-worker`, `pbl4-dataset-manager`, `pbl4-backend`, `pbl4-agent`, `pblctl`, WebUI) communicate ONLY through defined network protocols (DTP/1, MCP/1, HTTP, WebSocket/WSS, and Redis Streams solely for Runtime management events). No shared memory, no direct function calls across process boundaries.
 
 ### 3. Gradient/parameter traffic uses DTP/1 only
 Raw gradient tensors and canonical parameter tensors travel exclusively over DTP/1 persistent TCP connections between Worker ↔ Runtime. They MUST NOT traverse Management Backend, PostgreSQL, REST, WebSocket, or Dataset Manager.
@@ -38,6 +38,7 @@ Raw gradient tensors and canonical parameter tensors travel exclusively over DTP
 These invariants MUST hold:
 - Management Backend down ≠ training down
 - Database down ≠ training down
+- Redis down ≠ training down
 - Dataset Manager down (after SHARD_READY) ≠ training down
 
 ### 5. `protocol` package has zero runtime/management_backend/worker/torch/db imports
@@ -63,6 +64,8 @@ State machines, enums, and domain types are defined in canonical design document
 
 ### 12. Forbidden distributed frameworks and infrastructure
 Do not introduce: gRPC, Ray, Horovod, DeepSpeed, PyTorch DDP/FSDP, Redis, Kafka, RabbitMQ, or any distributed framework that replaces the custom DTP/1 protocol or Parameter Server architecture.
+
+User-approved exception (2026-10-29): Redis Streams may buffer existing Runtime management events only. Redis must never carry gradients, parameters, dataset artifacts, Commands or State Snapshots, or participate in training admission, synchronization, updates or checkpoint gates. Runtime publishes from its background bounded-queue consumer only; Backend ACKs after required PostgreSQL ingestion/projection commits. MCP/1 retains Commands, Command Results and State Snapshots; enabling Redis disables MCP event delivery, with no failure fallback or dual publication. PostgreSQL remains the official event history store.
 
 ### 13. Tests accompany implemented features before merge
 Tests are created together with or after feature implementation. Do NOT pre-create empty test hierarchies or unverified fixtures. Any implemented protocol, state machine, DB schema, or API change must include corresponding tests before merge.

@@ -150,6 +150,8 @@ def test_workload_plan_changed_event_emitted(tmp_path) -> None:
         parameter_manifest_hash="hash-param",
         tensor_id=1,
         compute_ms=200.0,
+        loss=0.5,
+        correct_count=40,
     )
     c1 = Contribution.from_gradient(
         grad,
@@ -166,6 +168,8 @@ def test_workload_plan_changed_event_emitted(tmp_path) -> None:
         parameter_manifest_hash="hash-param",
         tensor_id=1,
         compute_ms=100.0,
+        loss=1.5,
+        correct_count=32,
     )
 
     coordinator.admit(c0)
@@ -183,6 +187,32 @@ def test_workload_plan_changed_event_emitted(tmp_path) -> None:
 
     # Verify workload.plan_changed event was emitted
     drained = events.drain()
+    update = next(e for e in drained if e.event_type == "model.updated")
+    assert update.event_schema_version == 1
+    assert update.details["contributions"] == [
+        {
+            "worker_id": 0,
+            "session_id": 10,
+            "shard_id": c0.shard_id,
+            "batch_id": c0.batch_id,
+            "sample_count": 64,
+            "loss": 0.5,
+            "compute_ms": 200.0,
+        },
+        {
+            "worker_id": 1,
+            "session_id": 11,
+            "shard_id": c1.shard_id,
+            "batch_id": c1.batch_id,
+            "sample_count": 64,
+            "loss": 1.5,
+            "compute_ms": 100.0,
+        },
+    ]
+    metrics = next(e for e in drained if e.event_type == "epoch.metrics.finalized")
+    assert metrics.details["training_loss"] == 1.0
+    assert metrics.details["training_accuracy"] == 56.25
+    assert c0.correct_count == 40 and c0.parameter_manifest_hash == "hash-param"
     plan_events = [e for e in drained if e.event_type == "workload.plan_changed"]
     assert len(plan_events) == 1
 
