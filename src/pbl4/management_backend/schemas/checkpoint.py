@@ -17,6 +17,7 @@ class CheckpointListItem(BaseModel):
     state: str
     model_version: int
     source_step_id: int | None = None
+    epoch: int | None = None
     created_at: datetime
     completed_at: datetime | None = None
 

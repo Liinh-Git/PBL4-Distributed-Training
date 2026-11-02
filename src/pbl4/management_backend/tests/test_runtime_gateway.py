@@ -3,7 +3,6 @@ from __future__ import annotations
 import concurrent.futures
 from contextlib import contextmanager
 from datetime import UTC, datetime
-import json
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -443,6 +442,196 @@ def _valid_snapshot_dict(**overrides: Any) -> dict[str, Any]:
     return base
 
 
+@pytest.mark.parametrize("redis_events", [False, True])
+def test_pretraining_snapshots_publish_workers_before_first_training_event(redis_events):
+    port = FakeMcpClientPort(initially_connected=True)
+    gateway = RuntimeGateway(port, redis_events=redis_events)
+    gateway._pretraining_attempt_id = "attempt-1"
+    cursor = gateway.get_cursor("attempt-1")
+    cursor.highest_contiguous_seq = 0
+    timestamp = datetime.now(UTC).isoformat()
+    workers = [
+        {
+            "worker_id": rank,
+            "session_id": str(100 + rank),
+            "node_label": f"node-{rank}",
+            "state": "PROVISIONING",
+            "protocol_version": 1,
+            "connected_at": timestamp,
+            "last_heartbeat_at": timestamp,
+            "shard_id": None,
+            "local_model_version": None,
+        }
+        for rank in range(2)
+    ]
+    with (
+        patch("pbl4.management_backend.db.transaction"),
+        patch.object(gateway, "_abort_active_attempts_on_runtime_down"),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.get_attempt",
+            return_value={"state": "CREATED", "runtime_metadata": {}},
+        ),
+        patch.object(gateway, "_project_attempt_state_transition", return_value=None),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.record_event_projection_cursor"
+        ),
+        patch(
+            "pbl4.management_backend.repositories.worker_session_repository.update_snapshot_projection"
+        ),
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync") as broadcast,
+    ):
+        for state in ["PROVISIONING", "INITIALIZING", "RUNNING"]:
+            port.snapshot_to_return = _valid_snapshot_dict(
+                attempt_state=state, workers=workers, last_runtime_event_seq=0
+            )
+            gateway.refresh_pretraining_snapshot()
+            frame = broadcast.call_args.args[1]
+            assert frame["kind"] == "SNAPSHOT"
+            assert frame["payload"]["snapshot_seq"] == 0
+            assert len(frame["payload"]["state"]["workers"]) == 2
+            assert frame["payload"]["state"]["state"] == state
+            assert cursor.highest_contiguous_seq == 0
+            assert gateway.get_snapshot("attempt-1")["stale"] is False
+        assert gateway._pretraining_attempt_id is None
+        gateway.refresh_pretraining_snapshot()
+        assert broadcast.call_count == 3
+
+
+@pytest.mark.parametrize("state", ["FAILED", "ABORTED"])
+def test_pretraining_terminal_snapshot_stops_observation_without_training_events(state):
+    port = FakeMcpClientPort(initially_connected=True)
+    gateway = RuntimeGateway(port)
+    gateway._pretraining_attempt_id = "attempt-1"
+    port.snapshot_to_return = _valid_snapshot_dict(attempt_state=state, last_runtime_event_seq=0)
+    with (
+        patch("pbl4.management_backend.db.transaction"),
+        patch.object(gateway, "_abort_active_attempts_on_runtime_down"),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.get_attempt",
+            return_value={"state": "PROVISIONING", "runtime_metadata": {}},
+        ),
+        patch.object(gateway, "_project_attempt_state_transition", return_value=None),
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync") as broadcast,
+    ):
+        gateway.refresh_pretraining_snapshot()
+    assert gateway._pretraining_attempt_id is None
+    assert broadcast.call_args.args[1]["payload"]["state"]["state"] == state
+
+
+def test_pretraining_observation_never_replaces_attempt_on_missing_or_wrong_snapshot():
+    port = FakeMcpClientPort(initially_connected=True)
+    gateway = RuntimeGateway(port)
+    gateway._pretraining_attempt_id = "attempt-1"
+    with patch.object(gateway, "_handle_state_snapshot") as reconcile:
+        for snapshot in [None, {"active_attempt_id": None}, {"active_attempt_id": "another"}]:
+            port.snapshot_to_return = snapshot
+            gateway.refresh_pretraining_snapshot()
+        reconcile.assert_not_called()
+        assert gateway._pretraining_attempt_id == "attempt-1"
+        port.disconnect()
+        gateway.refresh_pretraining_snapshot()
+        reconcile.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("sequence", "captured_at", "accepted"),
+    [
+        (0, "2026-10-31T05:00:00Z", False),
+        (0, "2026-10-31T05:00:02Z", True),
+        (1, "2026-10-31T04:00:00Z", True),
+    ],
+)
+def test_snapshot_capture_time_only_orders_equal_cursors(sequence, captured_at, accepted):
+    gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
+    previous = _valid_snapshot_dict(
+        attempt_state="INITIALIZING",
+        last_runtime_event_seq=0,
+        captured_at="2026-10-31T05:00:01+00:00",
+    )
+    gateway._attempt_snapshots["attempt-1"] = previous
+    gateway.get_cursor("attempt-1").authoritative_snapshot_seq = 0
+    incoming = _valid_snapshot_dict(
+        attempt_state="PROVISIONING",
+        last_runtime_event_seq=sequence,
+        captured_at=captured_at,
+    )
+    with (
+        patch("pbl4.management_backend.db.transaction"),
+        patch.object(gateway, "_abort_active_attempts_on_runtime_down"),
+        patch(
+            "pbl4.management_backend.repositories.attempt_repository.get_attempt", return_value=None
+        ) as lookup,
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync") as broadcast,
+    ):
+        gateway.handle_state_snapshot(incoming)
+    assert lookup.call_count == int(accepted)
+    assert gateway._attempt_snapshots["attempt-1"] is previous
+    broadcast.assert_not_called()
+
+
+@pytest.mark.parametrize("error", [None, TimeoutError("GET_STATE timeout")])
+def test_pretraining_snapshot_failure_publishes_stale_without_changing_attempt(error):
+    port = FakeMcpClientPort(initially_connected=True)
+    gateway = RuntimeGateway(port)
+    gateway._pretraining_attempt_id = "attempt-1"
+    observed_at = datetime.now(UTC)
+    previous = _valid_snapshot_dict(
+        attempt_state="PROVISIONING",
+        last_runtime_event_seq=0,
+        observed_at=observed_at,
+        stale=False,
+    )
+    gateway._attempt_snapshots["attempt-1"] = previous
+    gateway._cached_snapshot.update(previous)
+    cursor = gateway.get_cursor("attempt-1")
+    cursor.authoritative_snapshot_seq = 0
+    cursor.highest_contiguous_seq = 0
+    cursor.observed_at = observed_at
+    cursor.stale = False
+    with (
+        patch.object(port, "request_state", return_value=None, side_effect=error),
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync") as broadcast,
+    ):
+        for _ in range(2):
+            if error:
+                with pytest.raises(TimeoutError):
+                    gateway.refresh_pretraining_snapshot()
+            else:
+                gateway.refresh_pretraining_snapshot()
+    assert gateway.connected
+    assert gateway.get_snapshot()["stale"] is True
+    snapshot = gateway.get_snapshot("attempt-1")
+    assert snapshot["stale"] is True
+    assert snapshot["attempt_state"] == "PROVISIONING"
+    assert snapshot["observed_at"] == observed_at
+    assert cursor.highest_contiguous_seq == 0
+    assert broadcast.call_count == 1
+    frame = broadcast.call_args.args[1]
+    assert frame["payload"]["state"]["stale"] is True
+    assert frame["payload"]["snapshot_seq"] == 0
+
+
+def test_late_pretraining_timeout_does_not_invalidate_a_newer_observation():
+    port = FakeMcpClientPort(initially_connected=True)
+    gateway = RuntimeGateway(port)
+    gateway._pretraining_attempt_id = "attempt-1"
+    cursor = gateway.get_cursor("attempt-1")
+    cursor.observed_at = datetime(2026, 10, 31, 5, 0, tzinfo=UTC)
+    cursor.stale = False
+
+    def request():
+        cursor.observed_at = datetime(2026, 10, 31, 5, 1, tzinfo=UTC)
+        return None
+
+    with (
+        patch.object(port, "request_state", side_effect=request),
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync") as broadcast,
+    ):
+        gateway.refresh_pretraining_snapshot()
+    assert cursor.stale is False
+    broadcast.assert_not_called()
+
+
 def test_state_snapshot_unknown_attempt_does_not_update_cache_or_broadcast() -> None:
     """Verify unknown attempt in STATE_SNAPSHOT rejects reconciliation and never broadcasts."""
     gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
@@ -507,7 +696,8 @@ def test_state_snapshot_db_outage_preserves_live_telemetry_and_broadcasts() -> N
     args, _ = mock_broadcast.call_args
     assert args[0] == "attempt-db-fail"
     assert args[1]["kind"] == "SNAPSHOT"
-    assert args[1]["runtime_event_seq"] == 10
+    assert args[1]["runtime_event_seq"] is None
+    assert args[1]["payload"]["snapshot_seq"] == 10
 
 
 def test_state_snapshot_pool_timeout_preserves_live_telemetry() -> None:
@@ -908,7 +1098,7 @@ def test_authoritative_snapshot_reconciles_gap_and_unfences_projection() -> None
 
 
 def test_duplicate_event_idempotency_and_conflict_raises_integrity_error() -> None:
-    """Duplicate event with same payload is idempotent; conflicting payload raises integrity error."""
+    """Identical duplicates are idempotent; conflicting payloads raise an integrity error."""
     gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
     fake_conn = MagicMock()
 
@@ -952,9 +1142,9 @@ def test_duplicate_event_idempotency_and_conflict_raises_integrity_error() -> No
             "pbl4.management_backend.services.event_ingest.ingest_runtime_event",
             side_effect=ConflictingEventPayloadError("Payload conflict for attempt seq 1"),
         ),
+        pytest.raises(ConflictingEventPayloadError, match="Payload conflict"),
     ):
-        with pytest.raises(ConflictingEventPayloadError, match="Payload conflict"):
-            gateway.handle_runtime_event(event_payload)
+        gateway.handle_runtime_event(event_payload)
 
 
 def test_completed_attempt_ignores_delayed_running_event() -> None:

@@ -24,6 +24,7 @@ from typing import Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
 
 from pbl4.management_backend.gateways.runtime_gateway import get_gateway
+from pbl4.management_backend.services.event_ingest import snapshot_frame
 
 logger = logging.getLogger(__name__)
 
@@ -104,8 +105,12 @@ async def _attempt_ws(websocket: WebSocket, attempt_id: str) -> None:
 
     # Validate attempt existence
     try:
-        with db.get_connection() as conn:
-            attempt = attempt_repository.get_attempt(conn, attempt_id)
+
+        def read_attempt():
+            with db.get_connection() as conn:
+                return attempt_repository.get_attempt(conn, attempt_id)
+
+        attempt = await asyncio.to_thread(read_attempt)
     except Exception as exc:
         logger.error("DB error during WebSocket validation for %s: %s", attempt_id, exc)
         await websocket.close(code=1011, reason="Database unavailable")
@@ -136,134 +141,96 @@ async def _attempt_ws(websocket: WebSocket, attempt_id: str) -> None:
         if after_seq is not None:
             last_contiguous_sent_seq = after_seq
 
-        with db.get_connection() as conn:
-            latest_seq = event_repository.get_latest_runtime_event_seq(conn, attempt_id) or 0
+        def read_page(cursor: int):
+            with db.get_connection() as conn:
+                return event_repository.list_events_after_seq(conn, attempt_id, cursor, limit=200)
 
-            if after_seq is not None:
-                # Multi-page catch-up: fetch all pages (> 200 events) without silent truncation
-                missed_events: list[dict] = []
-                curr_cursor = after_seq
-                batch_size = 200
-                while True:
-                    batch = event_repository.list_events_after_seq(
-                        conn, attempt_id, curr_cursor, limit=batch_size
-                    )
-                    if not batch:
+        def latest_sequence():
+            with db.get_connection() as conn:
+                return event_repository.get_latest_runtime_event_seq(conn, attempt_id) or 0
+
+        gap = False
+        if after_seq is not None:
+            # Capture a finite target; release each SQL connection before network
+            # writes. Memory stays one page even for a long reconnect backlog.
+            target = await asyncio.to_thread(latest_sequence)
+            cursor = after_seq
+            while cursor < target:
+                before = cursor
+                page = await asyncio.to_thread(read_page, cursor)
+                if not page:
+                    gap = True
+                    break
+                for row in page:
+                    seq = row["runtime_event_seq"]
+                    if seq > target:
                         break
-                    missed_events.extend(batch)
-                    curr_cursor = batch[-1].get("runtime_event_seq")
-                    if len(batch) < batch_size or curr_cursor is None:
+                    if seq != cursor + 1:
+                        gap = True
                         break
-
-                # Check if missed events form a contiguous sequence from after_seq + 1
-                is_contiguous = False
-                if missed_events:
-                    first_seq = missed_events[0].get("runtime_event_seq")
-                    if first_seq == after_seq + 1:
-                        is_contiguous = True
-                        curr = first_seq
-                        for e in missed_events[1:]:
-                            seq = e.get("runtime_event_seq")
-                            if seq != curr + 1:
-                                is_contiguous = False
-                                break
-                            curr = seq
-                elif after_seq >= latest_seq:
-                    is_contiguous = True  # Already caught up
-
-                if is_contiguous:
-                    for e in missed_events:
-                        seq = e["runtime_event_seq"]
-                        last_contiguous_sent_seq = seq
-                        e_occurred = (
-                            e["occurred_at"].isoformat()
-                            if hasattr(e["occurred_at"], "isoformat")
-                            else str(e["occurred_at"])
-                        )
-                        payload_data = e.get("payload_jsonb") or {}
-                        if isinstance(payload_data, str):
-                            with contextlib.suppress(Exception):
-                                payload_data = json.loads(payload_data)
-                        await websocket.send_json(
-                            {
-                                "kind": "EVENT",
-                                "attempt_id": attempt_id,
-                                "runtime_event_seq": seq,
-                                "occurred_at": e_occurred,
-                                "payload": {
-                                    "event_type": e["event_type"],
-                                    "severity": e["severity"],
-                                    "source_component": e.get("source_component", "Runtime"),
-                                    **payload_data,
-                                },
-                            }
-                        )
-                else:
-                    # Discontinuous history requested:
-                    # send actual reconciled Runtime SNAPSHOT@M + GAP
-                    gw = get_gateway()
-                    runtime_snap = gw.get_authoritative_snapshot(attempt_id)
-                    now_str = datetime.now(UTC).isoformat()
-                    snap_seq = None
-                    if runtime_snap is not None:
-                        snap_seq = runtime_snap["authoritative_snapshot_seq"]
-                        if snap_seq is not None:
-                            last_contiguous_sent_seq = snap_seq
-                        await websocket.send_json(
-                            {
-                                "kind": "SNAPSHOT",
-                                "attempt_id": attempt_id,
-                                "runtime_event_seq": snap_seq,
-                                "occurred_at": now_str,
-                                "payload": runtime_snap,
-                            }
-                        )
+                    details = row.get("payload_jsonb") or {}
+                    if isinstance(details, str):
+                        details = json.loads(details)
+                    occurred = row["occurred_at"]
                     await websocket.send_json(
                         {
-                            "kind": "GAP",
+                            "kind": "EVENT",
                             "attempt_id": attempt_id,
-                            "runtime_event_seq": None,
-                            "occurred_at": now_str,
+                            "runtime_event_seq": seq,
+                            "occurred_at": occurred.isoformat()
+                            if hasattr(occurred, "isoformat")
+                            else str(occurred),
                             "payload": {
-                                "after_seq": after_seq,
-                                "authoritative_seq": snap_seq,
-                                "snapshot_required": True,
-                                "reason": f"Discontinuous history requested after_seq={after_seq}",
+                                "event_type": row["event_type"],
+                                "event_schema_version": 1,
+                                "severity": row["severity"],
+                                "source_component": row.get("source_component", "Runtime"),
+                                "details": details,
                             },
                         }
                     )
-            else:
-                # New connection without after_seq: send authoritative SNAPSHOT if available
-                gw = get_gateway()
-                runtime_snap = gw.get_authoritative_snapshot(attempt_id)
-                if runtime_snap is not None:
-                    snap_seq = runtime_snap["authoritative_snapshot_seq"]
-                    if snap_seq is not None:
-                        last_contiguous_sent_seq = snap_seq
-                    now_str = datetime.now(UTC).isoformat()
-                    await websocket.send_json(
-                        {
-                            "kind": "SNAPSHOT",
-                            "attempt_id": attempt_id,
-                            "runtime_event_seq": snap_seq,
-                            "occurred_at": now_str,
-                            "payload": runtime_snap,
-                        }
-                    )
+                    cursor = seq
+                    last_contiguous_sent_seq = seq
+                if gap or cursor == before:
+                    gap = True
+                    break
+
+        if gap or after_seq is None:
+            runtime_snap = get_gateway().get_authoritative_snapshot(attempt_id)
+            if runtime_snap is not None:
+                last_contiguous_sent_seq = runtime_snap["authoritative_snapshot_seq"]
+                await websocket.send_json(snapshot_frame(runtime_snap))
+            if gap:
+                await websocket.send_json(
+                    {
+                        "kind": "GAP",
+                        "attempt_id": attempt_id,
+                        "runtime_event_seq": None,
+                        "occurred_at": datetime.now(UTC).isoformat(),
+                        "payload": {
+                            "after_seq": after_seq,
+                            "snapshot_required": True,
+                            "reason": "Discontinuous persisted history",
+                        },
+                    }
+                )
 
         while True:
             recv_task = asyncio.create_task(websocket.receive_text())
             queue_task = asyncio.create_task(q.get())
 
-            done, pending = await asyncio.wait(
+            _, pending = await asyncio.wait(
                 [recv_task, queue_task],
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
             for t in pending:
                 t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
-            if recv_task in done:
+            # A pending task can finish after wait() returns but before cancel().
+            # Inspect its final state so a consumed frame/event is never dropped.
+            if recv_task.done() and not recv_task.cancelled():
                 try:
                     text = recv_task.result()
                     try:
@@ -277,7 +244,7 @@ async def _attempt_ws(websocket: WebSocket, attempt_id: str) -> None:
                 except Exception:
                     break
 
-            if queue_task in done:
+            if queue_task.done() and not queue_task.cancelled():
                 try:
                     event = queue_task.result()
                     if isinstance(event, dict) and event.get("kind") == "OVERFLOW_INVALIDATE":
@@ -286,7 +253,7 @@ async def _attempt_ws(websocket: WebSocket, attempt_id: str) -> None:
                             attempt_id,
                         )
                         await websocket.close(
-                            code=status.WS_1008_POLICY_VIOLATION,
+                            code=1013,
                             reason="Backpressure overflow: reconnect with highest contiguous seq",
                         )
                         break
@@ -325,12 +292,12 @@ async def _attempt_ws(websocket: WebSocket, attempt_id: str) -> None:
                                     attempt_id,
                                 )
                                 await websocket.close(
-                                    code=status.WS_1008_POLICY_VIOLATION,
+                                    code=1013,
                                     reason="Pending buffer overflow: unresolvable live gap",
                                 )
                                 break
                     elif isinstance(event, dict) and event.get("kind") == "SNAPSHOT":
-                        s_seq = event.get("runtime_event_seq")
+                        s_seq = event.get("payload", {}).get("snapshot_seq")
                         if s_seq is not None:
                             last_contiguous_sent_seq = s_seq
                             # Discard buffered events with seq <= s_seq

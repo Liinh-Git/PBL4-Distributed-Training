@@ -18,21 +18,30 @@ export interface ListStepsParams {
 }
 
 export class StepsService {
-  constructor(private readonly client: ApiClient = apiClient) {}
+  constructor(private readonly client: ApiClient = apiClient) { }
 
   /** Load the complete measured history, including attempts longer than one page. */
-  async listAllSteps(attemptId: string): Promise<PaginatedResponse<StepListItemData>> {
-    let response = await this.listSteps(attemptId, { limit: 200 });
+  async listAllSteps(attemptId: string, newestKnownStep = 0, options?: RequestOptions): Promise<PaginatedResponse<StepListItemData>> {
+    let response = await this.listSteps(attemptId, { limit: 200 }, options);
     const items = new Map(response.data.map(step => [step.step_id, step]));
     const cursors = new Set<string>();
     while (response.page?.next_cursor) {
+      if (response.data.some(step => step.step_id < newestKnownStep)) break;
       const cursor = response.page.next_cursor;
       if (cursors.has(cursor)) throw new Error('Repeated steps pagination cursor');
       cursors.add(cursor);
-      response = await this.listSteps(attemptId, { limit: 200, cursor });
+      options?.signal?.throwIfAborted();
+      response = await this.listSteps(attemptId, { limit: 200, cursor }, options);
       for (const step of response.data) items.set(step.step_id, step);
     }
     return { ...response, data: [...items.values()].sort((a, b) => b.step_id - a.step_id) };
+  }
+
+  /** Reconnect fetches only the newer range; a missing baseline stays bounded. */
+  async listStepUpdates(attemptId: string, newestKnownStep: number, options?: RequestOptions) {
+    return newestKnownStep > 0
+      ? this.listAllSteps(attemptId, newestKnownStep, options)
+      : this.listSteps(attemptId, { limit: 200 }, options);
   }
 
   /**

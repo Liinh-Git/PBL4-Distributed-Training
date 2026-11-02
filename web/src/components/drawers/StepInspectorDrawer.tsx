@@ -3,7 +3,6 @@ import { Drawer } from '../common/Drawer';
 import { TrainingStep } from '../../types';
 import { StepDetailData } from '../../types/api';
 import { StepStateBadge } from '../common/Badge';
-import { CopyableId } from '../common/CopyableId';
 import { stepsService } from '../../api';
 import {
   Layers,
@@ -129,16 +128,31 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
       ? formatIso(timingsFallback.committedAt)
       : null;
 
+  // Step cycle duration in milliseconds
+  const stepDurationMs =
+    timing?.started_at && timing?.committed_at
+      ? Math.max(0, new Date(timing.committed_at).getTime() - new Date(timing.started_at).getTime())
+      : timingsFallback?.totalDurationMs;
+
   // Worker steps list
   const workerSteps = detail?.worker_steps || [];
   const hasApiWorkerSteps = workerSteps.length > 0;
+
+  // Helper to determine pushing/network upload time
+  const getWorkerUploadMs = (ws: any) => {
+    if (ws.upload_ms != null && ws.upload_ms > 0) return ws.upload_ms;
+    if (stepDurationMs != null && ws.compute_ms != null && stepDurationMs > ws.compute_ms) {
+      return Math.round((stepDurationMs - ws.compute_ms) * 10) / 10;
+    }
+    return ws.upload_ms || 0;
+  };
 
   // Aggregated Worker Telemetry totals
   const totalComputeMs = hasApiWorkerSteps
     ? workerSteps.reduce((acc, ws) => acc + (ws.compute_ms || 0), 0) / workerSteps.length
     : null;
   const totalUploadMs = hasApiWorkerSteps
-    ? workerSteps.reduce((acc, ws) => acc + (ws.upload_ms || 0), 0) / workerSteps.length
+    ? workerSteps.reduce((acc, ws) => acc + getWorkerUploadMs(ws), 0) / workerSteps.length
     : null;
   const totalBytesTransferred = hasApiWorkerSteps
     ? workerSteps.reduce((acc, ws) => acc + (ws.bytes_sent || 0) + (ws.bytes_received || 0), 0)
@@ -151,10 +165,10 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
       title={
         <span className="flex items-center gap-2">
           <Layers className="w-4 h-4 text-blue-400" />
-          <span>Step #{effectiveStepId} Telemetry Inspector</span>
+          <span>Chi tiết Telemetry Bước #{effectiveStepId}</span>
         </span>
       }
-      subtitle={`Attempt: ${effectiveAttemptId || '—'} • Batch Ordinal: ${batchOrdinal} • Strategy: ${trainingStrategy}`}
+      subtitle={`Epoch: ${step?.epoch ?? '—'} • Batch: ${batchOrdinal} • Chiến lược: ${trainingStrategy}`}
       widthClass="max-w-4xl"
     >
       <div className="space-y-6">
@@ -162,14 +176,14 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
         {loading && (
           <div className="flex items-center gap-2 px-3 py-2 bg-blue-500/10 border border-blue-500/20 rounded text-xs text-blue-300">
             <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-            <span>Fetching authoritative step telemetry from API...</span>
+            <span>Đang tải telemetry bước từ API...</span>
           </div>
         )}
 
         {/* Overview KPIs */}
-        <div className="p-4 bg-[#171719] rounded-lg border border-white/[0.04] grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
+        <div className="p-4 bg-[#171719] rounded border border-white/[0.04] grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
           <div>
-            <div className="text-[#73737c]">Step State</div>
+            <div className="text-[#73737c]">Trạng thái bước</div>
             <div className="mt-1.5">
               <StepStateBadge state={state} />
             </div>
@@ -181,13 +195,13 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
             </div>
           </div>
           <div>
-            <div className="text-[#73737c]">Model Version</div>
+            <div className="text-[#73737c]">Phiên bản mô hình</div>
             <div className="text-blue-400 font-mono font-medium mt-1.5">
-              v{inputModelVersion} → {outputModelVersion != null ? `v${outputModelVersion}` : 'Pending'}
+              v{inputModelVersion} → {outputModelVersion != null ? `v${outputModelVersion}` : 'Đang chờ'}
             </div>
           </div>
           <div>
-            <div className="text-[#73737c]">Total Samples</div>
+            <div className="text-[#73737c]">Tổng mẫu</div>
             <div className="text-[#f3f3f4] font-semibold mt-1.5">
               {totalSamples != null ? totalSamples.toLocaleString() : '—'}
             </div>
@@ -197,23 +211,23 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
         {/* Summary Telemetry Badges */}
         {hasApiWorkerSteps && (
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-            <div className="p-3 bg-[#171719] rounded-lg border border-white/[0.04] flex items-center justify-between">
+            <div className="p-3 bg-[#171719] rounded border border-white/[0.04] flex items-center justify-between">
               <div className="space-y-0.5">
-                <span className="text-[#73737c] text-[11px]">Avg Training Time (Compute)</span>
+                <span className="text-[#73737c] text-[11px]">Thời gian tính toán TB (Compute)</span>
                 <div className="font-mono text-amber-400 font-semibold">{formatMs(totalComputeMs)}</div>
               </div>
               <Cpu className="w-4 h-4 text-amber-400/60" />
             </div>
-            <div className="p-3 bg-[#171719] rounded-lg border border-white/[0.04] flex items-center justify-between">
+            <div className="p-3 bg-[#171719] rounded border border-white/[0.04] flex items-center justify-between">
               <div className="space-y-0.5">
-                <span className="text-[#73737c] text-[11px]">Avg Pushing Time (Upload)</span>
+                <span className="text-[#73737c] text-[11px]">Thời gian đẩy TB (Upload)</span>
                 <div className="font-mono text-emerald-400 font-semibold">{formatMs(totalUploadMs)}</div>
               </div>
               <Zap className="w-4 h-4 text-emerald-400/60" />
             </div>
-            <div className="p-3 bg-[#171719] rounded-lg border border-white/[0.04] flex items-center justify-between">
+            <div className="p-3 bg-[#171719] rounded border border-white/[0.04] flex items-center justify-between">
               <div className="space-y-0.5">
-                <span className="text-[#73737c] text-[11px]">Total Step Network Transfer</span>
+                <span className="text-[#73737c] text-[11px]">Tổng lưu lượng I/O bước</span>
                 <div className="font-mono text-blue-400 font-semibold">{formatBytes(totalBytesTransferred)}</div>
               </div>
               <HardDrive className="w-4 h-4 text-blue-400/60" />
@@ -226,11 +240,11 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
           <div className="flex items-center justify-between">
             <h3 className="text-xs font-semibold text-[#f3f3f4] flex items-center gap-1.5">
               <Clock className="w-3.5 h-3.5 text-[#a1a1a8]" />
-              <span>Strict BSP Step Timestamps</span>
+              <span>Mốc thời gian bước (Strict BSP)</span>
             </h3>
             {timing?.started_at && timing?.committed_at && (
               <span className="text-xs text-blue-400 font-mono font-medium">
-                Total:{' '}
+                Tổng cộng:{' '}
                 {Math.max(
                   0,
                   new Date(timing.committed_at).getTime() - new Date(timing.started_at).getTime()
@@ -240,33 +254,33 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
             )}
           </div>
 
-          <div className="divide-y divide-white/[0.04] text-xs bg-[#171719] rounded-lg border border-white/[0.04] p-3">
+          <div className="divide-y divide-white/[0.04] text-xs bg-[#171719] rounded border border-white/[0.04] p-3">
             <div className="py-2 flex items-center justify-between">
-              <span className="text-[#73737c]">Started At</span>
+              <span className="text-[#73737c]">Bắt đầu</span>
               <span className="text-[#f3f3f4] font-mono">{startedAt}</span>
             </div>
             {updateCompletedAt && (
               <div className="py-2 flex items-center justify-between">
-                <span className="text-[#73737c]">Update Completed At</span>
+                <span className="text-[#73737c]">Hoàn tất cập nhật</span>
                 <span className="text-[#a1a1a8] font-mono">{updateCompletedAt}</span>
               </div>
             )}
             {synchronizationCompletedAt && (
               <div className="py-2 flex items-center justify-between">
-                <span className="text-[#73737c]">Synchronization Completed At</span>
+                <span className="text-[#73737c]">Hoàn tất đồng bộ</span>
                 <span className="text-[#a1a1a8] font-mono">{synchronizationCompletedAt}</span>
               </div>
             )}
             {checkpointCompletedAt && (
               <div className="py-2 flex items-center justify-between">
-                <span className="text-[#73737c]">Checkpoint Completed At</span>
+                <span className="text-[#73737c]">Hoàn tất Checkpoint</span>
                 <span className="text-[#a1a1a8] font-mono">{checkpointCompletedAt}</span>
               </div>
             )}
             <div className="py-2 flex items-center justify-between">
-              <span className="text-[#73737c]">Committed At</span>
+              <span className="text-[#73737c]">Ghi nhận bước</span>
               <span className="text-[#f3f3f4] font-mono">
-                {committedAt || 'In Progress (Awaiting Barrier)'}
+                {committedAt || 'Đang xử lý (Chờ rào chắn)'}
               </span>
             </div>
           </div>
@@ -278,28 +292,27 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
             <h3 className="text-xs font-semibold text-[#f3f3f4] flex items-center gap-1.5">
               <Cpu className="w-3.5 h-3.5 text-[#a1a1a8]" />
               <span>
-                Worker Execution Telemetry & Barrier Gates (
+                Telemetry &amp; Cổng rào chắn Worker (
                 {hasApiWorkerSteps ? workerSteps.length : (step.workerContributions || []).length})
               </span>
             </h3>
             <span className="text-[11px] text-[#73737c]">
-              Strict BSP Gradient Barrier
+              Rào chắn Gradient Strict BSP
             </span>
           </div>
 
-          <div className="overflow-x-auto bg-[#171719] rounded-lg border border-white/[0.04]">
-            <table className="w-full text-left text-xs">
+          <div className="overflow-x-auto bg-[#171719] rounded border border-white/[0.04]">
+            <table className="w-full text-left text-xs min-w-[780px]">
               <thead>
                 <tr className="border-b border-white/[0.06] text-[#73737c]">
                   <th className="py-2.5 px-3 font-medium">Worker</th>
-                  <th className="py-2.5 px-3 font-medium">Session ID</th>
                   <th className="py-2.5 px-3 font-medium">Shard / Batch</th>
-                  <th className="py-2.5 px-3 font-medium text-right">Samples</th>
-                  <th className="py-2.5 px-3 font-medium text-right">Training Time</th>
-                  <th className="py-2.5 px-3 font-medium text-right">Pushing Time</th>
-                  <th className="py-2.5 px-3 font-medium text-right">Apply Time</th>
-                  <th className="py-2.5 px-3 font-medium text-right">Network I/O</th>
-                  <th className="py-2.5 px-3 font-medium text-right">Gates</th>
+                  <th className="py-2.5 px-3 font-medium text-right">Số mẫu</th>
+                  <th className="py-2.5 px-3 font-medium text-right">Thời gian tính toán</th>
+                  <th className="py-2.5 px-3 font-medium text-right">Thời gian đẩy</th>
+                  <th className="py-2.5 px-3 font-medium text-right">Thời gian áp dụng</th>
+                  <th className="py-2.5 px-3 font-medium text-right">Lưu lượng I/O</th>
+                  <th className="py-2.5 px-3 font-medium text-right">Cổng rào chắn</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/[0.04]">
@@ -308,9 +321,6 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
                     <tr key={ws.worker_id} className="hover:bg-white/[0.02] transition-colors">
                       <td className="py-2.5 px-3 text-[#f3f3f4] font-semibold">
                         Worker {ws.worker_id}
-                      </td>
-                      <td className="py-2.5 px-3 text-[#73737c] font-mono text-[11px]">
-                        <CopyableId value={ws.session_id} truncateLength={10} />
                       </td>
                       <td className="py-2.5 px-3 text-blue-400 font-mono text-[11px]">
                         shard-{ws.shard_id ?? 0} <span className="text-[#73737c]">b#{ws.batch_id ?? '—'}</span>
@@ -322,7 +332,7 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
                         {formatMs(ws.compute_ms)}
                       </td>
                       <td className="py-2.5 px-3 text-right font-mono text-emerald-400 font-medium">
-                        {formatMs(ws.upload_ms)}
+                        {formatMs(getWorkerUploadMs(ws))}
                       </td>
                       <td className="py-2.5 px-3 text-right font-mono text-[#a1a1a8]">
                         {formatMs(ws.parameter_apply_ms)}
@@ -338,14 +348,14 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
                                 ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
                                 : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
                             }`}
-                            title="Contribution Gate"
+                            title="Cổng tiếp nhận đóng góp"
                           >
                             {ws.contribution_accepted ? (
                               <CheckCircle2 className="w-2.5 h-2.5" />
                             ) : (
                               <AlertCircle className="w-2.5 h-2.5" />
                             )}
-                            <span>{ws.contribution_accepted ? 'ACCEPTED' : 'PENDING'}</span>
+                            <span>{ws.contribution_accepted ? 'ĐÃ NHẬN' : 'CHỜ XỬ LÝ'}</span>
                           </span>
 
                           <span
@@ -354,14 +364,14 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
                                 ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
                                 : 'bg-zinc-800 text-zinc-400 border border-zinc-700/30'
                             }`}
-                            title="Parameter Applied Gate"
+                            title="Cổng áp dụng tham số"
                           >
                             {ws.parameter_applied ? (
                               <CheckCircle2 className="w-2.5 h-2.5" />
                             ) : (
                               <AlertCircle className="w-2.5 h-2.5" />
                             )}
-                            <span>{ws.parameter_applied ? 'APPLIED' : 'WAITING'}</span>
+                            <span>{ws.parameter_applied ? 'ĐÃ ÁP DỤNG' : 'ĐANG CHỜ'}</span>
                           </span>
                         </div>
                       </td>
@@ -373,9 +383,6 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
                       <td className="py-2.5 px-3 text-[#f3f3f4] font-semibold">
                         Worker {w.workerId}
                       </td>
-                      <td className="py-2.5 px-3 text-[#73737c] font-mono text-[11px]">
-                        <CopyableId value={w.sessionId} truncateLength={10} />
-                      </td>
                       <td className="py-2.5 px-3 text-blue-400 font-mono text-[11px]">
                         {w.shardId || '—'}
                       </td>
@@ -386,7 +393,13 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
                         {formatMs(w.computeMs)}
                       </td>
                       <td className="py-2.5 px-3 text-right font-mono text-emerald-400 font-medium">
-                        {formatMs(w.uploadMs)}
+                        {formatMs(
+                          w.uploadMs != null && w.uploadMs > 0
+                            ? w.uploadMs
+                            : stepDurationMs && w.computeMs && stepDurationMs > w.computeMs
+                            ? Math.round((stepDurationMs - w.computeMs) * 10) / 10
+                            : 0
+                        )}
                       </td>
                       <td className="py-2.5 px-3 text-right font-mono text-[#a1a1a8]">
                         {formatMs(w.parameterApplyMs)}
@@ -403,7 +416,7 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
                                 : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
                             }`}
                           >
-                            <span>{w.contributionAccepted ? 'ACCEPTED' : 'PENDING'}</span>
+                            <span>{w.contributionAccepted ? 'ĐÃ NHẬN' : 'CHỜ XỬ LÝ'}</span>
                           </span>
                           <span
                             className={`inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-sm ${
@@ -416,10 +429,10 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
                           >
                             <span>
                               {w.parameterApplied === true
-                                ? 'APPLIED'
+                                ? 'ĐÃ ÁP DỤNG'
                                 : w.parameterApplied === false
-                                ? 'WAITING'
-                                : 'UNKNOWN'}
+                                ? 'ĐANG CHỜ'
+                                : 'CHƯA XÁC ĐỊNH'}
                             </span>
                           </span>
                         </div>
@@ -429,7 +442,7 @@ export const StepInspectorDrawer: React.FC<StepInspectorDrawerProps> = ({
                 ) : (
                   <tr>
                     <td colSpan={10} className="py-4 px-3 text-center text-[#73737c]">
-                      No individual worker contribution telemetry reported for this step.
+                      Chưa có telemetry đóng góp riêng của worker cho bước này.
                     </td>
                   </tr>
                 )}

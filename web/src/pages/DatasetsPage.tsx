@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { ChevronRight, RefreshCw, AlertCircle } from 'lucide-react';
 import { datasetsService, datasetBuildsService } from '../api';
 import { DatasetItemData, DatasetBuildListItemData } from '../types/api';
+import { formatDateOnly } from '../utils/date';
 
 export const DatasetsPage: React.FC = () => {
   const navigate = useNavigate();
@@ -31,6 +32,13 @@ export const DatasetsPage: React.FC = () => {
         const data = datasetsRes.value.data || [];
         setDatasets(prev => (append ? [...prev, ...data] : data));
         setNextCursor(datasetsRes.value.page?.next_cursor || null);
+        try {
+          data.forEach(d => {
+            if (d.dataset_id && d.name) {
+              sessionStorage.setItem(`pbl4_ds_title_${d.dataset_id}`, d.name);
+            }
+          });
+        } catch {}
       } else {
         throw datasetsRes.reason;
       }
@@ -57,16 +65,16 @@ export const DatasetsPage: React.FC = () => {
         <div>
           <div className="flex items-center gap-2">
             <h1 className="text-base font-semibold text-[#f3f3f4]">
-              Datasets
+              Tập dữ liệu
             </h1>
             {loading && (
               <span className="text-[11px] text-blue-400 font-mono animate-pulse">
-                Loading API...
+                Đang tải...
               </span>
             )}
           </div>
           <p className="text-xs text-[#73737c] mt-0.5">
-            Registered training datasets available for distributed jobs
+            Các tập dữ liệu huấn luyện đã đăng ký cho các nhiệm vụ phân tán
           </p>
         </div>
 
@@ -75,10 +83,10 @@ export const DatasetsPage: React.FC = () => {
           onClick={() => fetchDatasets()}
           disabled={loading}
           className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-[#121214] border border-white/[0.07] hover:bg-[#171719] text-[#73737c] hover:text-[#f3f3f4] text-xs transition-colors self-start sm:self-auto"
-          title="Refresh datasets"
+          title="Làm mới danh sách"
         >
           <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
-          <span>Refresh</span>
+          <span>Làm mới</span>
         </button>
       </div>
 
@@ -94,7 +102,7 @@ export const DatasetsPage: React.FC = () => {
             onClick={() => fetchDatasets()}
             className="px-2 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 text-xs transition-colors"
           >
-            Retry
+            Thử lại
           </button>
         </div>
       )}
@@ -105,28 +113,27 @@ export const DatasetsPage: React.FC = () => {
           <table className="w-full text-left border-collapse text-xs">
             <thead>
               <tr className="border-b border-white/[0.07] text-[#73737c] text-[11px] bg-[#121214]">
-                <th className="py-2.5 px-3.5 font-medium">Dataset</th>
-                <th className="py-2.5 px-3.5 font-medium">Task</th>
-                <th className="py-2.5 px-3.5 font-medium">Source</th>
-                <th className="py-2.5 px-3.5 font-medium">Configurations</th>
-                <th className="py-2.5 px-3.5 font-medium">Created</th>
+                <th className="py-2.5 px-3.5 font-medium">Tập dữ liệu</th>
+                <th className="py-2.5 px-3.5 font-medium">Tác vụ</th>
+                <th className="py-2.5 px-3.5 font-medium">Cấu hình</th>
+                <th className="py-2.5 px-3.5 font-medium">Ngày tạo</th>
                 <th className="py-2.5 px-3.5 font-medium text-right"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-white/[0.04]">
               {loading && datasets.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-12 text-center text-[#73737c]">
+                  <td colSpan={5} className="py-12 text-center text-[#73737c]">
                     <div className="flex flex-col items-center gap-2">
                       <RefreshCw className="w-5 h-5 animate-spin text-blue-400" />
-                      <span>Loading dataset catalog...</span>
+                      <span>Đang tải danh mục tập dữ liệu...</span>
                     </div>
                   </td>
                 </tr>
               ) : datasets.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-12 text-center text-[#73737c]">
-                    No registered datasets found.
+                  <td colSpan={5} className="py-12 text-center text-[#73737c]">
+                    Không có tập dữ liệu nào được đăng ký.
                   </td>
                 </tr>
               ) : (
@@ -146,20 +153,19 @@ export const DatasetsPage: React.FC = () => {
                       <td className="py-3 px-3.5 font-medium text-[#f3f3f4]">
                         <div>{dataset.name}</div>
                         <div className="text-[11px] text-[#73737c] font-normal line-clamp-1 mt-0.5">
-                          {dataset.description || 'No description provided.'}
+                          {dataset.description || 'Chưa có mô tả chi tiết.'}
                         </div>
                       </td>
                       <td className="py-3 px-3.5 text-[#a1a1a8]">
-                        {dataset.task || 'Image classification'}
+                        {dataset.task === 'image_classification' || dataset.task === 'Image classification'
+                          ? 'Phân loại ảnh'
+                          : dataset.task || 'Phân loại ảnh'}
                       </td>
                       <td className="py-3 px-3.5 text-[#a1a1a8]">
-                        {dataset.source_type || 'Built-in dataset'}
-                      </td>
-                      <td className="py-3 px-3.5 text-[#a1a1a8]">
-                        {configCount} {configCount === 1 ? 'configuration' : 'configurations'}
+                        {configCount} cấu hình
                       </td>
                       <td className="py-3 px-3.5 text-[#73737c]">
-                        {dataset.created_at ? dataset.created_at.slice(0, 10) : '2026-08-18'}
+                        {formatDateOnly(dataset.created_at)}
                       </td>
                       <td className="py-3 px-3.5 text-right text-[#73737c] group-hover:text-[#f3f3f4] transition-colors">
                         <ChevronRight className="w-3.5 h-3.5 inline-block" />
@@ -182,7 +188,7 @@ export const DatasetsPage: React.FC = () => {
               className="px-4 py-1.5 rounded bg-[#171719] hover:bg-[#1f1f23] text-xs text-[#f3f3f4] border border-white/[0.07] transition-colors flex items-center gap-2"
             >
               {loadingMore && <RefreshCw className="w-3 h-3 animate-spin" />}
-              <span>Load more datasets</span>
+              <span>Tải thêm tập dữ liệu</span>
             </button>
           </div>
         )}

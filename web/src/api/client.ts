@@ -9,6 +9,7 @@ import { config } from '../config';
 import { AppApiError } from './errors';
 import { withIdempotencyHeader } from './idempotency';
 import { ApiResponse, PaginatedResponse } from '../types/api';
+import { SharedReads } from './sharedReads';
 
 export type QueryParams = Record<
   string,
@@ -53,7 +54,11 @@ export const buildQueryString = (params?: QueryParams): string => {
 };
 
 export class ApiClient {
+  urlFor(path: string): string {
+    return `${this.baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
+  }
   private readonly baseUrl: string;
+  private readonly reads = new SharedReads();
 
   constructor(baseUrl: string = config.apiBaseUrl) {
     this.baseUrl = baseUrl.replace(/\/+$/, '');
@@ -63,12 +68,23 @@ export class ApiClient {
    * Generic request dispatcher.
    */
   async request<TResponse>(path: string, options: RequestInit & RequestOptions = {}): Promise<TResponse> {
+    if ((options.method ?? 'GET').toUpperCase() === 'GET') {
+      const { signal, ...request } = options;
+      const headers = [...new Headers(request.headers).entries()].sort(([a], [b]) => a.localeCompare(b));
+      const key = JSON.stringify([path, { ...request, headers }]);
+      return this.reads.read(key, sharedSignal => this.performRequest<TResponse>(path, {
+        ...request, signal: sharedSignal,
+      }), signal ?? undefined);
+    }
+    return this.performRequest<TResponse>(path, options);
+  }
+
+  private async performRequest<TResponse>(path: string, options: RequestInit & RequestOptions): Promise<TResponse> {
     const { params, idempotencyKey, headers: customHeaders, ...fetchOptions } = options;
 
     const method = fetchOptions.method || 'GET';
     const queryString = buildQueryString(params);
-    const cleanPath = path.startsWith('/') ? path : `/${path}`;
-    const url = `${this.baseUrl}${cleanPath}${queryString}`;
+    const url = `${this.urlFor(path)}${queryString}`;
 
     // Prepare headers with Idempotency-Key support and Content-Type
     const headers = withIdempotencyHeader(customHeaders, method, idempotencyKey);

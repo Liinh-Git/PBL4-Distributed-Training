@@ -24,6 +24,10 @@ export interface ListCheckpointsParams {
 export class CheckpointsService {
   constructor(private readonly client: ApiClient = apiClient) {}
 
+  modelDownloadUrl(checkpointId: string): string {
+    return this.client.urlFor(`/api/v1/checkpoints/${encodeURIComponent(checkpointId)}/model`);
+  }
+
   /**
    * 32.0 GET /api/v1/checkpoints — List checkpoints with cursor pagination
    */

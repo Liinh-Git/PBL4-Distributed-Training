@@ -1,12 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useParams, Link, useNavigate } from 'react-router-dom';
+import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Play,
   Pencil,
   Copy,
-  FileCode,
   Archive,
-  ArrowLeft,
   ChevronDown,
   Activity,
   RefreshCw,
@@ -17,13 +15,16 @@ import {
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { JobStateBadge, AttemptStateBadge } from '../components/common/Badge';
-import { CopyableId } from '../components/common/CopyableId';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { EditJobModal } from '../components/common/EditJobModal';
+import { ResumeCheckpointModal } from '../components/common/ResumeCheckpointModal';
 import { EmptyState } from '../components/common/EmptyState';
+import { JobRunSummary, formatExecutionMode, formatRunTime } from '../components/training/JobRunSummary';
+import { formatDateOnly } from '../utils/date';
 import { jobsService, attemptsService, datasetsService, datasetBuildsService } from '../api';
 import { isActiveAttempt } from '../api/attempts';
 import { JobDetailData, AttemptListItemData } from '../types/api';
+import { LiveTrainingPage } from './LiveTrainingPage';
 
 const formatModelName = (modelId?: string | null, archName?: string | null): string => {
   if (archName && archName !== 'resnet18' && archName !== 'neural_network') return archName;
@@ -42,35 +43,34 @@ const formatCheckpointPolicy = (
 ): string => {
   const n = policy?.every_n_epochs ?? reqCheckpoint?.every_n_epochs;
   if (n) {
-    return `Every ${n} epochs (periodic)`;
+    return `Mỗi ${n} epoch`;
   }
-  if (!policy?.type) return 'Every 5 epochs (periodic)';
+  if (!policy?.type) return 'Mỗi 5 epoch';
   return policy.type
     .replace(/_/g, ' ')
     .replace(/\b\w/g, c => c.toUpperCase());
 };
 
 const formatStrategy = (strategy?: string | null): string => {
-  if (!strategy || strategy.toLowerCase() === 'strict_bsp') return 'Strict BSP';
-  return strategy
-    .replace(/_/g, ' ')
-    .replace(/\b\w/g, c => c.toUpperCase());
-};
-
-const formatExecutionMode = (mode?: string | null): string => {
-  if (!mode) return 'Fresh Run';
-  if (mode === 'FRESH') return 'Fresh Run';
-  if (mode === 'RESUME') return 'Resumed';
-  return mode;
+  if (!strategy) return 'Đồng bộ chặt';
+  const s = strategy.toLowerCase();
+  if (s.includes('bsp') || s.includes('strict')) return 'Đồng bộ chặt';
+  if (s === 'dbs') return 'Lập lịch thích ứng (DBS)';
+  return 'Đồng bộ chặt';
 };
 
 export const JobDetailPage: React.FC = () => {
   const { jobId } = useParams<{ jobId: string }>();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const selectedAttemptId = searchParams.get('attempt_id') || searchParams.get('attemptId');
   const { setRawContractModalJob } = useApp();
 
   const [job, setJob] = useState<JobDetailData | null>(null);
   const [attempts, setAttempts] = useState<AttemptListItemData[]>([]);
+  const [historyNextCursor, setHistoryNextCursor] = useState<string | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [systemActiveAttempt, setSystemActiveAttempt] = useState<AttemptListItemData | null | undefined>();
   const launching = useRef(false);
   const [loading, setLoading] = useState<boolean>(true);
@@ -80,7 +80,7 @@ export const JobDetailPage: React.FC = () => {
   const [showEditModal, setShowEditModal] = useState(false);
   const [showArchiveConfirm, setShowArchiveConfirm] = useState(false);
   const [showStartDraftConfirm, setShowStartDraftConfirm] = useState(false);
-  const [showTechnicalDetails, setShowTechnicalDetails] = useState(false);
+  const [showResumeModal, setShowResumeModal] = useState(false);
   const [datasetInfo, setDatasetInfo] = useState<{
     datasetId: string;
     name: string;
@@ -92,6 +92,7 @@ export const JobDetailPage: React.FC = () => {
       setLoading(true);
       setSystemActiveAttempt(undefined);
       setError(null);
+      setHistoryError(null);
 
       const [jobRes, attemptsRes, activeRes] = await Promise.allSettled([
         jobsService.getJob(jobId),
@@ -102,6 +103,9 @@ export const JobDetailPage: React.FC = () => {
       if (jobRes.status === 'fulfilled') {
         const jobData = jobRes.value.data;
         setJob(jobData);
+        try {
+          sessionStorage.setItem(`pbl4_job_title_${jobId}`, jobData.display_name);
+        } catch {}
 
         const buildId = jobData.requested_contract?.dataset_build_id;
         if (buildId) {
@@ -152,6 +156,7 @@ export const JobDetailPage: React.FC = () => {
 
       if (attemptsRes.status === 'fulfilled') {
         setAttempts(attemptsRes.value.data);
+        setHistoryNextCursor(attemptsRes.value.page?.next_cursor ?? null);
       } else {
         throw attemptsRes.reason;
       }
@@ -167,9 +172,43 @@ export const JobDetailPage: React.FC = () => {
     }
   }, [jobId]);
 
+  const loadMoreHistory = async () => {
+    if (!jobId || !historyNextCursor || historyLoading) return;
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const res = await attemptsService.listAttempts({ job_id: jobId, cursor: historyNextCursor, limit: 50 });
+      setAttempts(previous => {
+        const ids = new Set(previous.map(attempt => attempt.attempt_id));
+        return [...previous, ...res.data.filter(attempt => !ids.has(attempt.attempt_id))];
+      });
+      setHistoryNextCursor(res.page?.next_cursor ?? null);
+    } catch (err: any) {
+      setHistoryError(err?.message || 'Could not load older attempts. Try again.');
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
   useEffect(() => {
     loadJobData();
   }, [loadJobData]);
+
+  if (selectedAttemptId) {
+    return (
+      <LiveTrainingPage
+        attemptIdOverride={selectedAttemptId}
+        defaultTab="metrics"
+        onBack={() => {
+          const next = new URLSearchParams(searchParams);
+          next.delete('attempt_id');
+          next.delete('attemptId');
+          setSearchParams(next);
+        }}
+        backLabel={`Quay lại ${job?.display_name || 'Nhiệm vụ'}`}
+      />
+    );
+  }
 
   if (loading && !job) {
     return (
@@ -214,23 +253,6 @@ export const JobDetailPage: React.FC = () => {
     }
   };
 
-  const handleRetry = async () => {
-    if (!job || !canLaunch || launching.current) return;
-    launching.current = true;
-    try {
-      setActionLoading('retry');
-      await attemptsService.assertNoActiveAttempt();
-      const res = await jobsService.retryJob(job.job_id, { note: 'Retry from job detail' });
-      navigate(`/live?attempt_id=${encodeURIComponent(res.data.attempt_id)}`);
-    } catch (err: any) {
-      alert(`Failed to retry training run: ${err?.message || 'Unknown error'}`);
-      void loadJobData();
-    } finally {
-      launching.current = false;
-      setActionLoading(null);
-    }
-  };
-
   const handleClone = async () => {
     if (!job) return;
     try {
@@ -265,7 +287,6 @@ export const JobDetailPage: React.FC = () => {
   const hasActiveAttempt = Boolean(activeAttempt);
   const canLaunch = !loading && systemActiveAttempt === null && !activeAttempt && !actionLoading;
   const latestAttempt = attempts[0];
-  const canRetry = latestAttempt && (latestAttempt.state === 'FAILED' || latestAttempt.state === 'ABORTED');
 
   const handleOpenRawContract = () => {
     // Adapter to legacy format for modal view if requested
@@ -289,27 +310,18 @@ export const JobDetailPage: React.FC = () => {
   };
 
   return (
-    <div className="space-y-6 w-full pb-10 select-none font-sans">
+    <div className="space-y-6 w-full pb-10 font-sans">
       {error && (
         <div className="text-xs text-rose-300" role="alert">
-          Unable to verify run availability: {error}{' '}
-          <button type="button" onClick={loadJobData} className="underline">Refresh</button>
+          Không thể xác minh tính khả dụng của lần chạy: {error}{' '}
+          <button type="button" onClick={loadJobData} className="underline">Làm mới</button>
         </div>
       )}
       {systemActiveAttempt && systemActiveAttempt.job_id !== jobId && (
         <p className="text-xs text-amber-400">
-          Another job has an active attempt. <Link to={`/live?attempt_id=${encodeURIComponent(systemActiveAttempt.attempt_id)}`} className="underline">View Run</Link> before launching another.
+          Cụm đang có một phiên huấn luyện của nhiệm vụ khác đang hoạt động. <Link to={`/live?attempt_id=${encodeURIComponent(systemActiveAttempt.attempt_id)}`} className="underline">Xem phiên chạy</Link> trước khi khởi chạy nhiệm vụ này.
         </p>
       )}
-      {/* Top Breadcrumb */}
-      <div className="flex items-center gap-2 text-xs text-[#73737c]">
-        <Link to="/jobs" className="hover:text-[#f3f3f4] flex items-center gap-1 transition-colors">
-          <ArrowLeft className="w-3 h-3" />
-          <span>Jobs</span>
-        </Link>
-        <span>/</span>
-        <span className="text-[#a1a1a8]">{job.display_name}</span>
-      </div>
 
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-white/[0.07]">
@@ -318,7 +330,6 @@ export const JobDetailPage: React.FC = () => {
             <h1 className="text-lg font-semibold text-[#f3f3f4]">
               {job.display_name}
             </h1>
-            <JobStateBadge state={job.state} />
           </div>
           {job.description && (
             <p className="text-xs text-[#73737c] max-w-2xl">
@@ -326,13 +337,13 @@ export const JobDetailPage: React.FC = () => {
             </p>
           )}
           <div className="text-[11px] text-[#73737c] pt-0.5">
-            Created on {job.created_at ? job.created_at.slice(0, 10) : '—'}
-            {job.frozen_at && ` · Frozen at ${job.frozen_at.slice(0, 10)}`}
+            Ngày tạo: {formatDateOnly(job.created_at)}
+            {job.frozen_at && ` · Khóa lúc: ${formatDateOnly(job.frozen_at)}`}
           </div>
         </div>
 
         {/* Action hierarchy */}
-        <div className="flex items-center gap-2 self-start sm:self-auto">
+        <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
           {(job.state === 'DRAFT' || job.state === 'READY') && !hasActiveAttempt && (
             <button
               type="button"
@@ -340,7 +351,7 @@ export const JobDetailPage: React.FC = () => {
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-normal rounded bg-[#171719] hover:bg-[#202024] text-[#f3f3f4] transition-colors border border-white/[0.07] cursor-pointer"
             >
               <Pencil className="w-3.5 h-3.5 text-[#73737c]" />
-              <span>{job.state === 'DRAFT' ? 'Edit Draft' : 'Edit Job'}</span>
+              <span>{job.state === 'DRAFT' ? 'Sửa bản nháp' : 'Chỉnh sửa'}</span>
             </button>
           )}
 
@@ -351,31 +362,27 @@ export const JobDetailPage: React.FC = () => {
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-normal rounded bg-[#171719] hover:bg-[#202024] text-[#f3f3f4] transition-colors border border-white/[0.07] disabled:opacity-50"
           >
             <Copy className="w-3.5 h-3.5 text-[#73737c]" />
-            <span>{actionLoading === 'clone' ? 'Cloning...' : 'Clone'}</span>
+            <span>{actionLoading === 'clone' ? 'Đang clone...' : 'Clone'}</span>
           </button>
-
-          {canRetry && !hasActiveAttempt && (
-            <button
-              type="button"
-              disabled={!canLaunch}
-              onClick={handleRetry}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-normal rounded bg-[#171719] hover:bg-[#202024] text-[#f3f3f4] transition-colors border border-white/[0.07] disabled:opacity-50"
-            >
-              <RotateCcw className="w-3.5 h-3.5 text-[#73737c]" />
-              <span>{actionLoading === 'retry' ? 'Retrying...' : 'Retry Run'}</span>
-            </button>
-          )}
 
           {activeAttempt && (
             <Link to={`/live?attempt_id=${encodeURIComponent(activeAttempt.attempt_id)}`}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded bg-blue-600 hover:bg-blue-500 text-white">
-              <Activity className="w-3.5 h-3.5" />View Run
+              <Activity className="w-3.5 h-3.5" />Xem trực tiếp
             </Link>
+          )}
+          {job.state === 'READY' && !hasActiveAttempt && (
+            <button type="button" disabled={!canLaunch} onClick={() => setShowResumeModal(true)}
+              className="inline-flex items-center gap-1.5 rounded border border-white/[0.07] bg-[#171719] px-3 py-1.5 text-xs text-[#f3f3f4] hover:bg-[#202024] disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-blue-500">
+              <RotateCcw className="h-3.5 w-3.5 text-[#a1a1a8]" />
+              Khôi phục từ checkpoint
+            </button>
           )}
           {(job.state === 'READY' || job.state === 'DRAFT') && !hasActiveAttempt && (
             <button
               type="button"
               disabled={!canLaunch}
+              aria-busy={actionLoading === 'launch'}
               onClick={() => {
                 if (job.state === 'DRAFT') {
                   setShowStartDraftConfirm(true);
@@ -385,8 +392,10 @@ export const JobDetailPage: React.FC = () => {
               }}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded bg-blue-600 hover:bg-blue-500 text-white transition-colors disabled:opacity-50"
             >
-              <Play className="w-3.5 h-3.5" />
-              <span>{actionLoading === 'launch' ? 'Starting...' : 'Launch Run'}</span>
+              {actionLoading === 'launch'
+                ? <RefreshCw aria-hidden="true" className="w-3.5 h-3.5 animate-spin motion-reduce:animate-none" />
+                : <Play aria-hidden="true" className="w-3.5 h-3.5" />}
+              <span>Bắt đầu chạy</span>
             </button>
           )}
 
@@ -396,7 +405,8 @@ export const JobDetailPage: React.FC = () => {
               disabled={actionLoading === 'archive'}
               onClick={() => setShowArchiveConfirm(true)}
               className="p-1.5 rounded text-[#73737c] hover:text-rose-400 hover:bg-[#171719] transition-colors border border-transparent hover:border-white/[0.07] disabled:opacity-50"
-              title="Archive Job"
+              title="Lưu trữ nhiệm vụ"
+              aria-label="Lưu trữ nhiệm vụ"
             >
               <Archive className="w-3.5 h-3.5" />
             </button>
@@ -404,188 +414,157 @@ export const JobDetailPage: React.FC = () => {
         </div>
       </div>
 
+      <JobRunSummary attempt={activeAttempt ?? latestAttempt} jobState={job.state} historyAvailable={!loading && !error} jobId={job.job_id} />
+
       {/* Section: Configuration */}
       <div className="space-y-3">
-        <h2 className="text-xs font-semibold text-[#f3f3f4]">
-          Configuration
-        </h2>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 divide-y sm:divide-y-0 sm:divide-x divide-white/[0.07] bg-[#121214] rounded border border-white/[0.07]">
-          {/* Dataset */}
-          <div className="p-3.5 space-y-1">
-            <div className="text-[11px] text-[#73737c]">Dataset</div>
-            <div className="text-xs font-semibold text-[#f3f3f4] truncate">
-              {datasetInfo ? (
-                <Link
-                  to={`/datasets/${encodeURIComponent(datasetInfo.datasetId)}`}
-                  className="hover:text-blue-400 transition-colors inline-flex items-center gap-1 group/ds font-medium"
-                  title={`View Dataset: ${datasetInfo.name}`}
-                >
-                  <span className="truncate">{datasetInfo.name}</span>
-                  <ExternalLink className="w-3 h-3 text-[#73737c] opacity-0 group-hover/ds:opacity-100 transition-opacity shrink-0" />
-                </Link>
-              ) : (
-                <span className="font-mono text-[11px]" title={req.dataset_build_id}>
-                  {req.dataset_build_id ? `Build ${req.dataset_build_id.slice(0, 8)}...` : 'Partitioned'}
-                </span>
-              )}
-            </div>
-            <div className="text-[11px] text-[#73737c] flex items-center gap-1.5 flex-wrap" title={`Full Build ID: ${req.dataset_build_id}`}>
-              <span>Build {req.dataset_build_id.slice(0, 8)}</span>
-              <span>·</span>
-              <span>{resv?.dataset?.batch_size ? `Batch ${resv.dataset.batch_size}` : 'Batch 256'}</span>
-            </div>
-          </div>
-
-          {/* Model */}
-          <div className="p-3.5 space-y-1">
-            <div className="text-[11px] text-[#73737c]">Model</div>
-            <div className="text-xs font-medium text-[#f3f3f4]">
-              {formatModelName(req.model_id, resv?.model?.architecture_name)}
-            </div>
-            <div className="text-[11px] text-[#73737c]">
-              {resv?.model?.parameter_count ? `${(resv.model.parameter_count / 1_000_000).toFixed(1)}M params` : 'Neural Network'}
-            </div>
-          </div>
-
-          {/* Training */}
-          <div className="p-3.5 space-y-1">
-            <div className="text-[11px] text-[#73737c]">Training</div>
-            <div className="text-xs font-medium text-[#f3f3f4]">
-              {req.epochs} Epochs
-            </div>
-            <div className="text-[11px] text-[#73737c]">
-              LR: {req.learning_rate} · Seed {req.training_seed}
-            </div>
-          </div>
-
-          {/* Distributed training */}
-          <div className="p-3.5 space-y-1">
-            <div className="text-[11px] text-[#73737c]">Distributed Training</div>
-            <div className="text-xs font-medium text-[#f3f3f4]">
-              {formatStrategy(req.training_strategy)}
-            </div>
-            <div className="text-[11px] text-[#73737c]">
-              {resv?.synchronization?.expected_workers || 3} Workers
-            </div>
-          </div>
-
-          {/* Checkpoint */}
-          <div className="p-3.5 space-y-1">
-            <div className="text-[11px] text-[#73737c]">Checkpoint Policy</div>
-            <div className="text-xs font-medium text-[#f3f3f4]">
-              {formatCheckpointPolicy(resv?.checkpoint_policy, req?.checkpoint)}
-            </div>
-            <div className="text-[11px] text-[#73737c]">
-              Blocking at epoch boundaries
-            </div>
-          </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 className="text-xs font-semibold text-[#f3f3f4]">Cấu hình huấn luyện</h2>
+          <JobStateBadge state={job.state} />
         </div>
+        <p className="text-xs text-[#73737c]">
+          {job.state === 'DRAFT'
+            ? 'Chỉnh sửa cài đặt huấn luyện trước khi khởi chạy. Khi bắt đầu huấn luyện, cấu hình sẽ được khóa cố định.'
+            : 'Mỗi lần chạy sử dụng cấu hình huấn luyện đã khóa này. Clone để điều chỉnh cấu hình.'}
+          {' '}Bắt đầu chạy để bắt đầu từ đầu; Khôi phục từ checkpoint để tiếp tục tiến trình huấn luyện đã lưu.
+        </p>
 
-        {/* Collapsed Technical details */}
-        <div>
-          <button
-            type="button"
-            onClick={() => setShowTechnicalDetails(!showTechnicalDetails)}
-            className="flex items-center gap-1.5 text-xs text-[#73737c] hover:text-[#f3f3f4] transition-colors py-1"
-          >
-            <ChevronDown
-              className={`w-3 h-3 transition-transform ${
-                showTechnicalDetails ? 'rotate-180' : ''
-              }`}
-            />
-            <span>Technical details</span>
-          </button>
-
-          {showTechnicalDetails && (
-            <div className="mt-2 p-3.5 bg-[#121214] rounded border border-white/[0.07] space-y-2 text-xs">
-              <div className="flex items-center justify-between">
-                <span className="text-[#73737c]">Job ID</span>
-                <CopyableId value={job.job_id} />
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-[#73737c]">Dataset Build ID</span>
-                <CopyableId value={req.dataset_build_id} />
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-[#73737c]">Contract Hash</span>
-                <CopyableId value={job.contract_hash || 'Unresolved'} />
-              </div>
-              {job.cloned_from_job_id && (
-                <div className="flex items-center justify-between">
-                  <span className="text-[#73737c]">Cloned From</span>
-                  <Link to={`/jobs/${job.cloned_from_job_id}`} className="text-blue-400 hover:underline">
-                    {job.cloned_from_job_id}
-                  </Link>
-                </div>
-              )}
-              <div className="flex items-center justify-between">
-                <span className="text-[#73737c]">Protocols</span>
-                <span className="text-[#a1a1a8]">
-                  DTP v{resv?.protocols?.dtp_version ?? 1} · MCP v{resv?.protocols?.mcp_version ?? 1}
-                </span>
-              </div>
-              <div className="pt-2 border-t border-white/[0.07] flex justify-end">
-                <button
-                  type="button"
-                  onClick={handleOpenRawContract}
-                  className="inline-flex items-center gap-1 text-xs text-[#73737c] hover:text-[#f3f3f4] transition-colors"
-                >
-                  <FileCode className="w-3 h-3" />
-                  <span>View raw configuration JSON</span>
-                </button>
-              </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+          {/* Card 1: Dữ liệu & Mô hình */}
+          <div className="bg-[#121214] border border-white/[0.07] rounded p-4 space-y-3">
+            <div className="text-[11px] font-medium text-[#73737c] uppercase tracking-wider">
+              Dữ liệu & Mô hình
             </div>
-          )}
+            <dl className="space-y-2.5">
+              <div className="flex items-start justify-between gap-3">
+                <dt className="text-[#73737c] shrink-0">Tập dữ liệu</dt>
+                <dd className="font-medium text-[#f3f3f4] text-right">
+                  {datasetInfo ? (
+                    <Link
+                      to={`/datasets/${encodeURIComponent(datasetInfo.datasetId)}`}
+                      className="hover:text-blue-400 transition-colors inline-flex items-center gap-1 group/ds"
+                      title={`Xem Dataset: ${datasetInfo.name}`}
+                    >
+                      <span className="break-words">{datasetInfo.name}</span>
+                      <ExternalLink className="w-3 h-3 text-[#73737c] opacity-0 group-hover/ds:opacity-100 transition-opacity shrink-0" />
+                    </Link>
+                  ) : (
+                    <span>Dữ liệu phân vùng</span>
+                  )}
+                </dd>
+              </div>
+
+              <div className="flex items-center justify-between gap-3 pt-2 border-t border-white/[0.04]">
+                <dt className="text-[#73737c]">Kích thước batch</dt>
+                <dd className="font-medium text-[#f3f3f4]">
+                  {resv?.dataset?.batch_size ? `${resv.dataset.batch_size} mẫu / bước` : '256 mẫu / bước'}
+                </dd>
+              </div>
+
+              <div className="flex items-center justify-between gap-3 pt-2 border-t border-white/[0.04]">
+                <dt className="text-[#73737c]">Kiến trúc mô hình</dt>
+                <dd className="font-medium text-[#f3f3f4]">
+                  {formatModelName(req.model_id, resv?.model?.architecture_name)}
+                </dd>
+              </div>
+
+              <div className="flex items-center justify-between gap-3 pt-2 border-t border-white/[0.04]">
+                <dt className="text-[#73737c]">Quy mô tham số</dt>
+                <dd className="font-medium text-[#f3f3f4]">
+                  {resv?.model?.parameter_count ? `${(resv.model.parameter_count / 1_000_000).toFixed(1)}M tham số` : 'Mạng nơ-ron'}
+                </dd>
+              </div>
+            </dl>
+          </div>
+
+          {/* Card 2: Huấn luyện & Phân tán */}
+          <div className="bg-[#121214] border border-white/[0.07] rounded p-4 space-y-3">
+            <div className="text-[11px] font-medium text-[#73737c] uppercase tracking-wider">
+              Huấn luyện & Phân tán
+            </div>
+            <dl className="space-y-2.5">
+              <div className="flex items-center justify-between gap-3">
+                <dt className="text-[#73737c]">Số epoch</dt>
+                <dd className="font-medium text-[#f3f3f4]">{req.epochs} epochs</dd>
+              </div>
+
+              <div className="flex items-center justify-between gap-3 pt-2 border-t border-white/[0.04]">
+                <dt className="text-[#73737c]">Learning rate</dt>
+                <dd className="font-medium text-[#f3f3f4]">{req.learning_rate}</dd>
+              </div>
+
+              <div className="flex items-center justify-between gap-3 pt-2 border-t border-white/[0.04]">
+                <dt className="text-[#73737c]">Seed</dt>
+                <dd className="font-medium text-[#f3f3f4]">{req.training_seed}</dd>
+              </div>
+
+              <div className="flex items-center justify-between gap-3 pt-2 border-t border-white/[0.04]">
+                <dt className="text-[#73737c]">Chiến lược phân tán</dt>
+                <dd className="font-medium text-[#f3f3f4]">{formatStrategy(req.training_strategy)}</dd>
+              </div>
+
+              <div className="flex items-center justify-between gap-3 pt-2 border-t border-white/[0.04]">
+                <dt className="text-[#73737c]">Số lượng Worker</dt>
+                <dd className="font-medium text-[#f3f3f4]">
+                  {resv?.synchronization?.expected_workers != null ? `${resv.synchronization.expected_workers} Workers` : 'Chưa xác định'}
+                </dd>
+              </div>
+
+              <div className="flex items-center justify-between gap-3 pt-2 border-t border-white/[0.04]">
+                <dt className="text-[#73737c]">Lưu checkpoint</dt>
+                <dd className="font-medium text-[#f3f3f4] text-right">
+                  <span>{formatCheckpointPolicy(resv?.checkpoint_policy, req?.checkpoint)}</span>
+                </dd>
+              </div>
+            </dl>
+          </div>
         </div>
       </div>
 
       {/* Execution Attempts History */}
-      <div className="space-y-3 pt-2">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-xs font-semibold text-[#f3f3f4]">
-              Execution Attempts ({attempts.length})
-            </h2>
-            <p className="text-xs text-[#73737c] mt-0.5">
-              History of distributed training runs executed for this job
-            </p>
-          </div>
-        </div>
+      <details className="group/history space-y-3 border-t border-white/[0.07] pt-4">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded text-xs text-[#f3f3f4] focus-visible:outline-2 focus-visible:outline-blue-500 [&::-webkit-details-marker]:hidden">
+          <span className="font-semibold">Lịch sử lần chạy <span className="font-normal text-[#73737c]">· {error || loading ? 'Không khả dụng' : `${attempts.length} ${historyNextCursor ? 'đã tải' : 'lần chạy'}`}</span></span>
+          <ChevronDown aria-hidden="true" className="h-3.5 w-3.5 text-[#73737c] transition-transform group-open/history:rotate-180" />
+        </summary>
+        <p className="text-xs text-[#73737c]">Mỗi lần khởi chạy, thử lại hoặc tiếp tục sẽ tạo một Lần chạy riêng biệt. Lịch sử các lần chạy trước được lưu trữ tại đây.</p>
 
         <div className="bg-[#121214] border border-white/[0.07] rounded overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
+            <table className="w-full text-left text-xs min-w-[850px]">
               <thead>
                 <tr className="border-b border-white/[0.07] text-[#73737c] bg-[#121214] text-[11px]">
-                  <th className="py-2.5 px-3 font-medium">Attempt ID</th>
-                  <th className="py-2.5 px-3 font-medium">State</th>
-                  <th className="py-2.5 px-3 font-medium">Mode</th>
-                  <th className="py-2.5 px-3 font-medium">Strategy</th>
-                  <th className="py-2.5 px-3 font-medium">Failure Code</th>
-                  <th className="py-2.5 px-3 font-medium">Started</th>
-                  <th className="py-2.5 px-3 font-medium">Ended</th>
-                  <th className="py-2.5 px-3 font-medium text-right">Action</th>
+                  <th className="py-2.5 px-3 font-medium">Lần chạy</th>
+                  <th className="py-2.5 px-3 font-medium">Trạng thái</th>
+                  <th className="py-2.5 px-3 font-medium">Chế độ</th>
+                  <th className="py-2.5 px-3 font-medium">Chiến lược</th>
+                  <th className="py-2.5 px-3 font-medium">Mã lỗi</th>
+                  <th className="py-2.5 px-3 font-medium">Bắt đầu</th>
+                  <th className="py-2.5 px-3 font-medium">Kết thúc</th>
+                  <th className="py-2.5 px-3 font-medium text-right">Thao tác</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/[0.04]">
-                {attempts.length === 0 ? (
+                {error || loading ? (
+                  <tr><td colSpan={8} className="py-8 text-center text-[#73737c]">{loading ? 'Đang tải lịch sử lần chạy…' : 'Không thể tải lịch sử. Vui lòng thử lại.'}</td></tr>
+                ) : attempts.length === 0 ? (
                   <tr>
                     <td colSpan={8} className="py-8 text-center text-[#73737c]">
-                      No execution attempts recorded for this job.
+                      Chưa có lần chạy nào được ghi nhận cho nhiệm vụ này.
                     </td>
                   </tr>
                 ) : (
-                  attempts.map(att => (
+                  attempts.map((att, idx) => (
                     <tr key={att.attempt_id} className="hover:bg-[#171719] transition-colors">
                       <td className="py-2.5 px-3">
                         <Link
-                          to={`/live?attempt_id=${att.attempt_id}`}
-                          className="font-mono font-medium text-[#f3f3f4] hover:text-blue-400 transition-colors inline-flex items-center gap-1 group/att"
-                          title="Open Attempt Live Inspector"
+                          to={isActiveAttempt(att.state)
+                            ? `/live?attempt_id=${encodeURIComponent(att.attempt_id)}&tab=live`
+                            : `/jobs/${encodeURIComponent(jobId!)}?attempt_id=${encodeURIComponent(att.attempt_id)}`}
+                          className="font-medium text-[#f3f3f4] hover:text-blue-400 transition-colors"
+                          title="Xem chi tiết lần chạy"
                         >
-                          <span>{att.attempt_id}</span>
-                          <ChevronRight className="w-3 h-3 text-[#73737c] opacity-0 group-hover/att:opacity-100 transition-opacity shrink-0" />
+                          Lần chạy #{attempts.length - idx}
                         </Link>
                       </td>
                       <td className="py-2.5 px-3">
@@ -600,28 +579,27 @@ export const JobDetailPage: React.FC = () => {
                       <td className="py-2.5 px-3 text-rose-400 font-mono text-[11px]">
                         {att.failure_code || '—'}
                       </td>
-                      <td className="py-2.5 px-3 text-[#73737c] text-[11px]">
-                        {att.started_at ? att.started_at.slice(0, 19).replace('T', ' ') : '—'}
+                      <td className="py-2.5 px-3 text-[#73737c] text-xs">
+                        {formatRunTime(att.started_at)}
                       </td>
-                      <td className="py-2.5 px-3 text-[#73737c] text-[11px]">
-                        {att.ended_at ? att.ended_at.slice(0, 19).replace('T', ' ') : '—'}
+                      <td className="py-2.5 px-3 text-[#73737c] text-xs">
+                        {formatRunTime(att.ended_at)}
                       </td>
                       <td className="py-2.5 px-3 text-right">
-                        {att.state === 'RUNNING' || att.state === 'COMPLETING' || att.state === 'INITIALIZING' ? (
+                        {isActiveAttempt(att.state) ? (
                           <Link
-                            to={`/live?attempt_id=${att.attempt_id}`}
+                            to={`/live?attempt_id=${encodeURIComponent(att.attempt_id)}&tab=live`}
                             className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 text-xs font-medium transition-colors border border-blue-500/20"
                           >
-                            <Activity className="w-3 h-3" />
-                            <span>Live Run</span>
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                            <span>Xem trực tiếp</span>
                           </Link>
                         ) : (
                           <Link
-                            to={`/live?attempt_id=${att.attempt_id}`}
-                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-[#171719] hover:bg-[#202024] text-[#a1a1a8] hover:text-[#f3f3f4] text-xs transition-colors border border-white/[0.07]"
+                            to={`/jobs/${encodeURIComponent(jobId!)}?attempt_id=${encodeURIComponent(att.attempt_id)}`}
+                            className="text-xs text-blue-400 hover:underline"
                           >
-                            <span>Inspect</span>
-                            <ChevronRight className="w-3 h-3" />
+                            Xem kết quả
                           </Link>
                         )}
                       </td>
@@ -632,25 +610,42 @@ export const JobDetailPage: React.FC = () => {
             </table>
           </div>
         </div>
-      </div>
+        {historyError && <p role="alert" className="text-xs text-rose-300">{historyError}</p>}
+        {historyNextCursor && !error && !loading && (
+          <button type="button" onClick={loadMoreHistory} disabled={historyLoading}
+            className="rounded border border-white/[0.07] px-3 py-1.5 text-xs text-[#a1a1a8] hover:text-white disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-blue-500">
+            {historyLoading ? 'Đang tải thêm lần chạy cũ…' : 'Tải thêm lần chạy cũ'}
+          </button>
+        )}
+      </details>
 
       {/* Start DRAFT Job Confirmation Modal */}
+      {showResumeModal && (
+        <ResumeCheckpointModal key={job.job_id} jobId={job.job_id}
+          canResume={job.state === 'READY' && canLaunch}
+          onClose={() => setShowResumeModal(false)}
+          onResumed={attemptId => navigate(`/live?attempt_id=${encodeURIComponent(attemptId)}`)}
+        />
+      )}
+
       <ConfirmationModal
         isOpen={showStartDraftConfirm}
+        isLoading={actionLoading === 'launch'}
+        closeOnConfirm={false}
         onClose={() => setShowStartDraftConfirm(false)}
         onConfirm={async () => {
-          setShowStartDraftConfirm(false);
           await handleLaunch();
+          setShowStartDraftConfirm(false);
         }}
-        title="Start Training Run?"
-        confirmLabel="Start Training"
+        title="Bắt đầu chạy huấn luyện?"
+        confirmLabel="Khóa & Bắt đầu chạy"
         message={
           <div className="space-y-2 text-xs text-[#a1a1a8]">
             <p>
-              Job <strong className="text-[#f3f3f4]">{job.display_name}</strong> is currently in <span className="font-mono text-[#f3f3f4]">DRAFT</span> state.
+              Nhiệm vụ <strong className="text-[#f3f3f4]">{job.display_name}</strong> đang ở trạng thái <span className="font-mono text-[#f3f3f4]">Bản nháp (DRAFT)</span>.
             </p>
             <p>
-              Starting the job will validate and freeze its configuration into <span className="font-mono text-[#f3f3f4]">READY</span> state and launch a training attempt. Once frozen, training settings cannot be edited directly.
+              Khởi chạy nhiệm vụ sẽ xác thực và khóa cấu hình chuyển sang trạng thái <span className="font-mono text-[#f3f3f4]">Sẵn sàng (READY)</span>. Khi đã khóa, cấu hình huấn luyện không thể chỉnh sửa trực tiếp mà cần Clone nếu muốn điều chỉnh.
             </p>
           </div>
         }
@@ -661,14 +656,15 @@ export const JobDetailPage: React.FC = () => {
         isOpen={showArchiveConfirm}
         onClose={() => setShowArchiveConfirm(false)}
         onConfirm={handleArchive}
-        title="Archive Training Job"
+        title="Lưu trữ nhiệm vụ huấn luyện?"
+        confirmLabel="Lưu trữ"
         message={
           <div className="space-y-2 text-xs text-[#a1a1a8]">
             <p>
-              Are you sure you want to archive <strong className="text-[#f3f3f4]">{job.display_name}</strong>?
+              Bạn có chắc chắn muốn lưu trữ nhiệm vụ <strong className="text-[#f3f3f4]">{job.display_name}</strong>?
             </p>
             <p>
-              The job specification will be hidden from new executions. Historical attempts and checkpoints will remain securely accessible.
+              Cấu hình nhiệm vụ sẽ bị ẩn khỏi danh sách khởi chạy mới. Lịch sử các lần chạy và checkpoints đã lưu vẫn được bảo lưu đầy đủ.
             </p>
           </div>
         }

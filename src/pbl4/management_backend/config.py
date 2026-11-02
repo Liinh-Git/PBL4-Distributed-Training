@@ -8,11 +8,12 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from dotenv import load_dotenv
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
-from dotenv import load_dotenv
+from pbl4.common.artifact_origin import MODEL_ARTIFACT_PORT
+from pbl4.common.hashing import derive_model_artifact_token
 
 # Ensure .env is populated into os.environ for non-pydantic consumers
 load_dotenv()
@@ -42,6 +43,10 @@ class BackendSettings(BaseSettings):
 
     # ─── Database ─────────────────────────────────────────────────────────────
     database_url: str | None = Field(default=None, alias="DATABASE_URL")
+    redis_url: str | None = Field(default=None, alias="REDIS_URL", repr=False)
+    redis_event_stream: str = Field(
+        default="pbl4:runtime-events", alias="REDIS_EVENT_STREAM", min_length=1
+    )
 
     # ─── Runtime (MCP/1 & DTP/1) ──────────────────────────────────────────────
     runtime_host: str = Field(default="127.0.0.1", alias="RUNTIME_HOST")
@@ -126,6 +131,7 @@ class BackendSettings(BaseSettings):
         "dataset_manager_port",
         "runtime_advertised_host",
         "worker_admission_secret",
+        "redis_url",
         mode="before",
     )
     @classmethod
@@ -139,6 +145,15 @@ class BackendSettings(BaseSettings):
         if self.runtime_management_port is None:
             return None
         return f"{self.runtime_host}:{self.runtime_management_port}"
+
+    @property
+    def runtime_artifact_token(self) -> str | None:
+        secret = self.worker_admission_secret
+        return derive_model_artifact_token(secret) if secret else None
+
+    @property
+    def runtime_artifact_url(self) -> str:
+        return f"http://{self.runtime_host}:{MODEL_ARTIFACT_PORT}"
 
     @property
     def dtp_advertised_host(self) -> str:

@@ -146,6 +146,7 @@ def get_attempt(attempt_id: str):
     if isinstance(meta, str):
         try:
             import json
+
             meta = json.loads(meta)
         except Exception:
             meta = None
@@ -350,7 +351,7 @@ def list_attempt_events(
     severity: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     cursor: Annotated[str | None, Query()] = None,
-    after_seq: Annotated[int | None, Query()] = None,
+    after_seq: Annotated[int | None, Query(ge=0)] = None,
 ):
     with db.get_connection() as conn:
         rows = attempt_service.list_attempt_events(
@@ -364,7 +365,7 @@ def list_attempt_events(
         )
 
     has_more = len(rows) > limit
-    next_cursor = str(rows[limit]["event_id"]) if has_more else None
+    next_cursor = str(rows[limit - 1]["runtime_event_seq"]) if has_more else None
     page_rows = rows[:limit]
     items = [
         RuntimeEventItem(
@@ -378,11 +379,14 @@ def list_attempt_events(
         )
         for r in page_rows
     ]
-    expected = (after_seq + 1) if after_seq is not None else 1
+    try:
+        expected = max(after_seq or 0, int(cursor or 0)) + 1
+    except ValueError:
+        expected = (after_seq or 0) + 1
     gap_detected = False
     for row in page_rows:
         seq = row["runtime_event_seq"]
-        if seq != expected:
+        if not (event_type or severity) and seq != expected:
             gap_detected = True
             break
         expected += 1
@@ -473,7 +477,9 @@ def get_step(attempt_id: str, step_id: int):
                     batch_id=ws["batch_id"],
                     sample_count=ws["sample_count"],
                     contribution_accepted=ws.get("contribution_accepted", True),
-                    parameter_applied=ws.get("parameter_applied", True if is_step_committed else None),
+                    parameter_applied=ws.get(
+                        "parameter_applied", True if is_step_committed else None
+                    ),
                     loss=ws.get("loss"),
                     accuracy=ws.get("accuracy"),
                     compute_ms=ws.get("compute_ms"),

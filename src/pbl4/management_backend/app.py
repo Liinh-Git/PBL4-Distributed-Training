@@ -48,6 +48,7 @@ from pbl4.management_backend.services.attempt_service import (
     JobNotReadyError,
     RuntimeUnavailableError,
 )
+from pbl4.management_backend.services.checkpoint_artifacts import maintenance_loop
 from pbl4.management_backend.services.cluster_scheduler import (
     NodeCapacityUnavailableError,
 )
@@ -175,6 +176,23 @@ async def _node_maintenance_loop(settings: Any) -> None:
             logger.error("Unexpected error in node maintenance worker: %s", exc)
 
 
+async def _runtime_snapshot_loop(gateway: Any) -> None:
+    """Keep preparation visible without polling from the training data plane."""
+    while True:
+        refresh_task = asyncio.create_task(asyncio.to_thread(gateway.refresh_pretraining_snapshot))
+        try:
+            await asyncio.shield(refresh_task)
+        except asyncio.CancelledError:
+            # Cancelling to_thread does not stop its callable. Drain it before
+            # lifespan shutdown closes the MCP connection and database pool.
+            with contextlib.suppress(Exception):
+                await refresh_task
+            raise
+        except Exception:
+            logger.exception("Failed to refresh pre-training Runtime snapshot")
+        await asyncio.sleep(2.0)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Initialize and clean up the DB pool, gateways, and maintenance tasks."""
@@ -196,16 +214,28 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("DATABASE_URL not configured; database pool not initialized.")
 
     # Initialize runtime gateway
-    init_gateway(
+    runtime_gateway = init_gateway(
         host=settings.runtime_host if settings.runtime_management_port else None,
         port=settings.runtime_management_port,
+        redis_events=bool(settings.redis_url),
     )
+    if settings.redis_url:
+        from pbl4.management_backend.gateways.redis_events import RedisEventConsumer
+
+        runtime_gateway.event_consumer = RedisEventConsumer(
+            settings.redis_url, settings.redis_event_stream, runtime_gateway.handle_runtime_events
+        )
+        runtime_gateway.event_consumer.start()
 
     # Initialize node control gateway
     node_control_gateway = init_node_control_gateway()
 
     # Start periodic node & allocation maintenance loop
     maintenance_task = asyncio.create_task(_node_maintenance_loop(settings))
+    snapshot_task = asyncio.create_task(_runtime_snapshot_loop(runtime_gateway))
+    artifact_task = None
+    if settings.database_url and settings.runtime_artifact_token:
+        artifact_task = asyncio.create_task(maintenance_loop(settings))
 
     # Initialize Dataset Manager client
     from pbl4.management_backend.clients.dataset_manager import init_client
@@ -219,6 +249,13 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
 
     # Shutdown
+    if artifact_task is not None:
+        artifact_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await artifact_task
+    snapshot_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await snapshot_task
     maintenance_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await maintenance_task
@@ -228,6 +265,8 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from pbl4.management_backend.gateways.runtime_gateway import get_gateway
 
     get_gateway().port.disconnect()
+    if runtime_gateway.event_consumer is not None:
+        await asyncio.to_thread(runtime_gateway.event_consumer.stop)
     db.close_pool()
     logger.info("Management Backend shutdown complete.")
 

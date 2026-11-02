@@ -97,7 +97,7 @@ export const TechnicalDetailsDrawer: React.FC<TechnicalDetailsDrawerProps> = ({
     >
       <div className="space-y-6 font-sans">
         {/* Section 1: Internal Identifiers */}
-        <div className="bg-[#171719] border border-white/[0.04] rounded-lg p-4 space-y-3 font-mono">
+        <div className="bg-[#171719] border border-white/[0.04] rounded p-4 space-y-3 font-mono">
           <div className="flex items-center gap-2 text-xs font-semibold text-[#f3f3f4] font-sans">
             <Hash className="w-3.5 h-3.5 text-blue-400" />
             <span>Internal Cluster Identifiers</span>
@@ -130,7 +130,7 @@ export const TechnicalDetailsDrawer: React.FC<TechnicalDetailsDrawerProps> = ({
         </div>
 
         {/* Section 2: Worker DTP Sessions */}
-        <div className="bg-[#171719] border border-white/[0.04] rounded-lg p-4 space-y-3 font-mono">
+        <div className="bg-[#171719] border border-white/[0.04] rounded p-4 space-y-3 font-mono">
           <div className="flex items-center justify-between font-sans">
             <div className="flex items-center gap-2 text-xs font-semibold text-[#f3f3f4]">
               <Server className="w-3.5 h-3.5 text-emerald-400" />
@@ -159,7 +159,7 @@ export const TechnicalDetailsDrawer: React.FC<TechnicalDetailsDrawerProps> = ({
 
         {/* Section 3: Strict BSP Timing & Barrier */}
         {activeStep && (
-          <div className="bg-[#171719] border border-white/[0.04] rounded-lg p-4 space-y-3 font-mono">
+          <div className="bg-[#171719] border border-white/[0.04] rounded p-4 space-y-3 font-mono">
             <div className="flex items-center gap-2 text-xs font-semibold text-[#f3f3f4] font-sans">
               <ShieldCheck className="w-3.5 h-3.5 text-blue-400" />
               <span>Step State Machine &amp; Timings</span>
@@ -197,7 +197,7 @@ export const TechnicalDetailsDrawer: React.FC<TechnicalDetailsDrawerProps> = ({
               {copiedSection === 'json' ? 'Copied' : 'Copy'}
             </button>
           </div>
-          <div className="bg-[#101012] p-3.5 rounded-lg border border-white/[0.04] font-mono text-xs text-[#a1a1a8] max-h-56 overflow-y-auto">
+          <div className="bg-[#101012] p-3.5 rounded border border-white/[0.04] font-mono text-xs text-[#a1a1a8] max-h-56 overflow-y-auto">
             <pre className="text-[11px] leading-relaxed">{rawStateJson}</pre>
           </div>
         </div>

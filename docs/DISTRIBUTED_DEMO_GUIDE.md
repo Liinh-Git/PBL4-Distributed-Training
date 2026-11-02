@@ -52,5 +52,3 @@ python services/node-agent.py --backend-url http://BACKEND_HOST:8000 --var-dir v
 Chạy mỗi lệnh trong terminal riêng. Cấu hình `RUNTIME_HOST`, `RUNTIME_ADVERTISED_HOST`, `RUNTIME_PORT`, `RUNTIME_MANAGEMENT_PORT` theo địa chỉ Runtime mà Backend/Workers truy cập được. Node máy khác chỉ cần dependencies Worker/Agent và URL Backend; không cần connection string Aiven. Dùng thư mục `--var-dir` riêng cho từng Agent để giữ cache/identity ổn định. WebUI riêng cần `VITE_API_BASE_URL` và `VITE_WS_BASE_URL` là origin Backend (không thêm `/api/v1` hoặc `/ws/v1`). CORS Backend phải cho phép origin WebUI.
 
 Dataset Manager dùng service đã cấu hình; launcher không nhân bản hoặc xóa kho Hugging Face. Build READY đã có được dùng lại. Remote Dataset Manager hiện không hỗ trợ tạo nguồn synthetic mới; chọn Build synthetic READY đã đăng ký.
-
-Các hướng dẫn harness/network cũ nằm trong `archive/`; không dùng harness để demo tương tác người dùng. Không chạy integration test bằng DATABASE_URL Aiven. Tests chỉ nhận TEST_DATABASE_URL trỏ PostgreSQL loopback cô lập.

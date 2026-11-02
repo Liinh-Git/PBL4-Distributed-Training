@@ -36,7 +36,6 @@ from pbl4.management_backend.services.cluster_scheduler import (
     ClusterScheduler,
     WorkerPlacementSpec,
 )
-from pbl4.management_backend.services.job_service import JobValidationError
 from pbl4.management_backend.services.dataset_service import (
     InvalidCursorError as InvalidCursorError,
 )
@@ -46,6 +45,7 @@ from pbl4.management_backend.services.dataset_service import (
 from pbl4.management_backend.services.dataset_service import (
     encode_cursor as encode_cursor,
 )
+from pbl4.management_backend.services.job_service import JobValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -512,10 +512,10 @@ def resume_job(conn: psycopg.Connection, job_id: str, checkpoint_id: str) -> tup
     ckpt = checkpoint_repository.get_checkpoint(conn, checkpoint_id)
     if ckpt is None:
         raise AttemptNotFoundError(f"Checkpoint '{checkpoint_id}' not found.")
-    if ckpt["state"] != "COMPLETE":
+    if ckpt["state"] != "COMPLETE" or ckpt["artifact_retired"]:
         raise CheckpointNotCompleteError(
             f"Checkpoint '{checkpoint_id}' is in state '{ckpt['state']}'; "
-            "only COMPLETE checkpoints can be resumed.",
+            "only available COMPLETE checkpoints can be resumed.",
             current_state=ckpt["state"],
         )
     if ckpt["contract_hash"] != job["contract_hash"]:
@@ -581,6 +581,11 @@ def resume_job(conn: psycopg.Connection, job_id: str, checkpoint_id: str) -> tup
 
     try:
         with conn.transaction():
+            available = checkpoint_repository.get_checkpoint(conn, checkpoint_id, for_update=True)
+            if available is None or available["artifact_retired"]:
+                raise CheckpointNotCompleteError(
+                    "Checkpoint artifact was retired before resume.", current_state="COMPLETE"
+                )
             attempt_row = attempt_repository.create_attempt(
                 conn,
                 attempt_id=attempt_id,
@@ -1137,7 +1142,9 @@ def _dispatch_workers_for_attempt(
                         conn,
                         str(d_alloc["allocation_id"]),
                         failure_code="WORKER_SPAWN_FAILED",
-                        failure_message="Cancelled due to partial worker dispatch failure in attempt",
+                        failure_message=(
+                            "Cancelled due to partial worker dispatch failure in attempt"
+                        ),
                     )
             except Exception as exc:
                 logger.warning(

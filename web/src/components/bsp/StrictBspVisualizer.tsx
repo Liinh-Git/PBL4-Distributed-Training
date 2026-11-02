@@ -104,7 +104,7 @@ export const StrictBspVisualizer: React.FC<StrictBspVisualizerProps> = ({
   }
 
   return (
-    <div className="bg-[#121214] border border-white/[0.07] rounded-lg p-5 space-y-6 font-sans select-none">
+    <div className="bg-[#121214] border border-white/[0.07] rounded p-5 space-y-6 font-sans select-none">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-white/[0.06]">
         <div>

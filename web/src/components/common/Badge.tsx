@@ -13,17 +13,17 @@ import {
 interface BadgeProps {
   children?: React.ReactNode;
   variant?:
-    | 'default'
-    | 'success'
-    | 'warning'
-    | 'danger'
-    | 'info'
-    | 'neutral'
-    | 'purple'
-    | 'green'
-    | 'amber'
-    | 'blue'
-    | 'red';
+  | 'default'
+  | 'success'
+  | 'warning'
+  | 'danger'
+  | 'info'
+  | 'neutral'
+  | 'purple'
+  | 'green'
+  | 'amber'
+  | 'blue'
+  | 'red';
   size?: 'sm' | 'md';
   className?: string;
 }
@@ -88,13 +88,13 @@ export const JobStateBadge: React.FC<{ state: JobState }> = ({ state }) => {
     case 'READY':
       return (
         <Badge variant="neutral">
-          <span className="text-[#f3f3f4]">Ready</span>
+          <span className="text-[#f3f3f4]">Sẵn sàng</span>
         </Badge>
       );
     case 'DRAFT':
-      return <Badge variant="neutral">Draft</Badge>;
+      return <Badge variant="neutral">Bản nháp</Badge>;
     case 'ARCHIVED':
-      return <Badge variant="neutral">Archived</Badge>;
+      return <Badge variant="neutral">Đã lưu trữ</Badge>;
     default:
       return <Badge variant="neutral">{state}</Badge>;
   }
@@ -109,61 +109,66 @@ export const AttemptStateBadge: React.FC<{ state: AttemptState; pulse?: boolean 
       return (
         <Badge variant="info">
           {pulse && <StatusDot status="healthy" pulse />}
-          Running
+          Đang chạy
         </Badge>
       );
     case 'COMPLETED':
       return (
         <Badge variant="success">
           <StatusDot status="healthy" />
-          Completed
+          Hoàn tất
         </Badge>
       );
     case 'FAILED':
       return (
         <Badge variant="danger">
           <StatusDot status="error" />
-          Failed
+          Thất bại
         </Badge>
       );
     case 'ABORTED':
       return (
         <Badge variant="neutral">
           <StatusDot status="inactive" />
-          Aborted
+          Đã hủy
         </Badge>
       );
     case 'WAITING_WORKERS':
       return (
         <Badge variant="warning">
           <StatusDot status="warning" pulse />
-          Waiting for workers
+          Chờ workers
         </Badge>
       );
     case 'PROVISIONING':
       return (
         <Badge variant="warning">
           <StatusDot status="warning" pulse />
-          Provisioning
+          Cấp phát tài nguyên
         </Badge>
       );
     case 'INITIALIZING':
       return (
         <Badge variant="warning">
           <StatusDot status="warning" pulse />
-          Initializing
+          Khởi tạo
         </Badge>
       );
     case 'COMPLETING':
       return (
         <Badge variant="warning">
           <StatusDot status="warning" pulse />
-          Completing
+          Đang hoàn tất
         </Badge>
       );
     case 'CREATED':
+      return (
+        <Badge variant="neutral">
+          Đã tạo
+        </Badge>
+      );
     default:
-      return <Badge variant="neutral">Created</Badge>;
+      return <Badge variant="neutral">{state}</Badge>;
   }
 };
 
@@ -201,14 +206,14 @@ export const DatasetBuildStateBadge: React.FC<{ state: DatasetBuildState }> = ({
       return (
         <Badge variant="success">
           <StatusDot status="healthy" />
-          Ready
+          Sẵn sàng
         </Badge>
       );
     case 'MATERIALIZING':
       return (
         <Badge variant="warning">
           <StatusDot status="warning" pulse />
-          Materializing
+          Đang chuẩn bị
         </Badge>
       );
     case 'IMPORTING':
@@ -219,25 +224,25 @@ export const DatasetBuildStateBadge: React.FC<{ state: DatasetBuildState }> = ({
       return (
         <Badge variant="warning">
           <StatusDot status="warning" pulse />
-          {state.charAt(0) + state.slice(1).toLowerCase()}
+          Đang xử lý
         </Badge>
       );
     case 'FAILED':
       return (
         <Badge variant="danger">
           <StatusDot status="error" />
-          Failed
+          Thất bại
         </Badge>
       );
     case 'DEPRECATED':
-      return <Badge variant="neutral">Deprecated</Badge>;
+      return <Badge variant="neutral">Không dùng nữa</Badge>;
     case 'DELETING':
     case 'DELETED':
-      return <Badge variant="danger">{state.toLowerCase()}</Badge>;
+      return <Badge variant="danger">Đã xóa</Badge>;
     case 'CREATED':
     case 'QUEUED':
     default:
-      return <Badge variant="neutral">{state.toLowerCase()}</Badge>;
+      return <Badge variant="neutral">Đang chờ</Badge>;
   }
 };
 
@@ -344,12 +349,12 @@ export const SubsystemHealthBadge: React.FC<{ status: SubsystemStatus }> = ({ st
 export const SeverityBadge: React.FC<{ severity: EventSeverity }> = ({ severity }) => {
   switch (severity) {
     case 'INFO':
-      return <Badge variant="neutral">Info</Badge>;
+      return <Badge variant="neutral">Thông tin</Badge>;
     case 'WARN':
-      return <Badge variant="warning">Warning</Badge>;
+      return <Badge variant="warning">Cảnh báo</Badge>;
     case 'ERROR':
-      return <Badge variant="danger">Error</Badge>;
+      return <Badge variant="danger">Lỗi</Badge>;
     case 'CRITICAL':
-      return <Badge variant="danger">Critical</Badge>;
+      return <Badge variant="danger">Nghiêm trọng</Badge>;
   }
 };

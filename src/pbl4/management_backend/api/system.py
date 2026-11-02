@@ -46,7 +46,11 @@ def health() -> ItemResponse[HealthResponse]:
 
     return ItemResponse(
         data=HealthResponse(
-            backend="healthy",
+            backend=(
+                "degraded"
+                if gateway.event_consumer is not None and gateway.event_consumer.degraded
+                else "healthy"
+            ),
             postgres="healthy" if db_ok else "degraded",
             runtime_mcp="connected" if gateway.connected else "disconnected",
             dataset_manager=dm_status,

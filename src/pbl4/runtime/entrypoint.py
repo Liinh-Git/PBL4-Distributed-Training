@@ -59,6 +59,9 @@ def main() -> None:
 
     import os
 
+    from dotenv import load_dotenv
+
+    load_dotenv(dotenv_path=Path(".env"))
     worker_admission_secret = os.getenv("PBL4_WORKER_ADMISSION_SECRET")
     require_worker_admission = not args.allow_unmanaged_workers
     if require_worker_admission and not worker_admission_secret:
@@ -95,6 +98,8 @@ def main() -> None:
         heartbeat_timeout_seconds=args.heartbeat_timeout,
         worker_admission_secret=worker_admission_secret,
         require_worker_admission=require_worker_admission,
+        redis_url=os.getenv("REDIS_URL") or None,
+        redis_event_stream=os.getenv("REDIS_EVENT_STREAM") or "pbl4:runtime-events",
     )
     signal.signal(signal.SIGINT, lambda *_: process.stop())
     signal.signal(signal.SIGTERM, lambda *_: process.stop())

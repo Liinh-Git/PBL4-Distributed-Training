@@ -146,7 +146,7 @@ def list_events(
     if cursor:
         try:
             event_id = int(cursor)
-            conditions.append("event_id < %s")
+            conditions.append("runtime_event_seq > %s" if runtime_only else "event_id < %s")
             params.append(event_id)
         except ValueError:
             pass

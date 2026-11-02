@@ -7,14 +7,12 @@
 | [IMPLEMENTATION_CONTRACT.md](IMPLEMENTATION_CONTRACT.md) | Projection kiến trúc và ràng buộc triển khai |
 | [OPEN_ISSUES.md](OPEN_ISSUES.md) | Câu hỏi thiết kế còn mở, cần đối chiếu canonical trước khi xử lý |
 | [DBS_DESIGN.md](DBS_DESIGN.md) | Thiết kế DBS/Work Unit |
+| [REDIS_EVENTS.md](REDIS_EVENTS.md) | Cấu hình và vận hành luồng Runtime management events |
 
 Nguồn canonical và phạm vi sở hữu được đăng ký tại
 [.agents/SOURCE_REGISTRY.md](../.agents/SOURCE_REGISTRY.md).
-Các bản kế hoạch triển khai và báo cáo smoke cũ đã được xóa khỏi
+Các bản kế hoạch triển khai, phân tích, review và báo cáo cũ đã được xóa khỏi
 checkout; tài liệu từng được commit vẫn có thể tra cứu trong lịch sử Git.
-
-[archive/](archive/) chỉ còn bản API contract cũ và báo cáo kiểm tra dataset,
-không phải tài liệu hướng dẫn API hoặc trạng thái dữ liệu hiện tại.
 
 ## Dữ liệu local
 
