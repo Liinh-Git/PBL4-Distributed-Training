@@ -58,7 +58,7 @@ export function formatDiagnosticEvent(event: any): FormattedEventMessage {
   }
 
   if (
-    severity === 'WARN' ||
+    severity === 'WARN' || severity === 'WARNING' ||
     normalized.includes('warning') ||
     normalized.includes('timeout') ||
     normalized.includes('delayed')

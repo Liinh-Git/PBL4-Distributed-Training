@@ -150,22 +150,22 @@ def list_checkpoints(
     params: list[Any] = []
 
     if attempt_id:
-        conditions.append("created_by_attempt_id = %s")
+        conditions.append("c.created_by_attempt_id = %s")
         params.append(attempt_id)
     if job_id:
         # Join via attempts
         conditions.append(
-            "created_by_attempt_id IN (SELECT attempt_id FROM attempts WHERE job_id = %s)"
+            "c.created_by_attempt_id IN (SELECT attempt_id FROM attempts WHERE job_id = %s)"
         )
         params.append(job_id)
     if state:
-        conditions.append("state = %s")
+        conditions.append("c.state = %s")
         params.append(state)
 
     if cursor:
         try:
             ts_str, cid = cursor.split("|", 1)
-            conditions.append("(created_at, checkpoint_id) < (%s::timestamptz, %s)")
+            conditions.append("(c.created_at, c.checkpoint_id) < (%s::timestamptz, %s)")
             params.extend([ts_str, cid])
         except ValueError:
             pass

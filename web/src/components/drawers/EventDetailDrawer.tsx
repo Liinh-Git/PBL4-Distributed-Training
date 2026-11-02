@@ -73,7 +73,7 @@ export const EventDetailDrawer: React.FC<EventDetailDrawerProps> = ({
               <CopyableId value={event.attemptId} truncateLength={18} />
             </div>
             <div className="py-2 flex items-center justify-between">
-              <span className="text-[#73737c]">Technical Correlation ID</span>
+              <span className="text-[#73737c]">Event Identity</span>
               <CopyableId value={event.technicalCorrelationId} truncateLength={22} />
             </div>
           </div>

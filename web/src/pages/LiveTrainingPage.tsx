@@ -25,6 +25,8 @@ import {
 } from '../types/api';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { LiveActivityConsole } from '../components/live/LiveActivityConsole';
+import { PreparationStatus } from '../components/live/PreparationStatus';
+import { getPreparationStatus } from '../utils/preparation';
 import { CompactSyncViz } from '../components/training/CompactSyncViz';
 import { DistributedTrainingFlowViz } from '../components/training/DistributedTrainingFlowViz';
 import { TrainingTopologyVisualizer } from '../components/training/TrainingTopologyVisualizer';
@@ -36,6 +38,7 @@ import { StepInspectorDrawer } from '../components/drawers/StepInspectorDrawer';
 import { CopyableId } from '../components/common/CopyableId';
 import { AttemptStateBadge } from '../components/common/Badge';
 import { detectSlowWorkers } from '../utils/stragglerDetection';
+import { toDiagnosticEvent } from '../utils/runtimeEvents';
 
 export const LiveTrainingPage: React.FC = () => {
   const [searchParams] = useSearchParams();
@@ -90,7 +93,7 @@ export const LiveTrainingPage: React.FC = () => {
       .then((res) => {
         if (isMounted) setCapabilities(res.data);
       })
-      .catch(() => {});
+      .catch(() => { });
     return () => {
       isMounted = false;
     };
@@ -109,6 +112,12 @@ export const LiveTrainingPage: React.FC = () => {
   }, [resolvedAttemptId]);
 
   const inspectedStepId = selectedStep?.stepId ?? selectedStep?.operationId;
+  const inspectedStepEventSeq = useMemo(() => stream.events.reduce((latest, event) => {
+    const relevant = event.event_type === 'model.updated' || event.event_type === 'step.committed'
+      || event.event_type.startsWith('checkpoint.');
+    return relevant && (event.details.step_id ?? event.details.source_step_id) === inspectedStepId
+      ? Math.max(latest, event.runtime_event_seq) : latest;
+  }, 0), [stream.events, inspectedStepId]);
   useEffect(() => {
     if (!resolvedAttemptId || inspectedStepId === undefined) return;
     let isMounted = true;
@@ -120,15 +129,16 @@ export const LiveTrainingPage: React.FC = () => {
           setStepDetailsMap((prev) => ({ ...prev, [inspectedStepId]: res.data }));
         }
       })
-      .catch(() => {});
+      .catch(() => { });
 
     return () => {
       isMounted = false;
     };
-  }, [resolvedAttemptId, inspectedStepId, stream.lastReceivedSeq]);
+  }, [resolvedAttemptId, inspectedStepId, inspectedStepEventSeq]);
 
   // Epoch metrics
   const [epochMetrics, setEpochMetrics] = useState<EpochMetricData[]>([]);
+  const epochMetricsCursor = useRef({ attemptId: resolvedAttemptId, seq: 0 });
 
   // Track latest sequence of epoch.metrics.finalized from WS events to trigger refresh
   const latestEpochEventSeq = useMemo(() => stream.events.reduce(
@@ -137,7 +147,10 @@ export const LiveTrainingPage: React.FC = () => {
     0,
   ), [stream.events]);
 
-  useEffect(() => { setEpochMetrics([]); }, [resolvedAttemptId]);
+  useEffect(() => {
+    epochMetricsCursor.current = { attemptId: resolvedAttemptId, seq: 0 };
+    setEpochMetrics([]);
+  }, [resolvedAttemptId]);
 
   const fetchEpochMetrics = useCallback(async (signal: AbortSignal) => {
     if (!resolvedAttemptId) {
@@ -146,7 +159,8 @@ export const LiveTrainingPage: React.FC = () => {
     }
     try {
       const allEvents: any[] = [];
-      let afterSeq = 0;
+      let afterSeq = epochMetricsCursor.current.attemptId === resolvedAttemptId
+        ? epochMetricsCursor.current.seq : 0;
       while (true) {
         const res = await attemptsService.getCatchUpEvents(resolvedAttemptId, {
           event_type: 'epoch.metrics.finalized',
@@ -174,7 +188,12 @@ export const LiveTrainingPage: React.FC = () => {
         }
       }
       if (!signal.aborted) {
-        setEpochMetrics(Array.from(epochMap.values()).sort((a, b) => a.epoch_index - b.epoch_index));
+        epochMetricsCursor.current = { attemptId: resolvedAttemptId, seq: afterSeq };
+        setEpochMetrics(previous => {
+          const merged = new Map<number, EpochMetricData>(previous.map(metric => [metric.epoch_index, metric]));
+          for (const [epoch, metric] of epochMap) merged.set(epoch, metric);
+          return Array.from(merged.values()).sort((a, b) => a.epoch_index - b.epoch_index);
+        });
       }
     } catch {
       // Graceful fallback
@@ -228,6 +247,7 @@ export const LiveTrainingPage: React.FC = () => {
   const workers = stream.workers;
   const steps = stream.steps;
   const events = stream.events;
+  const diagnosticEvents = useMemo(() => events.map(toDiagnosticEvent), [events]);
   const activeStep = steps[0];
 
   // Verify checkpoint lineage when training run COMPLETED
@@ -365,6 +385,102 @@ export const LiveTrainingPage: React.FC = () => {
     };
   }, [activeStep, workers.length, stream.attempt?.expected_workers, stream.snapshot]);
 
+  // Authoritative expected and observed worker counts
+  const expectedWorkersCount = attempt?.expected_workers ?? attempt?.membership?.expected_workers ?? null;
+  const observedWorkersCount = workers.length;
+  const preparation = getPreparationStatus(attempt?.state, workers);
+
+  // Adapter for subcomponents expecting legacy shapes (memoized to eliminate cascade re-renders)
+  const legacyAttemptAdapter = useMemo<any>(() => attempt ? ({
+    id: attempt.attempt_id,
+    jobId: attempt.job_id,
+    jobName: attempt.job_id,
+    state: attempt.state,
+    executionMode: attempt.execution_mode,
+    epoch: snapshot?.epoch ?? attempt.epoch ?? 0,
+    totalEpochs: jobDetail?.resolved_contract?.training.epochs ?? jobDetail?.requested_contract.epochs,
+    currentBatch: snapshot?.current_batch_ordinal ?? attempt.progress_cursor?.next_batch_ordinal ?? 0,
+    totalBatches: 0,
+    activeWorkers: workers.filter(w => w.state === 'READY' || w.state === 'INITIALIZING' || w.state === 'RUNNING').length,
+    expectedWorkers: expectedWorkersCount ?? 0,
+    modelVersion: snapshot?.model_version !== null && snapshot?.model_version !== undefined
+      ? `v${snapshot.model_version}`
+      : (attempt.model_version !== null && attempt.model_version !== undefined ? `v${attempt.model_version}` : 'v—'),
+    datasetBuildId: jobDetail?.resolved_contract?.dataset.dataset_build_id ?? jobDetail?.requested_contract.dataset_build_id ?? '—',
+    elapsedFormatted: attempt.started_at ? 'Active run' : 'Pending',
+    runtimeEventSeq: stream.lastReceivedSeq,
+  }) : null, [attempt, snapshot, jobDetail, workers, expectedWorkersCount, stream.lastReceivedSeq]);
+
+  const legacyWorkersAdapter = useMemo<any[]>(() => workers.map(w => ({
+    workerId: w.worker_id,
+    sessionId: w.session_id,
+    nodeLabel: w.node_label || `node-${w.worker_id}`,
+    state: w.state,
+    assignedShard: w.shard_id !== null && w.shard_id !== undefined ? `shard-${w.shard_id}` : 'Unassigned',
+    currentModelVersion: w.local_model_version !== null && w.local_model_version !== undefined
+      ? w.local_model_version
+      : (attempt?.model_version ?? null),
+    protocolVersion: w.protocol_version ? `dtp/v${w.protocol_version}` : 'dtp/v1',
+    connectedAt: w.connected_at,
+    lastHeartbeatMs: w.last_heartbeat_at ? Math.max(0, Math.round(Date.now() - new Date(w.last_heartbeat_at).getTime())) : null,
+  })), [workers, attempt?.model_version]);
+
+  const legacyStepsAdapter = useMemo<any[]>(() => steps.map((st) => {
+    const detail = stepDetailsMap[st.step_id];
+    const workerSteps = st.worker_steps ?? detail?.worker_steps;
+    const workerContributions =
+      workerSteps && workerSteps.length > 0
+        ? workerSteps.map((ws) => ({
+          workerId: ws.worker_id,
+          sessionId: ws.session_id,
+          shardId: ws.shard_id,
+          batchId: ws.batch_id,
+          sampleCount: ws.sample_count,
+          samples: ws.sample_count,
+          contributionAccepted: typeof ws.contribution_accepted === 'boolean' ? ws.contribution_accepted : undefined,
+          parameterApplied: typeof ws.parameter_applied === 'boolean' ? ws.parameter_applied : undefined,
+          loss: ws.loss,
+          accuracy: ws.accuracy,
+          computeMs: ws.compute_ms,
+          uploadMs: ws.upload_ms,
+          parameterApplyMs: ws.parameter_apply_ms,
+          bytesSent: ws.bytes_sent,
+          bytesReceived: ws.bytes_received,
+        }))
+        : [];
+
+    const timing = st.timing ?? detail?.timing;
+    const totalDurationMs =
+      timing?.started_at && timing?.committed_at
+        ? Math.max(0, new Date(timing.committed_at).getTime() - new Date(timing.started_at).getTime())
+        : undefined;
+
+    return {
+      stepId: st.step_id,
+      operationId: st.operation_id,
+      epoch: st.epoch,
+      batchOrdinal: st.batch_ordinal,
+      state: st.state,
+      inputModelVersion: st.input_model_version,
+      outputModelVersion: st.output_model_version,
+      totalSampleCount: st.total_sample_count,
+      loss: st.metrics?.loss ?? detail?.metrics?.loss ?? null,
+      accuracy: st.metrics?.accuracy ?? detail?.metrics?.accuracy ?? null,
+      metrics: st.metrics ?? detail?.metrics ?? null,
+      timings: {
+        startedAt: timing?.started_at || (st.committed_at ? 'Committed' : 'In progress'),
+        committedAt: timing?.committed_at || st.committed_at || undefined,
+        updateCompletedAt: timing?.update_completed_at,
+        synchronizationCompletedAt: timing?.synchronization_completed_at,
+        checkpointCompletedAt: timing?.checkpoint_completed_at,
+        totalDurationMs,
+      },
+      workerContributions,
+    };
+  }), [steps, stepDetailsMap]);
+
+  const slowWorkersMap = useMemo(() => detectSlowWorkers(legacyStepsAdapter), [legacyStepsAdapter]);
+
   if (attemptResolving || (stream.loading && !attempt)) {
     return (
       <div className="w-full py-20 flex flex-col items-center justify-center text-center font-sans select-none text-xs text-[#73737c] gap-3">
@@ -404,101 +520,6 @@ export const LiveTrainingPage: React.FC = () => {
       </div>
     );
   }
-
-  // Authoritative expected and observed worker counts
-  const expectedWorkersCount = attempt.expected_workers ?? attempt.membership?.expected_workers ?? null;
-  const observedWorkersCount = workers.length;
-
-  // Adapter for subcomponents expecting legacy shapes
-  const legacyAttemptAdapter: any = {
-    id: attempt.attempt_id,
-    jobId: attempt.job_id,
-    jobName: attempt.job_id,
-    state: attempt.state,
-    executionMode: attempt.execution_mode,
-    epoch: snapshot?.epoch ?? attempt.epoch ?? 0,
-    totalEpochs: jobDetail?.resolved_contract?.training.epochs ?? jobDetail?.requested_contract.epochs,
-    currentBatch: snapshot?.current_batch_ordinal ?? attempt.progress_cursor?.next_batch_ordinal ?? 0,
-    totalBatches: 0,
-    activeWorkers: workers.filter(w => w.state === 'READY' || w.state === 'INITIALIZING' || w.state === 'RUNNING').length,
-    expectedWorkers: expectedWorkersCount ?? 0,
-    modelVersion: snapshot?.model_version !== null && snapshot?.model_version !== undefined
-      ? `v${snapshot.model_version}`
-      : (attempt.model_version !== null && attempt.model_version !== undefined ? `v${attempt.model_version}` : 'v—'),
-    datasetBuildId: jobDetail?.resolved_contract?.dataset.dataset_build_id ?? jobDetail?.requested_contract.dataset_build_id ?? '—',
-    elapsedFormatted: attempt.started_at ? 'Active run' : 'Pending',
-    runtimeEventSeq: stream.lastReceivedSeq,
-  };
-
-  const legacyWorkersAdapter: any[] = workers.map(w => ({
-    workerId: w.worker_id,
-    sessionId: w.session_id,
-    nodeLabel: w.node_label || `node-${w.worker_id}`,
-    state: w.state,
-    assignedShard: w.shard_id !== null && w.shard_id !== undefined ? `shard-${w.shard_id}` : 'Unassigned',
-    currentModelVersion: w.local_model_version !== null && w.local_model_version !== undefined
-      ? w.local_model_version
-      : (attempt.model_version ?? null),
-    protocolVersion: w.protocol_version ? `dtp/v${w.protocol_version}` : 'dtp/v1',
-    connectedAt: w.connected_at,
-    lastHeartbeatMs: w.last_heartbeat_at ? Math.max(0, Math.round(Date.now() - new Date(w.last_heartbeat_at).getTime())) : null,
-  }));
-
-  const legacyStepsAdapter: any[] = steps.map((st) => {
-    const detail = stepDetailsMap[st.step_id];
-    const workerSteps = detail?.worker_steps;
-    const workerContributions =
-      workerSteps && workerSteps.length > 0
-        ? workerSteps.map((ws) => ({
-            workerId: ws.worker_id,
-            sessionId: ws.session_id,
-            shardId: ws.shard_id,
-            batchId: ws.batch_id,
-            sampleCount: ws.sample_count,
-            samples: ws.sample_count,
-            contributionAccepted: typeof ws.contribution_accepted === 'boolean' ? ws.contribution_accepted : undefined,
-            parameterApplied: typeof ws.parameter_applied === 'boolean' ? ws.parameter_applied : undefined,
-            loss: ws.loss,
-            accuracy: ws.accuracy,
-            computeMs: ws.compute_ms,
-            uploadMs: ws.upload_ms,
-            parameterApplyMs: ws.parameter_apply_ms,
-            bytesSent: ws.bytes_sent,
-            bytesReceived: ws.bytes_received,
-          }))
-        : [];
-
-    const timing = detail?.timing;
-    const totalDurationMs =
-      timing?.started_at && timing?.committed_at
-        ? Math.max(0, new Date(timing.committed_at).getTime() - new Date(timing.started_at).getTime())
-        : undefined;
-
-    return {
-      stepId: st.step_id,
-      operationId: st.operation_id,
-      epoch: st.epoch,
-      batchOrdinal: st.batch_ordinal,
-      state: st.state,
-      inputModelVersion: st.input_model_version,
-      outputModelVersion: st.output_model_version,
-      totalSampleCount: st.total_sample_count,
-      loss: st.metrics?.loss ?? detail?.metrics?.loss ?? null,
-      accuracy: st.metrics?.accuracy ?? detail?.metrics?.accuracy ?? null,
-      metrics: st.metrics ?? detail?.metrics ?? null,
-      timings: {
-        startedAt: timing?.started_at || (st.committed_at ? 'Committed' : 'In progress'),
-        committedAt: timing?.committed_at || st.committed_at || undefined,
-        updateCompletedAt: timing?.update_completed_at,
-        synchronizationCompletedAt: timing?.synchronization_completed_at,
-        checkpointCompletedAt: timing?.checkpoint_completed_at,
-        totalDurationMs,
-      },
-      workerContributions,
-    };
-  });
-
-  const slowWorkersMap = detectSlowWorkers(legacyStepsAdapter);
 
   return (
     <div className="space-y-4 w-full pb-10 font-sans select-none">
@@ -589,9 +610,8 @@ export const LiveTrainingPage: React.FC = () => {
             {capabilities?.runtime_instance_id && (
               <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-white/[0.04] border border-white/[0.06] text-[#a1a1a8] font-mono">
                 <span
-                  className={`w-1.5 h-1.5 rounded-full ${
-                    capabilities.runtime_connected ? 'bg-emerald-400' : 'bg-rose-400'
-                  }`}
+                  className={`w-1.5 h-1.5 rounded-full ${capabilities.runtime_connected ? 'bg-emerald-400' : 'bg-rose-400'
+                    }`}
                 />
                 <span>Runtime: {capabilities.runtime_instance_id}</span>
               </span>
@@ -633,13 +653,14 @@ export const LiveTrainingPage: React.FC = () => {
             </div>
 
             {(() => {
+              const modelId = jobDetail?.resolved_contract?.model.model_id
+                ?? jobDetail?.requested_contract.model_id ?? attempt.model_id;
               const modelInfo =
-                capabilities?.supported_models?.find(
-                  (m) => m.model_id === (attempt.model_id || 'resnet18_groupnorm')
-                ) || capabilities?.supported_models?.[0];
+                capabilities?.supported_models?.find((m) => m.model_id === modelId);
               const modelDisplayName =
-                modelInfo?.display_name || attempt.model_id || 'ResNet-18 (GroupNorm)';
-              const modelTaskType = modelInfo?.task_type || 'image_classification';
+                modelInfo?.display_name || modelId || '—';
+              const modelTaskType = modelInfo?.task_type
+                || jobDetail?.resolved_contract?.dataset.task_type || '—';
               const trainingStrategy =
                 attempt.training_strategy ||
                 capabilities?.supported_training_strategies?.[0] ||
@@ -751,33 +772,30 @@ export const LiveTrainingPage: React.FC = () => {
           <button
             type="button"
             onClick={() => setActiveTab('live')}
-            className={`px-3 py-1 rounded transition-colors ${
-              activeTab === 'live'
+            className={`px-3 py-1 rounded transition-colors ${activeTab === 'live'
                 ? 'bg-[#171719] text-[#f3f3f4] font-medium border border-white/[0.07]'
                 : 'text-[#73737c] hover:text-[#f3f3f4]'
-            }`}
+              }`}
           >
             Live
           </button>
           <button
             type="button"
             onClick={() => setActiveTab('metrics')}
-            className={`px-3 py-1 rounded transition-colors ${
-              activeTab === 'metrics'
+            className={`px-3 py-1 rounded transition-colors ${activeTab === 'metrics'
                 ? 'bg-[#171719] text-[#f3f3f4] font-medium border border-white/[0.07]'
                 : 'text-[#73737c] hover:text-[#f3f3f4]'
-            }`}
+              }`}
           >
             Metrics
           </button>
           <button
             type="button"
             onClick={() => setActiveTab('technical')}
-            className={`px-3 py-1 rounded transition-colors ${
-              activeTab === 'technical'
+            className={`px-3 py-1 rounded transition-colors ${activeTab === 'technical'
                 ? 'bg-[#171719] text-[#f3f3f4] font-medium border border-white/[0.07]'
                 : 'text-[#73737c] hover:text-[#f3f3f4]'
-            }`}
+              }`}
           >
             Technical
           </button>
@@ -787,6 +805,9 @@ export const LiveTrainingPage: React.FC = () => {
       {/* TAB 1: LIVE */}
       {activeTab === 'live' && (
         <div className="space-y-4">
+          <PreparationStatus state={attempt.state} workers={workers}
+            expectedWorkers={expectedWorkersCount} isStale={stream.isStale}
+            observedAt={snapshot?.observed_at} />
           <TrainingTopologyVisualizer
             currentStep={legacyStepsAdapter[0]}
             workers={legacyWorkersAdapter}
@@ -806,21 +827,21 @@ export const LiveTrainingPage: React.FC = () => {
             >
               <LiveActivityConsole
                 className="h-full flex-1"
-                events={events as any}
+                events={diagnosticEvents}
                 onSelectEvent={setSelectedEvent}
-                isLive={attempt.state === 'RUNNING'}
+                isLive={!stream.isStale && !['COMPLETED', 'FAILED', 'ABORTED'].includes(attempt.state)}
               />
             </div>
 
             {/* RIGHT (~35%): Compact Sync + Workers + Current Step */}
             <div ref={rightColRef} className="lg:col-span-4 space-y-3">
-              <CompactSyncViz
+              {!preparation.preparing && <CompactSyncViz
                 currentStep={legacyStepsAdapter[0] || null}
                 workers={legacyWorkersAdapter}
                 expectedWorkers={expectedWorkersCount}
                 strategyState={snapshot?.strategy_state || attempt.strategy_state || null}
                 onOpenDetails={() => setShowDetailedSyncModal(true)}
-              />
+              />}
 
               {/* Workers Status List */}
               <div className="bg-[#121214] border border-white/[0.07] rounded p-4 space-y-2">
@@ -828,7 +849,9 @@ export const LiveTrainingPage: React.FC = () => {
                   <h3 className="text-xs font-semibold text-[#f3f3f4]">
                     Workers ({expectedWorkersCount != null ? `${observedWorkersCount}/${expectedWorkersCount} sessions observed` : `${observedWorkersCount} sessions`})
                   </h3>
-                  {observedWorkersCount === 0 ? (
+                  {preparation.preparing && !stream.isStale ? (
+                    <span className="text-xs text-blue-400">{preparation.label}</span>
+                  ) : observedWorkersCount === 0 ? (
                     <span className="inline-flex items-center gap-1.5 text-xs text-[#73737c]">
                       <span className="w-1.5 h-1.5 rounded-full bg-zinc-500" />
                       <span>No sessions</span>
@@ -838,6 +861,8 @@ export const LiveTrainingPage: React.FC = () => {
                       <span className="w-1.5 h-1.5 rounded-full bg-rose-400" />
                       <span>Worker failure</span>
                     </span>
+                  ) : preparation.connected === 0 ? (
+                    <span className="text-xs text-[#73737c]">No connected workers</span>
                   ) : expectedWorkersCount != null && observedWorkersCount < expectedWorkersCount ? (
                     <span className="inline-flex items-center gap-1.5 text-xs text-amber-400 font-mono">
                       <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
@@ -868,7 +893,7 @@ export const LiveTrainingPage: React.FC = () => {
 
                 <div className="divide-y divide-white/[0.04] text-xs">
                   {(() => {
-                    const totalExpected = expectedWorkersCount ?? (workers.length > 0 ? workers.length : 3);
+                    const totalExpected = expectedWorkersCount ?? workers.length;
                     const observedMap = new Map<number, any>();
                     workers.forEach(w => observedMap.set(Number(w.worker_id), w));
 
@@ -881,8 +906,8 @@ export const LiveTrainingPage: React.FC = () => {
                         const stateColor = isFailed
                           ? 'text-rose-400'
                           : isReady
-                          ? 'text-emerald-400'
-                          : 'text-amber-400';
+                            ? 'text-emerald-400'
+                            : 'text-amber-400';
 
                         const telemetry = slowWorkersMap.get(id);
                         const computeTime = telemetry?.currentComputeMs ?? telemetry?.medianComputeMs;
@@ -1093,16 +1118,14 @@ export const LiveTrainingPage: React.FC = () => {
                   </p>
                 </div>
                 <span
-                  className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-mono ${
-                    capabilities.runtime_connected
+                  className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] font-mono ${capabilities.runtime_connected
                       ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
                       : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
-                  }`}
+                    }`}
                 >
                   <span
-                    className={`w-1.5 h-1.5 rounded-full ${
-                      capabilities.runtime_connected ? 'bg-emerald-400' : 'bg-rose-400'
-                    }`}
+                    className={`w-1.5 h-1.5 rounded-full ${capabilities.runtime_connected ? 'bg-emerald-400' : 'bg-rose-400'
+                      }`}
                   />
                   <span>
                     {capabilities.runtime_connected
@@ -1138,20 +1161,18 @@ export const LiveTrainingPage: React.FC = () => {
                   <div className="text-[11px] text-[#73737c]">Feature Flags</div>
                   <div className="flex items-center gap-1.5 mt-1 flex-wrap text-[11px] font-mono">
                     <span
-                      className={`px-1.5 py-0.5 rounded ${
-                        capabilities.feature_flags?.manual_checkpoint_request
+                      className={`px-1.5 py-0.5 rounded ${capabilities.feature_flags?.manual_checkpoint_request
                           ? 'bg-emerald-500/10 text-emerald-400'
                           : 'bg-zinc-800 text-zinc-400'
-                      }`}
+                        }`}
                     >
                       chkpt: {capabilities.feature_flags?.manual_checkpoint_request ? 'on' : 'off'}
                     </span>
                     <span
-                      className={`px-1.5 py-0.5 rounded ${
-                        capabilities.feature_flags?.attempt_websocket_stream
+                      className={`px-1.5 py-0.5 rounded ${capabilities.feature_flags?.attempt_websocket_stream
                           ? 'bg-emerald-500/10 text-emerald-400'
                           : 'bg-zinc-800 text-zinc-400'
-                      }`}
+                        }`}
                     >
                       ws_stream: {capabilities.feature_flags?.attempt_websocket_stream ? 'on' : 'off'}
                     </span>

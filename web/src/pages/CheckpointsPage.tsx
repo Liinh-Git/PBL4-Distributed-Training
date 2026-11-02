@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   RotateCcw,
   Search,
@@ -12,7 +12,7 @@ import { CheckpointDetailDrawer } from '../components/drawers/CheckpointDetailDr
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { CopyableId } from '../components/common/CopyableId';
 import { useNavigate } from 'react-router-dom';
-import { checkpointsService, jobsService } from '../api';
+import { attemptsService, checkpointsService, jobsService } from '../api';
 import { CheckpointListItemData } from '../types/api';
 
 function formatTimestamp(isoString?: string | null): string {
@@ -45,6 +45,8 @@ export const CheckpointsPage: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCheckpoint, setSelectedCheckpoint] = useState<CheckpointListItemData | null>(null);
   const [checkpointToResume, setCheckpointToResume] = useState<CheckpointListItemData | null>(null);
+  const [resuming, setResuming] = useState(false);
+  const resumingRef = useRef(false);
 
   const fetchCheckpoints = async (cursor?: string | null, append = false) => {
     try {
@@ -93,17 +95,23 @@ export const CheckpointsPage: React.FC = () => {
   const latestUsableCheckpoint = checkpoints.find(cp => cp.state === 'COMPLETE') || null;
 
   const handleConfirmResume = async () => {
-    if (!checkpointToResume || !checkpointToResume.job_id || checkpointToResume.state !== 'COMPLETE') {
+    if (resumingRef.current || !checkpointToResume || !checkpointToResume.job_id || checkpointToResume.state !== 'COMPLETE') {
       return;
     }
+    resumingRef.current = true;
+    setResuming(true);
     try {
-      await jobsService.resumeJob(checkpointToResume.job_id, {
+      await attemptsService.assertNoActiveAttempt();
+      const response = await jobsService.resumeJob(checkpointToResume.job_id, {
         checkpoint_id: checkpointToResume.checkpoint_id,
       });
       setCheckpointToResume(null);
-      navigate('/live');
+      navigate(`/live?attempt_id=${encodeURIComponent(response.data.attempt_id)}`);
     } catch (err: any) {
       alert(`Failed to resume from checkpoint: ${err?.message || 'Unknown error'}`);
+    } finally {
+      resumingRef.current = false;
+      setResuming(false);
     }
   };
 
@@ -355,6 +363,9 @@ export const CheckpointsPage: React.FC = () => {
       {/* Resume Confirmation Modal */}
       <ConfirmationModal
         isOpen={!!checkpointToResume}
+        isLoading={resuming}
+        closeOnConfirm={false}
+        isDestructive={false}
         title="Resume Training from Checkpoint"
         message={
           checkpointToResume
@@ -367,10 +378,9 @@ export const CheckpointsPage: React.FC = () => {
               }? A new attempt will be created with restored model weights and optimizer state.`
             : ''
         }
-        confirmText="Confirm & Resume"
-        confirmVariant="primary"
+        confirmLabel="Confirm & Resume"
         onConfirm={handleConfirmResume}
-        onCancel={() => setCheckpointToResume(null)}
+        onClose={() => setCheckpointToResume(null)}
       />
     </div>
   );

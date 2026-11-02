@@ -84,3 +84,12 @@ Dataset Manager, synchronization and checkpoint gates do not depend on Redis.
 Canonical Drive follow-up is listed in `IMPLEMENTATION_CONTRACT.md`; this change
 does not edit those remote documents. Redis command behavior follows the
 [official Streams documentation](https://redis.io/docs/latest/develop/data-types/streams/).
+
+
+Live and replay WebSocket frames use the canonical `payload.details` and
+`SNAPSHOT.payload.snapshot_seq/state` wrappers. Browser event memory is limited
+to the latest 1024 entries; full history remains available through Backend REST.
+Normal events update local Step/Worker/Model state without full REST reloads.
+Reconnect recovery is ordered, paged and does not mark unseen events applied.
+Epoch queries and Step reconciliation are incremental; ordinary REST refresh
+never advances the applied event cursor. No Runtime event type is sampled away.

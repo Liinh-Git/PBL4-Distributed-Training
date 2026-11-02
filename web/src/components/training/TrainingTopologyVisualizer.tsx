@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { TrainingStep, WorkerSession, Attempt } from '../../types';
 import { StrategyStateStrictBSPData } from '../../types/api';
+import { getPreparationStatus } from '../../utils/preparation';
 
 export interface TrainingTopologyVisualizerProps {
   currentStep?: TrainingStep | null;
@@ -182,6 +183,7 @@ export const TrainingTopologyVisualizer: React.FC<TrainingTopologyVisualizerProp
   }, []);
 
   const observedWorkersCount = workers.length;
+  const preparation = getPreparationStatus(attempt?.state, workers);
   const isPartialProjection = expectedWorkers > 0 && observedWorkersCount < expectedWorkers;
 
   // Real step state derived strictly from currentStep
@@ -236,6 +238,10 @@ export const TrainingTopologyVisualizer: React.FC<TrainingTopologyVisualizerProp
           <p className="text-xs text-[#73737c]">
             {isStale
               ? 'Telemetry snapshot is stale. Coordinator state may not reflect live workers.'
+              : attempt && ['COMPLETED', 'FAILED', 'ABORTED'].includes(attempt.state)
+              ? `Attempt ${attempt.state.toLowerCase()}. Worker sessions are retained for inspection.`
+              : preparation.preparing
+              ? preparation.description
               : isCollecting
               ? `Step #${currentStep?.operationId} · Workers computing backward pass & streaming gradients to Parameter Server.`
               : isUpdating
@@ -269,7 +275,13 @@ export const TrainingTopologyVisualizer: React.FC<TrainingTopologyVisualizerProp
               aria-hidden="true"
             />
             <span className="text-[#f3f3f4] font-medium">
-              {isBroadcasting
+              {isStale
+                ? 'Telemetry stale'
+                : preparation.preparing
+                ? preparation.label
+                : attempt && ['COMPLETED', 'FAILED', 'ABORTED'].includes(attempt.state)
+                ? attempt.state
+                : isBroadcasting
                 ? 'Phát tán trọng số (PS ➔ Worker)'
                 : isUpdating
                 ? 'Đồng bộ Barrier (All-Reduce)'
@@ -428,7 +440,7 @@ export const TrainingTopologyVisualizer: React.FC<TrainingTopologyVisualizerProp
         </svg>
 
         {/* TRANSMISSION LINE TELEMETRY BADGES (Trao / Nhận) */}
-        {showMetricsHud && workers.map((worker, idx) => {
+        {showMetricsHud && currentStep && attempt?.state === 'RUNNING' && !isStale && workers.map((worker, idx) => {
           const coord = workerCoords[idx];
           if (!coord) return null;
 
@@ -544,7 +556,13 @@ export const TrainingTopologyVisualizer: React.FC<TrainingTopologyVisualizerProp
                       : 'text-emerald-400'
                   }`}
                 >
-                  {isBroadcasting
+                  {isStale
+                    ? 'Unknown / Stale'
+                    : preparation.preparing
+                    ? 'Not started'
+                    : attempt?.state !== 'RUNNING'
+                    ? (attempt?.state ?? 'Unknown')
+                    : isBroadcasting
                     ? 'Broadcasting Weights'
                     : isSyncComplete
                     ? 'Barrier Synced'
@@ -625,7 +643,7 @@ export const TrainingTopologyVisualizer: React.FC<TrainingTopologyVisualizerProp
           } else if (isCollecting || attempt?.state === 'RUNNING') {
             statusText = 'Streaming Gradients';
           } else if (isReady) {
-            statusText = 'Training Active';
+            statusText = 'Ready to train';
           }
 
           const machineName = worker.nodeLabel || `node-${worker.workerId}`;
@@ -724,11 +742,11 @@ export const TrainingTopologyVisualizer: React.FC<TrainingTopologyVisualizerProp
             DTP/1 · Persistent TCP
           </span>
           <span className="text-[#73737c]" aria-hidden="true">·</span>
-          <span className="text-[#73737c]">Strict BSP Barrier:</span>
+          <span className="text-[#73737c]">{isStale ? 'Last observed DTP connections:' : 'DTP connected:'}</span>
           <span className="text-emerald-400 font-medium">
             {expectedWorkers > 0
-              ? `${observedWorkersCount}/${expectedWorkers} Workers Active`
-              : `${observedWorkersCount} Workers Active`}
+              ? `${preparation.connected}/${expectedWorkers} Workers`
+              : `${preparation.connected} Workers`}
           </span>
           {isPartialProjection && (
             <span className="px-1.5 py-0.2 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20 text-[10px] font-mono">

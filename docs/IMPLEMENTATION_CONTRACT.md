@@ -203,3 +203,15 @@ batches remain pending. Snapshot requests stay outside SQL transactions.
 of tensor_id, parameter_manifest_hash, batch_ordinal and correct_count. Core
 fields, loss history, legacy readers, Runtime/DTP validation and epoch metrics
 are preserved. There is one Redis Stream and no additional environment settings.
+
+Training control and observation: launch/resume requests retain pending feedback
+and duplicate-submission guards until the Backend request settles. Resume selects
+a COMPLETE checkpoint of the same Job and navigates to the returned new Attempt.
+Preparation displays existing Runtime/Worker states and observed membership, with
+stale readiness shown as unknown rather than fabricated download progress.
+Runtime keeps ownership of an old runner until DTP cleanup completes; a new
+START_ATTEMPT waits outside the state lock for at most five seconds and rechecks
+closure before replacement. Abort-aware provisioning waits cannot report ready
+after abort. Terminal snapshots remain available until the next runner starts.
+WebSocket events/snapshots apply in order, including same-cursor preparation
+snapshots; ordinary REST refresh never advances the applied event cursor.

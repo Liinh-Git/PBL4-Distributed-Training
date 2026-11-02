@@ -131,8 +131,8 @@ export const ScrollableChartWrapper: React.FC<ScrollableChartWrapperProps> = ({
         clearTimeout(tId);
       };
     } else if (totalSteps > prevStepsCount.current) {
-      // When new steps arrive during live training, smoothly reveal latest steps
-      scrollToLatest('smooth');
+      // When new steps arrive during live training, reveal latest steps immediately without animation jank
+      scrollToLatest('auto');
     }
     prevStepsCount.current = totalSteps;
   }, [totalSteps, isScrollable, autoScrollToEnd, contentWidth]);
@@ -371,6 +371,7 @@ export const WorkerExecutionBreakdownChart: React.FC<WorkerBreakdownProps> = ({
             />
             {/* Stacked Bars: Yellow Training Time, Green Pushing Time */}
             <Bar
+              isAnimationActive={false}
               dataKey="trainingTime"
               name="Training Time"
               stackId="execution"
@@ -378,6 +379,7 @@ export const WorkerExecutionBreakdownChart: React.FC<WorkerBreakdownProps> = ({
               radius={[0, 0, 0, 0]}
             />
             <Bar
+              isAnimationActive={false}
               dataKey="pushingTime"
               name="Pushing Time"
               stackId="execution"
@@ -584,6 +586,7 @@ export const LiveTrainingCharts: React.FC<LiveTrainingChartsProps> = ({
                     labelFormatter={(lbl) => `${lbl}`}
                   />
                   <Line
+                    isAnimationActive={false}
                     type="monotone"
                     dataKey="loss"
                     name="Epoch Loss"
@@ -710,6 +713,7 @@ export const LiveTrainingCharts: React.FC<LiveTrainingChartsProps> = ({
                     labelFormatter={(lbl) => `${lbl}`}
                   />
                   <Line
+                    isAnimationActive={false}
                     type="monotone"
                     dataKey="accuracy"
                     name="Epoch Accuracy"
@@ -792,6 +796,7 @@ export const LiveTrainingCharts: React.FC<LiveTrainingChartsProps> = ({
                   labelFormatter={(lbl) => `Time: ${lbl}`}
                 />
                 <Line
+                  isAnimationActive={false}
                   type="monotone"
                   dataKey="avgSamplesPerSec"
                   name="Avg Samples/sec"
@@ -1030,6 +1035,7 @@ export const FullMetricsDashboard: React.FC<FullMetricsDashboardProps> = ({
                       labelFormatter={(lbl) => `${lbl}`}
                     />
                     <Line
+                      isAnimationActive={false}
                       type="monotone"
                       dataKey="loss"
                       name="Epoch Loss"
@@ -1148,6 +1154,7 @@ export const FullMetricsDashboard: React.FC<FullMetricsDashboardProps> = ({
                       labelFormatter={(lbl) => `${lbl}`}
                     />
                     <Line
+                      isAnimationActive={false}
                       type="monotone"
                       dataKey="accuracy"
                       name="Epoch Accuracy"
@@ -1226,6 +1233,7 @@ export const FullMetricsDashboard: React.FC<FullMetricsDashboardProps> = ({
                     formatter={(val: any) => [`${val} samples/sec`, 'Throughput']}
                   />
                   <Line
+                    isAnimationActive={false}
                     type="monotone"
                     dataKey="avgSamplesPerSec"
                     name="Avg Samples/sec"
@@ -1311,6 +1319,7 @@ export const FullMetricsDashboard: React.FC<FullMetricsDashboardProps> = ({
                     formatter={(val: any) => [`${val} ms`, 'Step Duration']}
                   />
                   <Line
+                    isAnimationActive={false}
                     type="monotone"
                     dataKey="durationMs"
                     name="Step Duration"
@@ -1374,6 +1383,7 @@ export const FullMetricsDashboard: React.FC<FullMetricsDashboardProps> = ({
                     formatter={(val: any) => [`${val}/${expectedWorkers} workers`, 'Gradients Accepted']}
                   />
                   <Bar
+                    isAnimationActive={false}
                     dataKey="acceptedWorkers"
                     name="Gradients Accepted"
                     fill="#3b82f6"

@@ -20,6 +20,7 @@ import { JobStateBadge, AttemptStateBadge } from '../components/common/Badge';
 import { CopyableId } from '../components/common/CopyableId';
 import { ConfirmationModal } from '../components/common/ConfirmationModal';
 import { EditJobModal } from '../components/common/EditJobModal';
+import { ResumeCheckpointModal } from '../components/common/ResumeCheckpointModal';
 import { EmptyState } from '../components/common/EmptyState';
 import { jobsService, attemptsService, datasetsService, datasetBuildsService } from '../api';
 import { isActiveAttempt } from '../api/attempts';
@@ -80,6 +81,7 @@ export const JobDetailPage: React.FC = () => {
   const [showEditModal, setShowEditModal] = useState(false);
   const [showArchiveConfirm, setShowArchiveConfirm] = useState(false);
   const [showStartDraftConfirm, setShowStartDraftConfirm] = useState(false);
+  const [showResumeModal, setShowResumeModal] = useState(false);
   const [showTechnicalDetails, setShowTechnicalDetails] = useState(false);
   const [datasetInfo, setDatasetInfo] = useState<{
     datasetId: string;
@@ -214,23 +216,6 @@ export const JobDetailPage: React.FC = () => {
     }
   };
 
-  const handleRetry = async () => {
-    if (!job || !canLaunch || launching.current) return;
-    launching.current = true;
-    try {
-      setActionLoading('retry');
-      await attemptsService.assertNoActiveAttempt();
-      const res = await jobsService.retryJob(job.job_id, { note: 'Retry from job detail' });
-      navigate(`/live?attempt_id=${encodeURIComponent(res.data.attempt_id)}`);
-    } catch (err: any) {
-      alert(`Failed to retry training run: ${err?.message || 'Unknown error'}`);
-      void loadJobData();
-    } finally {
-      launching.current = false;
-      setActionLoading(null);
-    }
-  };
-
   const handleClone = async () => {
     if (!job) return;
     try {
@@ -265,7 +250,6 @@ export const JobDetailPage: React.FC = () => {
   const hasActiveAttempt = Boolean(activeAttempt);
   const canLaunch = !loading && systemActiveAttempt === null && !activeAttempt && !actionLoading;
   const latestAttempt = attempts[0];
-  const canRetry = latestAttempt && (latestAttempt.state === 'FAILED' || latestAttempt.state === 'ABORTED');
 
   const handleOpenRawContract = () => {
     // Adapter to legacy format for modal view if requested
@@ -354,28 +338,24 @@ export const JobDetailPage: React.FC = () => {
             <span>{actionLoading === 'clone' ? 'Cloning...' : 'Clone'}</span>
           </button>
 
-          {canRetry && !hasActiveAttempt && (
-            <button
-              type="button"
-              disabled={!canLaunch}
-              onClick={handleRetry}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-normal rounded bg-[#171719] hover:bg-[#202024] text-[#f3f3f4] transition-colors border border-white/[0.07] disabled:opacity-50"
-            >
-              <RotateCcw className="w-3.5 h-3.5 text-[#73737c]" />
-              <span>{actionLoading === 'retry' ? 'Retrying...' : 'Retry Run'}</span>
-            </button>
-          )}
-
           {activeAttempt && (
             <Link to={`/live?attempt_id=${encodeURIComponent(activeAttempt.attempt_id)}`}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded bg-blue-600 hover:bg-blue-500 text-white">
               <Activity className="w-3.5 h-3.5" />View Run
             </Link>
           )}
+          {job.state === 'READY' && !hasActiveAttempt && (
+            <button type="button" disabled={!canLaunch} onClick={() => setShowResumeModal(true)}
+              className="inline-flex items-center gap-1.5 rounded border border-white/[0.07] bg-[#171719] px-3 py-1.5 text-xs text-[#f3f3f4] hover:bg-[#202024] disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-blue-500">
+              <RotateCcw className="h-3.5 w-3.5 text-[#a1a1a8]" />
+              Resume from checkpoint
+            </button>
+          )}
           {(job.state === 'READY' || job.state === 'DRAFT') && !hasActiveAttempt && (
             <button
               type="button"
               disabled={!canLaunch}
+              aria-busy={actionLoading === 'launch'}
               onClick={() => {
                 if (job.state === 'DRAFT') {
                   setShowStartDraftConfirm(true);
@@ -385,8 +365,10 @@ export const JobDetailPage: React.FC = () => {
               }}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium rounded bg-blue-600 hover:bg-blue-500 text-white transition-colors disabled:opacity-50"
             >
-              <Play className="w-3.5 h-3.5" />
-              <span>{actionLoading === 'launch' ? 'Starting...' : 'Launch Run'}</span>
+              {actionLoading === 'launch'
+                ? <RefreshCw aria-hidden="true" className="w-3.5 h-3.5 animate-spin motion-reduce:animate-none" />
+                : <Play aria-hidden="true" className="w-3.5 h-3.5" />}
+              <span>Launch Run</span>
             </button>
           )}
 
@@ -635,12 +617,22 @@ export const JobDetailPage: React.FC = () => {
       </div>
 
       {/* Start DRAFT Job Confirmation Modal */}
+      {showResumeModal && (
+        <ResumeCheckpointModal key={job.job_id} jobId={job.job_id}
+          canResume={job.state === 'READY' && canLaunch}
+          onClose={() => setShowResumeModal(false)}
+          onResumed={attemptId => navigate(`/live?attempt_id=${encodeURIComponent(attemptId)}`)}
+        />
+      )}
+
       <ConfirmationModal
         isOpen={showStartDraftConfirm}
+        isLoading={actionLoading === 'launch'}
+        closeOnConfirm={false}
         onClose={() => setShowStartDraftConfirm(false)}
         onConfirm={async () => {
-          setShowStartDraftConfirm(false);
           await handleLaunch();
+          setShowStartDraftConfirm(false);
         }}
         title="Start Training Run?"
         confirmLabel="Start Training"

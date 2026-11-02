@@ -35,3 +35,31 @@ tương ứng với trạng thái đã áp dụng; snapshot không thay thế l�
 Khi thay đổi semantics API, đối chiếu canonical owner trước; không coi
 implementation là nguồn phê duyệt semantics mới. API contract lịch sử có thể
 tra cứu trong Git, không dùng làm contract hiện hành.
+
+## Training preparation, launch và resume
+
+Launch/Resume kiểm tra không có active Attempt toàn hệ thống trước khi gửi lệnh;
+Backend vẫn quyết định admission cuối cùng. Khi request còn pending, UI giữ nhãn
+nút, hiển thị spinner/aria-busy và dùng ref guard chống gửi trùng. Confirmation
+chờ kết quả request thay vì đóng trước khi biết thành công hay lỗi.
+
+Resume picker tải checkpoint theo job_id và state=COMPLETE, có phân trang/dedup;
+gửi đúng checkpoint_id đã chọn tới POST /api/v1/jobs/{job_id}/resume. Khi thành
+công, điều hướng bằng attempt_id mới Backend trả về. Checkpoint list trả job_id
+được join từ Attempt tạo checkpoint. Empty/error/selection không hợp lệ không
+được gửi resume hoặc tự thay bằng Start.
+
+Live Training hiển thị preparation từ các state Runtime hiện có và membership
+thực: kết nối DTP, dataset đã xác minh và Worker READY. Trạng thái stale chỉ là
+lần quan sát cuối; không suy phần trăm tải/ETA hoặc giả báo đã RUNNING.
+
+WebSocket EVENT dùng payload.details; SNAPSHOT dùng payload.snapshot_seq/state.
+Snapshot preparation có thể đổi Worker ở cùng event cursor. Client xử lý message
+và catch-up theo thứ tự; REST response chậm không ghi đè live snapshot mới hơn.
+Ordinary REST refresh không tăng applied event cursor; live event memory giới
+hạn 1024 entries, full history tiếp tục truy vấn qua Backend.
+
+START_ATTEMPT chỉ thay runner cũ khi DTP resources đã cleanup xong. Runtime chờ
+tối đa 5 giây ngoài state lock rồi kiểm tra lại; chưa xong trả ACTIVE_ATTEMPT_EXISTS.
+Abort trong provisioning/initialization vẫn chạy cleanup, không coi một predicate
+ready là hợp lệ sau abort. Terminal snapshot giữ tới lần khởi chạy tiếp theo.

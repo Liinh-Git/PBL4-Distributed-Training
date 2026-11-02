@@ -900,7 +900,16 @@ export interface WsGapFrameData {
   };
 }
 
-export type WsFrameData = WsEventFrameData | WsSnapshotFrameData | WsGapFrameData;
+/** Existing Backend force-abort/reconciliation notification; no Runtime cursor. */
+export interface WsAttemptStateFrameData {
+  kind: 'ATTEMPT_STATE_CHANGED';
+  attempt_id: string;
+  runtime_event_seq: null;
+  occurred_at: string;
+  payload: { state: AttemptState; failure_code?: string; failure_message?: string; };
+}
+
+export type WsFrameData = WsEventFrameData | WsSnapshotFrameData | WsGapFrameData | WsAttemptStateFrameData;
 
 // ─── 40.0 Training Metrics Time-Series ───────────────────────────────────────
 

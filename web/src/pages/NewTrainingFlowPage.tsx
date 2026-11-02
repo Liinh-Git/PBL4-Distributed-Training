@@ -1066,11 +1066,14 @@ export const NewTrainingFlowPage: React.FC = () => {
               <button
                 type="button"
                 disabled={hasValidationErrors || actionLoading === 'start' || activeAttempt !== null}
+                aria-busy={actionLoading === 'start'}
                 onClick={handleStartTraining}
                 className="px-4 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:pointer-events-none"
               >
-                <Play className="w-3.5 h-3.5 fill-current" />
-                <span>{actionLoading === 'start' ? 'Starting...' : isEditMode ? 'Start Training' : 'Create & Start'}</span>
+                {actionLoading === 'start'
+                  ? <RefreshCw aria-hidden="true" className="w-3.5 h-3.5 animate-spin motion-reduce:animate-none" />
+                  : <Play aria-hidden="true" className="w-3.5 h-3.5 fill-current" />}
+                <span>{isEditMode ? 'Start Training' : 'Create & Start'}</span>
               </button>
             </div>
           </div>
@@ -1114,11 +1117,14 @@ export const NewTrainingFlowPage: React.FC = () => {
             <button
               type="button"
               disabled={hasValidationErrors || actionLoading === 'start' || activeAttempt !== null}
+              aria-busy={actionLoading === 'start'}
               onClick={handleStartTraining}
               className="px-4 py-1.5 rounded text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:pointer-events-none"
             >
-              <Play className="w-3.5 h-3.5 fill-current" />
-              <span>{actionLoading === 'start' ? 'Starting...' : 'Start training'}</span>
+              {actionLoading === 'start'
+                ? <RefreshCw aria-hidden="true" className="w-3.5 h-3.5 animate-spin motion-reduce:animate-none" />
+                : <Play aria-hidden="true" className="w-3.5 h-3.5 fill-current" />}
+              <span>Start training</span>
             </button>
           </div>
         </div>

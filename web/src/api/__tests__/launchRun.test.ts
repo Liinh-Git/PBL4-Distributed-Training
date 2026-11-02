@@ -48,7 +48,8 @@ function controls(page: string, env: Record<string, any>, select: (text: string)
   visit(pages[page]);
   return expressions.map(text => renderToStaticMarkup(evaluate(text, {
     React, Link: ({ to, children }: any) => React.createElement('a', { href: to }, children),
-    Activity: () => null, Play: () => null, Square: () => null, ...env,
+    Activity: () => null, Play: () => null, Square: () => null,
+    RefreshCw: (props: any) => React.createElement('svg', props), ...env,
   }))).join('');
 }
 function handlerEnv(overrides: Record<string, any> = {}) {
@@ -78,7 +79,7 @@ for (const state of activeStates) {
       isAttemptAbortable: declaration('JobsPage', 'isAttemptAbortable', {}),
       job: { job_id: 'job-1', state: 'READY', latest_attempt: active },
     });
-    const detail = controls('JobDetailPage', env, text => text.startsWith('activeAttempt &&') || text.includes("'Launch Run'"));
+    const detail = controls('JobDetailPage', env, text => text.startsWith('activeAttempt &&') || text.includes('Launch Run'));
     assert.match(detail, /View Run/);
     assert.match(detail, /href="\/live\?attempt_id=attempt%2Fa%20b"/);
     assert.doesNotMatch(detail, /Launch Run|<button/);
@@ -101,7 +102,7 @@ test('terminal attempts do not block Launch; unknown/loading/other-job states di
     const env = handlerEnv({ systemActiveAttempt, activeAttempt: null });
     const allowed = declaration('JobDetailPage', 'canLaunch', env);
     assert.equal(allowed, systemActiveAttempt === null);
-    const html = controls('JobDetailPage', { ...env, hasActiveAttempt: false, canLaunch: allowed }, text => text.includes("'Launch Run'"));
+    const html = controls('JobDetailPage', { ...env, hasActiveAttempt: false, canLaunch: allowed }, text => text.includes('Launch Run'));
     assert.match(html, /Launch Run/);
     assert.equal(html.includes('disabled=""'), !allowed);
   }
@@ -131,18 +132,32 @@ test('global lookup fails closed for API failures and unknown states; terminal-o
   await service.assertNoActiveAttempt();
 });
 
-for (const [page, handler, method] of [
-  ['NewTrainingFlowPage', 'handleStartTraining', 'startJob'],
-  ['JobDetailPage', 'handleLaunch', 'startJob'],
-  ['JobDetailPage', 'handleRetry', 'retryJob'],
-  ['JobsPage', 'handleLaunch', 'startJob'],
+test('failed and aborted runs offer Launch Run without a separate Retry Run action', () => {
+  for (const state of ['FAILED', 'ABORTED']) {
+    const env = handlerEnv({
+      attempts: [attempt(state)], activeAttempt: null, hasActiveAttempt: false,
+      canRetry: true, handleRetry: () => {}, RotateCcw: () => null,
+      handleLaunch: () => {}, setShowStartDraftConfirm: () => {},
+    });
+    const actions = controls('JobDetailPage', env,
+      text => text.includes('canRetry') || text.includes('Launch Run'));
+    assert.match(actions, /Launch Run/);
+    assert.doesNotMatch(actions, /Retry Run|Retrying/);
+    assert.equal((actions.match(/<button/g) || []).length, 1);
+  }
+});
+
+for (const [page, handler] of [
+  ['NewTrainingFlowPage', 'handleStartTraining'],
+  ['JobDetailPage', 'handleLaunch'],
+  ['JobsPage', 'handleLaunch'],
 ]) {
   test(`${page}.${handler}: one POST, exact attempt route, no new Job, duplicate clicks ignored`, async t => {
     let posts = 0;
     const client = new ApiClient('http://backend');
     t.mock.method(globalThis, 'fetch', async (input: any, init: any) => {
       posts++;
-      assert.equal(String(input), `http://backend/api/v1/jobs/job-1/${method === 'retryJob' ? 'retry' : 'start'}`);
+      assert.equal(String(input), 'http://backend/api/v1/jobs/job-1/start');
       assert.equal(init.method, 'POST');
       return new Response(JSON.stringify({ data: attempt('CREATED') }), { status: 202, headers: { 'Content-Type': 'application/json' } });
     });
