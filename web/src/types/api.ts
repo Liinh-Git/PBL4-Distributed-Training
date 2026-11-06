@@ -166,7 +166,27 @@ export interface RecoveryCursorData {
 }
 
 export interface StrategyStateStrictBSPData {
-  type: 'strict_bsp';
+  type: 'strict_bsp' | 'async_sgd';
+  processed_units?: number;
+  processed_samples?: number;
+  applied_units?: number;
+  dropped_units?: number;
+  applied_samples?: number;
+  dropped_samples?: number;
+  target_units?: number;
+  completed_epochs?: number;
+  active_workers?: number;
+  staleness?: number | null;
+  loss?: number | null;
+  model_version?: number;
+  epoch_progress?: {
+    epoch_index: number;
+    processed_units: number;
+    target_units: number;
+    sample_count: number;
+    training_loss?: number | null;
+    training_accuracy?: number | null;
+  } | null;
   current_step_id?: number | null;
   state?: string | null;
   accepted_contribution_count?: number | null;
@@ -351,9 +371,10 @@ export interface RequestedContractV1 {
   epochs: number;
   learning_rate: number;
   training_seed: number;
-  training_strategy: 'strict_bsp';
+  training_strategy: 'strict_bsp' | 'async_sgd';
   workload_policy?: WorkloadPolicy;
   work_units_per_step?: number;
+  async_training?: import('../api/trainingStrategy').AsyncTrainingSettings;
   checkpoint?: RequestedCheckpointPolicyData;
 }
 
@@ -363,9 +384,10 @@ export interface RequestedContractPatchV1 {
   epochs?: number;
   learning_rate?: number;
   training_seed?: number;
-  training_strategy?: 'strict_bsp';
+  training_strategy?: 'strict_bsp' | 'async_sgd';
   workload_policy?: WorkloadPolicy;
   work_units_per_step?: number;
+  async_training?: import('../api/trainingStrategy').AsyncTrainingSettings;
   checkpoint?: RequestedCheckpointPolicyData;
 }
 
@@ -427,6 +449,7 @@ export interface ResolvedContractV1 {
   update_policy: ResolvedUpdatePolicyData;
   checkpoint_policy: ResolvedCheckpointPolicyData;
   protocols: ResolvedProtocolsData;
+  async_training?: import('../api/trainingStrategy').AsyncTrainingSettings;
 }
 
 export interface JobCreateRequest {

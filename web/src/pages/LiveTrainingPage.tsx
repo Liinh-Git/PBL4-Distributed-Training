@@ -1,3 +1,7 @@
+import { AsyncProgressPanel } from '../components/training/AsyncProgressPanel';
+import { AsyncTrainingConsole } from '../components/training/AsyncTrainingConsole';
+import { AsyncMetricsDashboard } from '../components/charts/AsyncMetricsDashboard';
+import { selectAsyncProgress } from '../utils/asyncMetrics';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useSearchParams, Link, useNavigate, useLocation } from 'react-router-dom';
 import {
@@ -311,6 +315,8 @@ export const LiveTrainingPage: React.FC<LiveTrainingPageProps> = ({
   const workers = stream.workers;
   const steps = stream.steps;
   const events = stream.events;
+  const asyncProgress = useMemo(() => selectAsyncProgress(attempt, snapshot, events), [attempt, snapshot, events]);
+  const totalEpochs = jobDetail?.resolved_contract?.training?.epochs ?? jobDetail?.requested_contract?.epochs;
   const diagnosticEvents = useMemo(() => events.map(toDiagnosticEvent), [events]);
   const activeStep = steps[0];
 
@@ -427,7 +433,8 @@ export const LiveTrainingPage: React.FC<LiveTrainingPageProps> = ({
 
 
   // Authoritative expected and observed worker counts
-  const expectedWorkersCount = attempt?.expected_workers ?? attempt?.membership?.expected_workers ?? null;
+  const expectedWorkersCount = attempt?.expected_workers ?? attempt?.membership?.expected_workers
+    ?? jobDetail?.resolved_contract?.synchronization?.expected_workers ?? null;
   const observedWorkersCount = workers.length;
   const preparation = getPreparationStatus(attempt?.state, workers);
 
@@ -836,13 +843,21 @@ export const LiveTrainingPage: React.FC<LiveTrainingPageProps> = ({
         </div>
       </div>
 
+      {epochMetricsError && <div role="alert" className="flex items-center gap-3 text-xs text-rose-400">
+        <span>{epochMetricsError}</span>
+        <button type="button" className="underline focus-visible:outline-2 focus-visible:outline-blue-400" onClick={() => setEpochRefresh(value => value + 1)}>Thử lại</button>
+      </div>}
+
       {/* TAB 1: LIVE */}
       {activeTab === 'live' && (
         <div className="space-y-4">
           <PreparationStatus state={attempt.state} workers={workers}
             expectedWorkers={expectedWorkersCount} isStale={stream.isStale}
             observedAt={snapshot?.observed_at} />
-          <TrainingTopologyVisualizer
+          {attempt.training_strategy === 'async_sgd' ? <AsyncTrainingConsole
+            progress={asyncProgress} epochMetrics={epochMetrics} totalEpochs={totalEpochs}
+            attemptState={attempt.state} isStale={stream.isStale} jobDisplayName={jobDisplayName}
+          /> : <TrainingTopologyVisualizer
             currentStep={legacyStepsAdapter[0]}
             workers={legacyWorkersAdapter}
             expectedWorkers={expectedWorkersCount ?? 0}
@@ -860,9 +875,13 @@ export const LiveTrainingPage: React.FC<LiveTrainingPageProps> = ({
             }
             stepsHistory={steps}
             snapshot={snapshot}
-          />
+          />}
 
                 {/* UNIFIED CLUSTER WORKLOAD & WORKER SYNCHRONIZATION PANEL */}
+                {attempt.training_strategy === 'async_sgd'
+                  ? <AsyncProgressPanel progress={asyncProgress} workers={workers} totalEpochs={totalEpochs}
+                      expectedWorkers={expectedWorkersCount} attemptState={attempt.state} />
+                  : (
                 <div className="bg-[#121214] border border-white/[0.07] rounded p-4 space-y-4">
                   {/* 1. TOP HEADER: Title, Strategy & Step Navigation Controls */}
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-white/[0.06]">
@@ -1214,6 +1233,7 @@ export const LiveTrainingPage: React.FC<LiveTrainingPageProps> = ({
                     );
                   })()}
                 </div>
+                )}
         </div>
       )}
 
@@ -1222,14 +1242,17 @@ export const LiveTrainingPage: React.FC<LiveTrainingPageProps> = ({
                                             {
                                               activeTab === 'metrics' && (
                                                 <div className="space-y-4">
+                                                  {attempt.training_strategy === 'async_sgd' ? <>
+                                                    <AsyncProgressPanel progress={asyncProgress} workers={workers} totalEpochs={totalEpochs}
+                                                      expectedWorkers={expectedWorkersCount} attemptState={attempt.state} showWorkers={false} />
+                                                    <AsyncMetricsDashboard events={events} attemptId={attempt.attempt_id} isStale={stream.isStale} epochMetrics={epochMetrics}
+                                                      stalenessThreshold={jobDetail?.resolved_contract?.async_training?.staleness_threshold
+                                                        ?? jobDetail?.requested_contract?.async_training?.staleness_threshold} />
+                                                  </> : <>
                                                   <StepHistoryControls
                                                     error={stream.stepsError}
                                                     onRetry={stream.hasMoreSteps ? stream.loadMoreSteps : stream.refreshSnapshot}
                                                   />
-                                                  {epochMetricsError && <div role="alert" className="flex items-center gap-3 text-xs text-rose-400">
-                                                    <span>{epochMetricsError}</span>
-                                                    <button type="button" className="underline focus-visible:outline-2 focus-visible:outline-blue-400" onClick={() => setEpochRefresh(value => value + 1)}>Thử lại</button>
-                                                  </div>}
                                                   <FullMetricsDashboard
                                                     key={resolvedAttemptId}
                                                     steps={legacyStepsAdapter}
@@ -1237,6 +1260,7 @@ export const LiveTrainingPage: React.FC<LiveTrainingPageProps> = ({
                                                     epochMetrics={epochMetrics}
                                                     onSelectStepDetail={requestStepDetail}
                                                   />
+                                                  </>}
                                                 </div>
                                               )
                                             }

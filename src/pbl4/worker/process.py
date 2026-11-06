@@ -9,44 +9,24 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from queue import Empty, Full, Queue
 
-import numpy as np
 from torch.nn import functional
 
-from pbl4.adapter.base import TensorBundle
 from pbl4.adapter.models.factory import build_model
 from pbl4.adapter.pytorch_adapter import PyTorchAdapter
+from pbl4.common.errors import ProtocolError, TransportError
 from pbl4.protocol.messages import DatasetAssignment, Error, ShardReady, StepStart, Stop
 from pbl4.protocol.transfer import CompletedTensorTransfer
 from pbl4.worker.config import WorkerConfig
 from pbl4.worker.dataset_cache import DatasetCache
 from pbl4.worker.shard_cache import ShardCache, ShardCacheKey
 from pbl4.worker.shard_downloader import ShardDownloader
+from pbl4.worker.tensor_bundle import flatten_bundle
 from pbl4.worker.training_loop import StepAssignment, TrainingLoop
 from pbl4.worker.worker_client import WorkerClient
 
 logger = logging.getLogger(__name__)
-
-
-def flatten_bundle(bundle: TensorBundle) -> bytes:
-    return (
-        np.concatenate([value.reshape(-1) for value in bundle.tensors])
-        .astype("<f4", copy=False)
-        .tobytes()
-    )
-
-
-def bundle_from_bytes(data: bytes, adapter: PyTorchAdapter) -> TensorBundle:
-    flat = np.frombuffer(data, dtype="<f4")
-    if flat.size != adapter.manifest.total_numel:
-        raise ValueError("Canonical parameter transfer has the wrong size")
-    tensors = tuple(
-        flat[item.byte_offset // 4 : (item.byte_offset + item.byte_length) // 4]
-        .reshape(item.shape)
-        .astype(np.float32, copy=True)
-        for item in adapter.manifest.parameters
-    )
-    return TensorBundle(adapter.manifest.parameter_manifest_hash, tensors)
 
 
 class WorkerProcess:
@@ -87,20 +67,67 @@ class WorkerProcess:
         self._epoch = 0
         self._next_batch_ordinal = 0
         self._client_instance_id = str(uuid.uuid4())
-        self._client = WorkerClient(
-            config.runtime_host,
-            config.runtime_port,
-            node_label=config.node_label,
+        self._connection_lost = threading.Event()
+        self._jobs = Queue(maxsize=2)
+        self._asynchronous = False
+        self._local_version = 0
+        self._reconnect_deadline: float | None = None
+        self._client = self._new_client()
+
+    def _new_client(self):
+        client = WorkerClient(
+            self._config.runtime_host,
+            self._config.runtime_port,
+            node_label=self._config.node_label,
             manifest=self._adapter.manifest,
             client_instance_id=self._client_instance_id,
-            attempt_id=config.attempt_id,
-            allocation_id=config.allocation_id,
-            node_id=config.node_id,
-            worker_join_token=config.worker_join_token,
-            message_handler=self._on_message,
-            parameter_handler=self._on_parameters,
-            disconnect_handler=self._on_disconnect,
+            attempt_id=self._config.attempt_id,
+            allocation_id=self._config.allocation_id,
+            node_id=self._config.node_id,
+            worker_join_token=self._config.worker_join_token,
+            message_handler=lambda m, op: self._received(client, m, op),
+            parameter_handler=lambda t: self._enqueue(client, self._on_parameters, t),
+            disconnect_handler=lambda: self._lost(client),
         )
+
+        return client
+
+    def _received(self, client, message, operation):
+        if client is not self._client:
+            return
+        self._asynchronous = client.training_strategy == "async_sgd"
+        if isinstance(message, (Stop, Error)):
+            self._on_message(message, operation, client=client)
+        else:
+            self._enqueue(client, self._on_message, message, operation)
+
+    def _enqueue(self, client, callback, *args):
+        if client is not self._client or self._stop.is_set():
+            return
+        try:
+            self._jobs.put_nowait((client, callback, args))
+        except Full:
+            self._failed.set()
+            self._stop.set()
+            client.disconnect()
+
+    def _work(self):
+        while not self._stop.is_set():
+            try:
+                client, callback, args = self._jobs.get(timeout=0.1)
+            except Empty:
+                continue
+            if client is self._client and client.connected and not self._stop.is_set():
+                callback(*args, client=client)
+
+    def _lost(self, client):
+        if client is self._client:
+            self._asynchronous = client.training_strategy == "async_sgd"
+            self._on_disconnect()
+
+    def _mark_ready(self, client):
+        if client is self._client and not self._connection_lost.is_set():
+            self._reconnect_deadline = None
 
     @property
     def client_instance_id(self) -> str:
@@ -116,47 +143,79 @@ class WorkerProcess:
         return self._adapter.manifest.parameter_manifest_hash
 
     def run(self) -> bool:
-        deadline = time.monotonic() + self._connect_timeout
-        while True:
-            try:
-                ack = self._client.connect()
-                break
-            except Exception as exc:
-                self._client.disconnect()
-                if time.monotonic() >= deadline:
-                    logger.error("Runtime connection failed: %s", exc)
-                    return False
-                time.sleep(0.5)
-        logger.info(
-            "Registered with Runtime attempt=%s session=%s worker_id=%s expected_workers=%s",
-            ack.attempt_id,
-            ack.session_id,
-            ack.worker_id,
-            ack.expected_workers,
-        )
+        processor = threading.Thread(target=self._work, name="worker-compute", daemon=True)
         heartbeat = threading.Thread(
-            target=self._heartbeat_loop,
-            name=f"pbl4-worker-{ack.worker_id}-heartbeat",
-            daemon=True,
+            target=self._heartbeat_loop, name="worker-heartbeat", daemon=True
         )
+        processor.start()
         heartbeat.start()
-        self._stop.wait()
-        self._client.disconnect()
-        heartbeat.join(timeout=2.0)
+        deadline = time.monotonic() + self._connect_timeout
+        delay = 0.5
+        try:
+            while not self._stop.is_set():
+                client = self._client
+                self._connection_lost.clear()
+                try:
+                    ack = client.connect()
+                    self._asynchronous = ack.training_strategy == "async_sgd"
+                    delay = 0.5
+                    while not self._stop.is_set() and not self._connection_lost.wait(0.1):
+                        if client.write_timed_out(time.monotonic()):
+                            logger.warning("Runtime DTP write stalled; closing the connection")
+                            self._lost(client)
+                            client.disconnect()
+                            break
+                        if (
+                            self._reconnect_deadline is not None
+                            and time.monotonic() >= self._reconnect_deadline
+                        ):
+                            self._failed.set()
+                            self._stop.set()
+                except ProtocolError:
+                    logger.exception("Runtime rejected the Worker handshake")
+                    self._failed.set()
+                    self._stop.set()
+                except Exception as exc:
+                    logger.warning("Runtime connection unavailable (%s)", type(exc).__name__)
+                client.disconnect()
+                if self._stop.is_set():
+                    break
+                if time.monotonic() >= (self._reconnect_deadline or deadline):
+                    self._failed.set()
+                    break
+                if self._stop.wait(delay):
+                    break
+                delay = min(delay * 2, 30.0)
+                self._pending = None
+                self._client = self._new_client()
+        finally:
+            self._stop.set()
+            self._client.disconnect()
+            heartbeat.join(timeout=2)
+            processor.join(timeout=2)
+            if processor.is_alive():
+                logger.error("Worker computation did not stop within the shutdown deadline")
+                self._failed.set()
         return not self._failed.is_set()
 
     def _on_disconnect(self) -> None:
         if not self._stop.is_set():
-            logger.error("Runtime DTP connection closed unexpectedly")
-            self._failed.set()
-            self._stop.set()
+            if self._asynchronous:
+                if self._reconnect_deadline is None:
+                    self._reconnect_deadline = time.monotonic() + self._connect_timeout
+                self._connection_lost.set()
+            else:
+                logger.error("Runtime DTP connection closed unexpectedly")
+                self._failed.set()
+                self._stop.set()
 
-    def _on_message(self, message, operation_id: int) -> None:
+    def _on_message(self, message, operation_id: int, *, client=None) -> None:
+        client = client or self._client
         try:
             if isinstance(message, DatasetAssignment):
-                self._provision(message)
+                self._provision(message, client=client)
             elif isinstance(message, StepStart):
-                self._compute(message, operation_id)
+                self._compute(message, operation_id, client=client)
             elif isinstance(message, Stop):
                 logger.info(
                     "Runtime stopped worker: state=%s reason=%s",
@@ -170,13 +229,19 @@ class WorkerProcess:
                 raise RuntimeError(
                     f"Runtime protocol error: {message.error_code}: {message.message}"
                 )
+        except TransportError:
+            self._lost(client)
+            client.disconnect()
         except Exception:
+            if client is not self._client or self._connection_lost.is_set():
+                return
             logger.exception("Worker message processing failed")
             self._failed.set()
             self._stop.set()
-            self._client.disconnect()
+            client.disconnect()
 
-    def _provision(self, assignment: DatasetAssignment) -> None:
+    def _provision(self, assignment: DatasetAssignment, *, client=None) -> None:
+        client = client or self._client
         if assignment.profile != "CNN_IMAGE_CLASSIFICATION_V1":
             raise ValueError("Unsupported Dataset Build profile")
         if int(assignment.expected_shard_count) != int(self._client.expected_workers or -1):
@@ -236,6 +301,8 @@ class WorkerProcess:
                 provision.bytes_downloaded,
             )
 
+        if client is not self._client or self._connection_lost.is_set():
+            return
         with self._lock:
             self._loop = TrainingLoop(
                 self._adapter,
@@ -246,7 +313,7 @@ class WorkerProcess:
             self._dataset_cache = dataset_cache
         shard_manifest = result.shard.shard_manifest
         root_reference = result.shard.root_manifest["shards"][key.shard_id]
-        self._client.send_shard_ready(
+        client.send_shard_ready(
             ShardReady.from_dict(
                 {
                     "dataset_build_id": key.dataset_build_id,
@@ -260,9 +327,9 @@ class WorkerProcess:
                 }
             )
         )
-        self._client.send_model_manifest()
-        if self._client.worker_id == 0:
-            self._client.send_model_init(
+        client.send_model_manifest()
+        if client.worker_id == 0 and not client.model_initialized:
+            client.send_model_init(
                 flatten_bundle(self._adapter.export_parameters()),
                 initialization_seed=self._initialization_seed,
             )
@@ -276,17 +343,18 @@ class WorkerProcess:
             assignment.cache_scope,
         )
 
-    def _compute(self, message: StepStart, operation_id: int) -> None:
+    def _compute(self, message: StepStart, operation_id: int, *, client=None) -> None:
+        client = client or self._client
         self._busy.set()
         try:
             with self._lock:
                 loop = self._loop
-            if loop is None or self._client.session_id is None or self._client.worker_id is None:
+            if loop is None or client.session_id is None or client.worker_id is None:
                 raise ValueError("STEP_START arrived before worker initialization")
             assignment = StepAssignment(
                 attempt_id=str(message.attempt_id),
-                session_id=self._client.session_id,
-                worker_id=self._client.worker_id,
+                session_id=client.session_id,
+                worker_id=client.worker_id,
                 operation_id=operation_id,
                 step_id=int(message.step_id),
                 input_model_version=int(message.model_version),
@@ -297,11 +365,14 @@ class WorkerProcess:
             t_start = time.perf_counter()
             computed = loop.compute(assignment)
             compute_ms = max((time.perf_counter() - t_start) * 1000.0, 0.001)
+            if client is not self._client or self._connection_lost.is_set() or self._stop.is_set():
+                self._busy.clear()
+                return
             with self._lock:
                 self._pending = assignment
                 self._epoch = int(message.epoch)
                 self._next_batch_ordinal = assignment.batch_ordinal
-            self._client.send_gradient(
+            client.send_gradient(
                 flatten_bundle(computed.local_gradient.bundle),
                 operation_id=operation_id,
                 model_version=assignment.input_model_version,
@@ -309,7 +380,7 @@ class WorkerProcess:
                 batch_id=assignment.batch_id,
                 batch_ordinal=assignment.batch_ordinal,
                 sample_count=computed.local_gradient.sample_count,
-                tensor_id=self._client.worker_id,
+                tensor_id=client.worker_id,
                 loss=computed.local_gradient.loss,
                 compute_ms=compute_ms,
                 correct_count=computed.local_gradient.correct_count,
@@ -318,66 +389,26 @@ class WorkerProcess:
             self._busy.clear()
             raise
 
-    def _on_parameters(self, transfer: CompletedTensorTransfer) -> None:
-        try:
-            target_version = int(transfer.metadata["model_version_out"])
-            bundle = bundle_from_bytes(transfer.data, self._adapter)
-            with self._lock:
-                loop = self._loop
-                shard_key = self._shard_key
-                pending = self._pending
-            if loop is None or shard_key is None:
-                raise ValueError("Canonical parameters arrived before shard provisioning")
-            if pending is None:
-                loop.initialize_parameters(target_version, bundle)
-                self._client.send_ready(
-                    model_version=target_version,
-                    dataset_build_id=shard_key.dataset_build_id,
-                    shard_id=shard_key.shard_id,
-                )
-                self._busy.clear()
-                return
-            if pending is None:
-                raise ValueError("Model update arrived without a pending Step")
-            eligibility = loop.apply_parameters(pending, target_version, bundle)
-            if loop.consume_parameter_applied() != eligibility:
-                raise ValueError("Parameter application eligibility changed")
-            self._client.send_parameter_applied(
-                operation_id=eligibility.operation_id,
-                source_step_id=eligibility.step_id,
-                model_version=eligibility.model_version,
-            )
-            with self._lock:
-                self._pending = None
-                self._last_operation = eligibility.operation_id
-                self._last_step = eligibility.step_id
-                self._next_batch_ordinal = pending.batch_ordinal + 1
-            self._busy.clear()
-            logger.info(
-                "Applied canonical parameters step=%s model_version=%s",
-                eligibility.step_id,
-                eligibility.model_version,
-            )
-        except Exception:
-            logger.exception("Canonical parameter application failed")
-            self._failed.set()
-            self._stop.set()
-            self._client.disconnect()
+    def _on_parameters(self, transfer: CompletedTensorTransfer, *, client=None) -> None:
+        from pbl4.worker.training_flows import async_sgd, sync
+
+        handler = async_sgd if "work_units" in transfer.metadata else sync
+        handler.on_parameters(self, client or self._client, transfer)
 
     def _heartbeat_loop(self) -> None:
         interval = self._config.heartbeat_interval_seconds
         while not self._stop.wait(interval):
-            if self._busy.is_set() or not self._client.connected:
+            if not self._client.connected:
                 continue
+            client = self._client
             try:
                 with self._lock:
-                    loop = self._loop
-                    version = loop.local_model_version if loop is not None else 0
+                    version = self._local_version
                     operation = self._last_operation
                     step = self._last_step
                     epoch = self._epoch
                     ordinal = self._next_batch_ordinal
-                self._client.send_heartbeat(
+                client.send_heartbeat(
                     local_model_version=version,
                     last_completed_operation_id=operation,
                     worker_state="WAITING",
@@ -387,6 +418,5 @@ class WorkerProcess:
                 )
             except Exception:
                 logger.exception("Heartbeat transmission failed")
-                self._failed.set()
-                self._stop.set()
-                return
+                self._lost(client)
+                client.disconnect()

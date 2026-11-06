@@ -1,3 +1,5 @@
+import { defaultAsyncSettings, trainingStrategyFields } from '../../api/trainingStrategy';
+import { TrainingStrategySettings } from '../training/TrainingStrategySettings';
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -45,7 +47,8 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
   const [selectedBuildId, setSelectedBuildId] = useState<string>('');
   const [everyNEpochs, setEveryNEpochs] = useState<number>(5);
   const [workloadPolicy, setWorkloadPolicy] = useState<WorkloadPolicy>('equal');
-  const [initialPolicy, setInitialPolicy] = useState<WorkloadPolicy>('equal');
+  const [trainingStrategy, setTrainingStrategy] = useState<'strict_bsp' | 'async_sgd'>('strict_bsp');
+  const [asyncSettings, setAsyncSettings] = useState(defaultAsyncSettings);
   const [existingWups, setExistingWups] = useState<number | undefined>(undefined);
 
   const [datasets, setDatasets] = useState<DatasetItemData[]>([]);
@@ -95,6 +98,8 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
           setDescription(fullJob.description || '');
 
           if (fullJob.requested_contract) {
+            setTrainingStrategy(fullJob.requested_contract.training_strategy === 'async_sgd' ? 'async_sgd' : 'strict_bsp');
+            setAsyncSettings({ ...defaultAsyncSettings, ...fullJob.requested_contract.async_training });
             setEpochs(fullJob.requested_contract.epochs ?? 30);
             setLearningRate(fullJob.requested_contract.learning_rate ?? 0.01);
             setSeed(fullJob.requested_contract.training_seed ?? 42);
@@ -107,7 +112,6 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
               (fullJob as any).resolved_contract?.workload?.policy;
             if (policy === 'dbs' || policy === 'equal') {
               setWorkloadPolicy(policy);
-              setInitialPolicy(policy);
             }
             if (fullJob.requested_contract.work_units_per_step !== undefined) {
               setExistingWups(fullJob.requested_contract.work_units_per_step);
@@ -169,7 +173,7 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
           setSaving(false);
           return;
         }
-        if (workloadPolicy === 'dbs' && (!Number.isInteger(existingWups) || (existingWups ?? 0) <= 0)) {
+        if (trainingStrategy === 'strict_bsp' && workloadPolicy === 'dbs' && (!Number.isInteger(existingWups) || (existingWups ?? 0) <= 0)) {
           setError('Enter a positive whole number of work units per step for DBS. It must exceed the expected worker count.');
           setSaving(false);
           return;
@@ -186,12 +190,8 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
           epochs: Number(epochs),
           learning_rate: Number(learningRate),
           training_seed: Number(seed),
-          training_strategy: 'strict_bsp',
-          workload_policy: workloadPolicy,
+          ...trainingStrategyFields(trainingStrategy, workloadPolicy, existingWups, asyncSettings),
           checkpoint: { every_n_epochs: Number(everyNEpochs) },
-          ...((workloadPolicy === 'dbs' || workloadPolicy === initialPolicy) && existingWups !== undefined
-            ? { work_units_per_step: existingWups }
-            : {}),
         };
 
         payload = {
@@ -443,6 +443,9 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
               </div>
 
               {/* Workload Policy */}
+              <TrainingStrategySettings strategy={trainingStrategy} settings={asyncSettings}
+                onStrategyChange={setTrainingStrategy} onSettingsChange={setAsyncSettings} />
+              {trainingStrategy === 'strict_bsp' && (
               <div className="space-y-1.5 pt-1">
                 <label className="block text-[11px] font-medium text-[#a1a1a8]">
                   Workload Policy
@@ -520,6 +523,7 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
                   </div>
                 )}
               </div>
+              )}
             </div>
           )}
 

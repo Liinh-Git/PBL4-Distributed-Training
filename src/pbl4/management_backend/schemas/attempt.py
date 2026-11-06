@@ -6,7 +6,6 @@ Aligned to api_contract_formatted.md — Attempt and Runtime/Worker groups.
 from __future__ import annotations
 
 from datetime import datetime
-
 from typing import Any
 
 from pydantic import BaseModel, field_validator
@@ -49,8 +48,30 @@ class RuntimeInfo(BaseModel):
     runtime_event_seq: int | None = None
 
 
+class AsyncEpochProgress(BaseModel):
+    epoch_index: int
+    processed_units: int
+    target_units: int
+    sample_count: int
+    training_loss: float | None = None
+    training_accuracy: float | None = None
+
+
 class StrategyStateStrictBSP(BaseModel):
     type: str
+    processed_units: int | None = None
+    processed_samples: int | None = None
+    applied_units: int | None = None
+    dropped_units: int | None = None
+    applied_samples: int | None = None
+    dropped_samples: int | None = None
+    target_units: int | None = None
+    completed_epochs: int | None = None
+    active_workers: int | None = None
+    staleness: int | None = None
+    loss: float | None = None
+    model_version: int | None = None
+    epoch_progress: AsyncEpochProgress | None = None
     current_step_id: int | None = None
     state: str | None = None
     accepted_contribution_count: int | None = None

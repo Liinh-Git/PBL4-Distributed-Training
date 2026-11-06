@@ -26,3 +26,4 @@ class CheckpointSnapshot:
     created_at: str
     model: ModelSnapshot
     recovery_cursor: RecoveryCursor
+    async_progress: bytes | None = None

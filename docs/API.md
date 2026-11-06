@@ -18,6 +18,24 @@ Khi Backend đang chạy, mở `/api/docs` để xem REST API và `/api/openapi.
 
 OpenAPI mô tả REST; khi kiểm tra WebSocket cần đọc cả route và consumer.
 
+Job mặc định vẫn dùng `training_strategy="strict_bsp"`. Chọn `"async_sgd"`
+kèm `async_training` để cấu hình `units_per_contribution` (mặc định 1),
+`staleness_threshold` (6), `reconnect_grace_seconds` (60) và
+`assignment_timeout_seconds` (1800). Các giá trị là số nguyên; async không nhận
+DBS hoặc `work_units_per_step`. Cấu hình chỉ sửa được khi Job còn DRAFT.
+Capabilities công bố cả hai strategy; API/WS snapshot dùng `strategy_state.type`
+để phân biệt. Event `async.progress` mang processed/applied/dropped units và samples,
+completed_epochs, model_version, staleness, loss; async không sinh Step giả.
+`completed_epochs` là số epoch hoàn tất liên tục, dù epoch sau đã có việc được xử lý.
+`strategy_state.epoch_progress` tùy chọn mô tả epoch đầu tiên chưa hoàn tất: epoch_index,
+processed_units/target_units, sample_count và training_loss/training_accuracy tạm tính.
+Async phát lại loại event `epoch.metrics.finalized` hiện có khi toàn bộ occurrence
+của từng epoch đã xử lý xong, gồm cả gradient bị bỏ; loss/accuracy dùng cùng bộ tính
+có trọng số theo mẫu của sync. WebUI dùng lịch sử epoch từ PostgreSQL cho terminal
+và biểu đồ; Runtime cũ thiếu các trường/sự kiện này được hiển thị là chưa có số liệu.
+Checkpoint sync giữ V1; async dùng V2 chứa tiến độ chưa xử lý để RESUME bằng Attempt mới.
+Chi tiết phạm vi, giới hạn và wire fields: [async contract](ASYNC_EXECUTION_CONTRACT.md).
+
 Luồng training dùng `/ws/v1/attempts/{attempt_id}?after_seq=N`. Các event
 `step.started`, `gradient.accepted`, `model.updated`, `parameter.applied` và
 `step.committed` mang `details.strategy_state` tại thời điểm phát, để hiển thị

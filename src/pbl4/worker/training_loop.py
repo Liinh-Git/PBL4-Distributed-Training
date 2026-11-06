@@ -23,7 +23,7 @@ class StepAssignment:
     session_id: int
     worker_id: int
     operation_id: int
-    step_id: int
+    step_id: int | None
     input_model_version: int
     batch_ordinal: int
     work_units: tuple[WorkUnitRef, ...]
@@ -60,6 +60,8 @@ class StepAssignment:
             ("input_model_version", input_model_version),
             ("batch_ordinal", batch_ordinal),
         ):
+            if name == "step_id" and val is None:
+                continue
             if type(val) is not int or val < 0:
                 raise ValueError(
                     f"Invalid STEP_START assignment: {name} must be a non-negative integer"
@@ -310,6 +312,15 @@ class TrainingLoop:
                 target_model_version,
             )
             return self._eligibility
+
+    def apply_async_parameters(self, target_model_version: int, bundle: TensorBundle) -> None:
+        """Replace local weights after a complete async response, including stale drops."""
+        with self._lock:
+            if type(target_model_version) is not int or target_model_version < self._model_version:
+                raise ValueError("Async parameter version regressed")
+            self._adapter.apply_parameters(bundle)
+            self._model_version = target_model_version
+            self._pending = self._eligibility = None
 
     def consume_parameter_applied(self) -> ParameterAppliedEligibility:
         with self._lock:

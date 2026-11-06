@@ -559,7 +559,7 @@ def test_get_system_capabilities_matches_contract(client):
         assert data["mcp_versions"] == [1]
         assert data["runtime_connected"] is True
         assert data["runtime_instance_id"] == "runtime_machine_a_001"
-        assert data["supported_training_strategies"] == ["strict_bsp"]
+        assert data["supported_training_strategies"] == ["strict_bsp", "async_sgd"]
         assert data["feature_flags"] == {
             "attempt_websocket_stream": True,
             "manual_checkpoint_request": True,

@@ -431,20 +431,9 @@ class Coordinator:
         with self._lock:
             if self._state not in ("RUNNING", "COMPLETED"):
                 raise ValueError("Checkpoint safe boundary has not been reached")
-            if self._step_state != "COMMITTED" and not (self._step_state is None and is_final):
+            if not self._checkpoint_ready(is_final):
                 raise ValueError("Checkpoint safe boundary has not been reached")
-            operation = self._operation or self._last_committed_operation
-            source_op_id = operation.operation_id if operation is not None else 0
-            source_step_id = operation.step_id if operation is not None else None
-            snapshot = replace(
-                self._checkpoint_context,
-                checkpoint_id=uuid4().hex,
-                model=self._model.snapshot(),
-                recovery_cursor=self._cursor,
-                source_operation_id=source_op_id,
-                source_step_id=source_step_id,
-                created_at=_now(),
-            )
+            snapshot = self._capture_checkpoint()
             self._checkpoint_state = "WRITING"
             self._event(
                 "checkpoint.started",
@@ -521,6 +510,21 @@ class Coordinator:
                 )
                 return complete
         raise AssertionError("Checkpoint policy allowed no attempt")
+
+    def _capture_checkpoint(self) -> CheckpointSnapshot:
+        operation = self._operation or self._last_committed_operation
+        return replace(
+            self._checkpoint_context,
+            checkpoint_id=uuid4().hex,
+            model=self._model.snapshot(),
+            recovery_cursor=self._cursor,
+            source_operation_id=operation.operation_id if operation is not None else 0,
+            source_step_id=operation.step_id if operation is not None else None,
+            created_at=_now(),
+        )
+
+    def _checkpoint_ready(self, is_final: bool) -> bool:
+        return self._step_state == "COMMITTED" or (self._step_state is None and is_final)
 
     def checkpoint(self, *, is_final: bool = False) -> CompleteCheckpoint | None:
         with self._lock:

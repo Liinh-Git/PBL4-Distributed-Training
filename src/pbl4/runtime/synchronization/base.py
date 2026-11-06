@@ -34,7 +34,7 @@ class ParameterApplied:
     session_id: int
     worker_id: int
     operation_id: int
-    step_id: int
+    step_id: int | None
     model_version: int
 
 

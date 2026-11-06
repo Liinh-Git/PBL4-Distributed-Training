@@ -119,6 +119,7 @@ def test_worker_provision_all_shards_success(tmp_path: Path, monkeypatch):
     mock_client = MagicMock()
     mock_client.expected_workers = 3
     mock_client.worker_id = 0
+    mock_client.model_initialized = False
     worker._client = mock_client
 
     assignment = DatasetAssignment.from_dict(

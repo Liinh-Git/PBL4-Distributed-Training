@@ -23,6 +23,10 @@ class CheckpointPolicy:
     def due_epoch(self, completed_epoch: int) -> bool:
         return completed_epoch > 0 and completed_epoch % self.every_n_epochs == 0
 
+    def crossed_epoch_boundary(self, previous: int, current: int) -> bool:
+        """Async completion can advance across several cadence boundaries at once."""
+        return current // self.every_n_epochs > previous // self.every_n_epochs
+
     def may_retry(self, attempts_made: int) -> bool:
         return 0 <= attempts_made < self.max_attempts
 

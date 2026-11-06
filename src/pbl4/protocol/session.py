@@ -176,6 +176,7 @@ class ConnectionProtocolValidator:
     phase: ConnectionPhase = ConnectionPhase.CONNECTED
     bound_identity: tuple[int, int] | None = None
     inbound_peer: PeerRole | None = None
+    asynchronous: bool = False
     _parameter_transfer: tuple[tuple[int, int, int, int], str, int, int] | None = field(
         default=None, init=False, repr=False
     )
@@ -207,7 +208,13 @@ class ConnectionProtocolValidator:
             and header.message_type not in _INBOUND_BY_PEER[self.inbound_peer]
         ):
             raise ProtocolError(f"DTP message has invalid direction from {self.inbound_peer.value}")
-        if header.message_type not in _ALLOWED[self.phase]:
+        async_parameter = (
+            self.asynchronous
+            and self.inbound_peer == PeerRole.RUNTIME
+            and self.phase in {ConnectionPhase.READY, ConnectionPhase.WAITING_NEXT}
+            and header.message_type in {MESSAGE_TYPE_PARAMETER_META, MESSAGE_TYPE_PARAMETER_CHUNK}
+        )
+        if header.message_type not in _ALLOWED[self.phase] and not async_parameter:
             raise ProtocolError(f"DTP message is invalid in connection phase {self.phase.value}")
         if header.message_type == MESSAGE_TYPE_MODEL_INIT and header.worker_id != 0:
             raise ProtocolError("MODEL_INIT is only valid from worker_id=0")
@@ -221,6 +228,16 @@ class ConnectionProtocolValidator:
     ) -> None:
         if not isinstance(message, ParameterMeta):
             raise ProtocolError("PARAMETER_META requires its decoded canonical payload")
+        is_async = message.values.get("training_strategy") == "async_sgd"
+        if is_async and not self.asynchronous:
+            raise ProtocolError("Async metadata requires negotiated async capability")
+        if (
+            self.asynchronous
+            and self.inbound_peer == PeerRole.RUNTIME
+            and self.phase != ConnectionPhase.INITIALIZING
+            and not is_async
+        ):
+            raise ProtocolError("Async scheduling response is missing its assignment metadata")
         purpose = message.transfer_purpose
         if purpose == "model_init":
             if (
@@ -237,7 +254,16 @@ class ConnectionProtocolValidator:
                 self.inbound_peer != PeerRole.RUNTIME
                 or header.operation_id == NO_OPERATION
                 or self.phase
-                not in {ConnectionPhase.INITIALIZING, ConnectionPhase.WAITING_PARAMETER}
+                not in (
+                    {
+                        ConnectionPhase.INITIALIZING,
+                        ConnectionPhase.WAITING_PARAMETER,
+                        ConnectionPhase.READY,
+                        ConnectionPhase.WAITING_NEXT,
+                    }
+                    if self.asynchronous
+                    else {ConnectionPhase.INITIALIZING, ConnectionPhase.WAITING_PARAMETER}
+                )
             ):
                 raise ProtocolError("model_update parameter transfer is only Server to Worker")
         else:  # ParameterMeta schema currently makes this unreachable.

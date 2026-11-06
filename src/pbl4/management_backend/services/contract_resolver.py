@@ -5,20 +5,9 @@ CANONICAL REFERENCES:
 - 03. Mô hình dữ liệu
 - docs/IMPLEMENTATION_CONTRACT.md
 
-V1 SPECIFICATION:
-- RequestedContractV1 has exactly six operator-controlled fields:
-  dataset_build_id, model_id, epochs, learning_rate, training_seed, training_strategy.
-- ResolvedContract V1 has exact canonical shape:
-  dataset (dataset_build_id, dataset_manifest_hash, task_type, input_shape, dtype,
-           num_classes, batch_size, shard_count=3, preprocessing)
-  model (model_id="resnet18_groupnorm", profile="RESNET18_GROUPNORM_V1", parameter_manifest_hash)
-  training (epochs, learning_rate, training_seed)
-  synchronization (training_strategy="strict_bsp", expected_workers=3)
-  update_policy ({"type": "plain_sgd_without_momentum"})
-  checkpoint_policy ({"type": "after_each_model_update_blocking", "schema_version": 1})
-  protocols ({"dtp_version": 1, "mcp_version": 1})
-- Parameter manifest hash is resolved via ModelMetadataProvider.
-  If not authoritatively available, resolve fails closed.
+StrictBSP keeps its existing resolved shape and checkpoint V1. Async-SGD adds
+only its own settings and checkpoint schema V2; see docs/ASYNC_EXECUTION_CONTRACT.md.
+Model metadata and Parameter Manifest hashes are resolved authoritatively or fail closed.
 """
 
 from __future__ import annotations
@@ -30,6 +19,7 @@ from typing import Any
 
 import psycopg
 
+from pbl4.common.async_training import resolve_async_training
 from pbl4.common.hashing import canonical_json_hash
 from pbl4.management_backend.repositories import dataset_build_repository
 from pbl4.management_backend.services.model_catalog import get_model_metadata_provider
@@ -87,9 +77,9 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
             )
 
     training_strategy = requested_contract.get("training_strategy", "strict_bsp")
-    if training_strategy != "strict_bsp":
+    if training_strategy not in {"strict_bsp", "async_sgd"}:
         errors.append(
-            f"Unsupported training_strategy '{training_strategy}'. V1 only supports 'strict_bsp'."
+            f"Unsupported training_strategy '{training_strategy}'; use strict_bsp or async_sgd."
         )
 
     epochs = requested_contract.get("epochs")
@@ -125,7 +115,22 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
     elif raw_wups is not None:
         wups = raw_wups
 
-    if workload_policy == "equal":
+    asynchronous = training_strategy == "async_sgd"
+    async_settings = None
+    if asynchronous:
+        if workload_policy != "equal" or wups is not None:
+            errors.append(
+                "Async requires equal workload and its own units_per_contribution setting."
+            )
+        try:
+            async_settings = resolve_async_training(requested_contract.get("async_training"))
+        except ValueError as exc:
+            errors.append(str(exc))
+        k = expected_workers
+    elif requested_contract.get("async_training") is not None:
+        errors.append("Sync cannot contain async_training settings.")
+        k = expected_workers
+    elif workload_policy == "equal":
         k = wups if wups is not None else expected_workers
         if k < expected_workers:
             errors.append(
@@ -295,7 +300,7 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
             "work_units_per_step": k,
         },
         "synchronization": {
-            "training_strategy": "strict_bsp",
+            "training_strategy": training_strategy,
             "expected_workers": 3,
         },
         "update_policy": {
@@ -304,7 +309,7 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
         "checkpoint_policy": {
             "type": "periodic",
             "policy_version": 1,
-            "schema_version": 1,
+            "schema_version": 2 if asynchronous else 1,
             "every_n_epochs": cp_n,
         },
         "protocols": {
@@ -312,6 +317,8 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
             "mcp_version": 1,
         },
     }
+    if async_settings is not None:
+        resolved["async_training"] = async_settings
     return resolved
 
 

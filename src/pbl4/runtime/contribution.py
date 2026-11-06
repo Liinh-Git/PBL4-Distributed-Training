@@ -5,13 +5,21 @@ from dataclasses import dataclass, field
 import numpy as np
 
 
+class ContributionRejected(ValueError):
+    """A complete contribution violated an execution contract, not the network."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
 @dataclass(frozen=True, slots=True)
 class Contribution:
     attempt_id: str
     session_id: int
     worker_id: int
     operation_id: int
-    step_id: int
+    step_id: int | None
     model_version: int
     shard_id: int
     batch_id: int

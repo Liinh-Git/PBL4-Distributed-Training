@@ -31,6 +31,13 @@ class CheckpointRequestV1(StrictWriteModel):
         return v
 
 
+class AsyncSettingsV1(StrictWriteModel):
+    units_per_contribution: int = Field(default=1, ge=1, le=4096, strict=True)
+    staleness_threshold: int = Field(default=6, ge=0, le=1_000_000, strict=True)
+    reconnect_grace_seconds: int = Field(default=60, ge=1, le=3600, strict=True)
+    assignment_timeout_seconds: int = Field(default=1800, ge=1, le=86400, strict=True)
+
+
 class RequestedContractCreateV1(StrictWriteModel):
     dataset_build_id: str
     model_id: str
@@ -41,6 +48,7 @@ class RequestedContractCreateV1(StrictWriteModel):
     workload_policy: str = "equal"
     work_units_per_step: int | None = Field(default=None, ge=1)
     checkpoint: CheckpointRequestV1 | None = None
+    async_training: AsyncSettingsV1 | None = None
 
     @field_validator("epochs", "training_seed", "work_units_per_step", mode="before")
     @classmethod
@@ -61,8 +69,8 @@ class RequestedContractCreateV1(StrictWriteModel):
     @field_validator("training_strategy")
     @classmethod
     def validate_strategy(cls, v: str) -> str:
-        if v != "strict_bsp":
-            raise ValueError(f"Unsupported training_strategy '{v}'. V1 only supports 'strict_bsp'.")
+        if v not in {"strict_bsp", "async_sgd"}:
+            raise ValueError(f"Unsupported training_strategy '{v}'; use strict_bsp or async_sgd.")
         return v
 
     @field_validator("workload_policy")
@@ -95,6 +103,7 @@ class RequestedContractV1(StrictWriteModel):
     workload_policy: str = "equal"
     work_units_per_step: int | None = Field(default=None, ge=1)
     checkpoint: CheckpointRequestV1 = Field(default_factory=lambda: CheckpointRequestV1(every_n_epochs=5))
+    async_training: AsyncSettingsV1 | None = None
 
     @field_validator("epochs", "training_seed", "work_units_per_step", mode="before")
     @classmethod
@@ -115,8 +124,8 @@ class RequestedContractV1(StrictWriteModel):
     @field_validator("training_strategy")
     @classmethod
     def validate_strategy(cls, v: str) -> str:
-        if v != "strict_bsp":
-            raise ValueError(f"Unsupported training_strategy '{v}'. V1 only supports 'strict_bsp'.")
+        if v not in {"strict_bsp", "async_sgd"}:
+            raise ValueError(f"Unsupported training_strategy '{v}'; use strict_bsp or async_sgd.")
         return v
 
     @field_validator("workload_policy")
@@ -149,6 +158,7 @@ class RequestedContractPatchV1(StrictWriteModel):
     workload_policy: str | None = None
     work_units_per_step: int | None = Field(default=None, ge=1)
     checkpoint: CheckpointRequestV1 | None = None
+    async_training: AsyncSettingsV1 | None = None
 
     @field_validator("epochs", "training_seed", "work_units_per_step", mode="before")
     @classmethod
@@ -169,8 +179,8 @@ class RequestedContractPatchV1(StrictWriteModel):
     @field_validator("training_strategy")
     @classmethod
     def validate_strategy(cls, v: str | None) -> str | None:
-        if v is not None and v != "strict_bsp":
-            raise ValueError(f"Unsupported training_strategy '{v}'. V1 only supports 'strict_bsp'.")
+        if v is not None and v not in {"strict_bsp", "async_sgd"}:
+            raise ValueError(f"Unsupported training_strategy '{v}'; use strict_bsp or async_sgd.")
         return v
 
     @field_validator("workload_policy")
@@ -273,6 +283,7 @@ class ResolvedContractV1(BaseModel):
     update_policy: ResolvedUpdatePolicy
     checkpoint_policy: ResolvedCheckpointPolicy
     protocols: ResolvedProtocols
+    async_training: AsyncSettingsV1 | None = None
 
 
 # ─── Request Bodies ───────────────────────────────────────────────────────────
