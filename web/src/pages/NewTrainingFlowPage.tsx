@@ -1,3 +1,5 @@
+import { TrainingStrategySettings } from '../components/training/TrainingStrategySettings';
+import { defaultAsyncSettings, trainingStrategyFields } from '../api/trainingStrategy';
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, useSearchParams, useParams, Link } from 'react-router-dom';
 import {
@@ -55,6 +57,8 @@ export const NewTrainingFlowPage: React.FC = () => {
   const [epochs, setEpochs] = useState<number>(20);
   const [learningRate, setLearningRate] = useState<number>(0.01);
   const [seed, setSeed] = useState<number>(42);
+  const [trainingStrategy, setTrainingStrategy] = useState<'strict_bsp' | 'async_sgd'>('strict_bsp');
+  const [asyncSettings, setAsyncSettings] = useState(defaultAsyncSettings);
   const [workloadPolicy, setWorkloadPolicy] = useState<'equal' | 'dbs'>('equal');
   const [existingWups, setExistingWups] = useState<number | undefined>(undefined);
   const [everyNEpochs, setEveryNEpochs] = useState<number>(5);
@@ -135,6 +139,8 @@ export const NewTrainingFlowPage: React.FC = () => {
             if (pol === 'dbs' || pol === 'equal') {
               setWorkloadPolicy(pol);
             }
+            setTrainingStrategy(req.training_strategy === "async_sgd" ? "async_sgd" : "strict_bsp");
+            if (req.async_training) setAsyncSettings({ ...defaultAsyncSettings, ...req.async_training });
             if (req.work_units_per_step !== undefined) {
               setExistingWups(req.work_units_per_step);
             }
@@ -230,7 +236,7 @@ export const NewTrainingFlowPage: React.FC = () => {
         setFormError('Vui lòng chọn một mô hình được hỗ trợ từ danh mục.');
         return;
       }
-      if (workloadPolicy === 'dbs' && (!Number.isInteger(existingWups) || (existingWups ?? 0) <= 0)) {
+      if (trainingStrategy === 'strict_bsp' && workloadPolicy === 'dbs' && (!Number.isInteger(existingWups) || (existingWups ?? 0) <= 0)) {
         setFormError('Nhập số nguyên dương các đơn vị công việc mỗi bước cho DBS. Giá trị phải lớn hơn số lượng worker dự kiến.');
         return;
       }
@@ -256,12 +262,8 @@ export const NewTrainingFlowPage: React.FC = () => {
             epochs,
             learning_rate: learningRate,
             training_seed: seed,
-            training_strategy: 'strict_bsp',
-            workload_policy: workloadPolicy,
+            ...trainingStrategyFields(trainingStrategy, workloadPolicy, existingWups, asyncSettings),
             checkpoint: { every_n_epochs: everyNEpochs },
-            ...(existingWups !== undefined
-              ? { work_units_per_step: existingWups }
-              : {}),
           },
         });
         currentDraft = patchRes.data;
@@ -277,12 +279,8 @@ export const NewTrainingFlowPage: React.FC = () => {
             epochs,
             learning_rate: learningRate,
             training_seed: seed,
-            training_strategy: 'strict_bsp',
-            workload_policy: workloadPolicy,
+            ...trainingStrategyFields(trainingStrategy, workloadPolicy, existingWups, asyncSettings),
             checkpoint: { every_n_epochs: everyNEpochs },
-            ...(existingWups !== undefined
-              ? { work_units_per_step: existingWups }
-              : {}),
           },
         });
         currentDraft = createRes.data;
@@ -769,20 +767,15 @@ export const NewTrainingFlowPage: React.FC = () => {
               <span className="text-xs font-semibold text-[#f3f3f4]">
                 Chiến lược phân tán
               </span>
-              <span className="text-[11px] text-[#73737c]">Strict BSP</span>
+              <span className="text-[11px] text-[#73737c]">{trainingStrategy === "async_sgd" ? "Async-SGD" : "Strict BSP"}</span>
             </div>
 
-            <div className="p-3 bg-[#171719] rounded text-xs space-y-1">
-              <div className="font-medium text-[#f3f3f4]">
-                Strict BSP (Bulk Synchronous Parallel)
-              </div>
-              <p className="text-[#a1a1a8] text-xs leading-relaxed">
-                Tất cả worker đồng bộ trước mỗi lần cập nhật trọng số toàn cục. Đảm bảo hội tụ tất định và không có gradient trễ.
-              </p>
-            </div>
+            <TrainingStrategySettings strategy={trainingStrategy} settings={asyncSettings}
+              onStrategyChange={setTrainingStrategy} onSettingsChange={setAsyncSettings} />
           </div>
 
           {/* Workload Policy */}
+          {trainingStrategy === 'strict_bsp' && (
           <div className="p-4 bg-[#121214] border border-white/[0.07] rounded space-y-3">
             <div>
               <span className="text-xs font-semibold text-[#f3f3f4]">
@@ -878,6 +871,7 @@ export const NewTrainingFlowPage: React.FC = () => {
               </p>
             </div>
           </div>
+          )}
 
           {/* Node Allocation Section */}
           <div className="p-4 bg-[#121214] border border-white/[0.07] rounded space-y-3">

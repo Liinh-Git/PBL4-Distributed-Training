@@ -491,6 +491,55 @@ def test_08_foreign_key_constraints_enforced(clean_tx):
 # =========================================================================
 
 
+def test_async_session_replacement_preserves_history_and_rejects_stale_snapshot(clean_tx):
+    _, attempt_id = _create_test_job_and_attempt(clean_tx)
+    now = datetime.now(UTC)
+
+    def save(session_id, connected_at):
+        return worker_session_repository.upsert_session(
+            clean_tx,
+            session_id=session_id,
+            attempt_id=attempt_id,
+            worker_id=0,
+            node_label="async-worker",
+            protocol_version=1,
+            state="READY",
+            connected_at=connected_at,
+        )
+
+    assert save(901, now)["state"] == "READY"
+    assert save(902, now + timedelta(seconds=2))["state"] == "READY"
+    # An older session discovered later must never evict the newer active row.
+    assert save(900, now - timedelta(seconds=2))["state"] == "DISCONNECTED"
+    stale = worker_session_repository.update_snapshot_projection(
+        clean_tx,
+        session_id=901,
+        attempt_id=attempt_id,
+        worker_id=0,
+        node_label="async-worker",
+        state="READY",
+        last_heartbeat_at=now,
+    )
+    assert stale["state"] == "DISCONNECTED"
+    sessions = worker_session_repository.get_sessions_for_worker(clean_tx, attempt_id, 0)
+    assert [(s["session_id"], s["state"]) for s in sessions] == [
+        (902, "READY"),
+        (901, "DISCONNECTED"),
+        (900, "DISCONNECTED"),
+    ]
+    worker_session_repository.update_snapshot_projection(
+        clean_tx,
+        session_id=902,
+        attempt_id=attempt_id,
+        worker_id=0,
+        node_label="async-worker",
+        state="DISCONNECTED",
+        last_heartbeat_at=now,
+    )
+    assert save(899, now - timedelta(seconds=3))["state"] == "DISCONNECTED"
+    assert worker_session_repository.get_active_session_for_worker(clean_tx, attempt_id, 0) is None
+
+
 def test_09_worker_sessions_with_nullable_node_and_allocation(clean_tx):
     """Verify worker_sessions supports node_id, allocation_id and works with nulls."""
     _job_id, attempt_id = _create_test_job_and_attempt(clean_tx)

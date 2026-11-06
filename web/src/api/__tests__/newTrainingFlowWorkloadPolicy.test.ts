@@ -238,7 +238,7 @@ describe('WebUI Workload Policy Contract & Integration Tests (Bug #3)', () => {
     assert.match(content, /if \(policy !== workloadPolicy\) setExistingWups\(undefined\)/);
 
     // 4. Must send workload_policy in patch payload
-    assert.match(content, /workload_policy:\s*workloadPolicy/);
+    assert.match(content, /trainingStrategyFields\(trainingStrategy, workloadPolicy, existingWups, asyncSettings\)/);
 
     assert.match(content, /name="work_units_per_step"/);
     assert.match(content, /workloadPolicy === 'dbs' && \(!Number\.isInteger\(existingWups\)/);
@@ -258,13 +258,13 @@ describe('WebUI Workload Policy Contract & Integration Tests (Bug #3)', () => {
     assert.match(content, /changeWorkloadPolicy\('dbs'\)/);
     assert.match(content, /if \(policy !== workloadPolicy\) setExistingWups\(undefined\)/);
 
-    // 3. Must lock training strategy to strict_bsp
-    assert.match(content, /training_strategy:\s*'strict_bsp'/);
+    // Sync remains selectable alongside the implemented async strategy.
+    assert.match(content, /<TrainingStrategySettings/);
     assert.doesNotMatch(content, /training_strategy:\s*['"]local_sgd['"]/);
     assert.doesNotMatch(content, /training_strategy:\s*['"]async['"]/);
 
-    // 4. Must send workload_policy in requested_contract
-    assert.match(content, /workload_policy:\s*workloadPolicy/);
+    // The shared payload builder omits fields belonging to the other mode.
+    assert.match(content, /trainingStrategyFields\(trainingStrategy, workloadPolicy, existingWups, asyncSettings\)/);
 
     assert.match(content, /name="work_units_per_step"/);
     assert.match(content, /workloadPolicy === 'dbs' && \(!Number\.isInteger\(existingWups\)/);

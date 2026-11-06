@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 
 import psycopg
 
+from pbl4.common.async_training import resolve_async_training
 from pbl4.common.hashing import canonical_json_hash
 from pbl4.management_backend.repositories import (
     attempt_repository,
@@ -90,10 +91,22 @@ def _validate_contract(requested_contract: dict) -> list[str]:
             errors.append(f"Missing required contract field: '{field}'")
 
     strategy = requested_contract.get("training_strategy", "")
-    if strategy and strategy != "strict_bsp":
-        errors.append(
-            f"Unsupported training strategy: '{strategy}'. V1 only supports 'strict_bsp'."
-        )
+    if strategy and strategy not in {"strict_bsp", "async_sgd"}:
+        errors.append(f"Unsupported training strategy: '{strategy}'; use strict_bsp or async_sgd.")
+    if strategy == "async_sgd":
+        if (
+            requested_contract.get("workload_policy", "equal") != "equal"
+            or requested_contract.get("work_units_per_step") is not None
+        ):
+            errors.append(
+                "Async requires its own units_per_contribution setting and does not support DBS."
+            )
+        try:
+            resolve_async_training(requested_contract.get("async_training"))
+        except ValueError as exc:
+            errors.append(str(exc))
+    elif requested_contract.get("async_training") is not None:
+        errors.append("Sync cannot contain async_training settings.")
 
     epochs = requested_contract.get("epochs")
     if epochs is not None and (not isinstance(epochs, int) or epochs < 1):
@@ -267,6 +280,14 @@ def update_job(
             raise JobValidationError("Contract validation failed", ["checkpoint group cannot be null."])
 
         merged_rc = {**rc, **requested_contract}
+        old_strategy = rc.get("training_strategy", "strict_bsp")
+        new_strategy = merged_rc.get("training_strategy", "strict_bsp")
+        if new_strategy != old_strategy:
+            other_mode_field = (
+                "work_units_per_step" if new_strategy == "async_sgd" else "async_training"
+            )
+            if other_mode_field not in requested_contract:
+                merged_rc.pop(other_mode_field, None)
         if (new_policy != old_policy and "work_units_per_step" not in requested_contract) or (
             "work_units_per_step" in requested_contract
             and requested_contract["work_units_per_step"] is None

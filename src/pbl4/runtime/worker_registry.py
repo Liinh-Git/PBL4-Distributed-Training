@@ -42,7 +42,7 @@ class WorkerSession:
 
 
 class WorkerRegistry:
-    def __init__(self, attempt_id: str, expected_workers: int):
+    def __init__(self, attempt_id: str, expected_workers: int, *, allow_rejoin: bool = False):
         if type(expected_workers) is not int or expected_workers <= 0:
             raise ValueError("Invalid resolved worker count")
         self._attempt_id = attempt_id
@@ -51,10 +51,11 @@ class WorkerRegistry:
         self._sessions: dict[int, WorkerSession] = {}
         self._used_sessions: set[int] = set()
         self._frozen = False
+        self._allow_rejoin = allow_rejoin
 
     def register(self, session_id: int, now: float, worker_id: int | None = None) -> WorkerSession:
         with self._lock:
-            if self._frozen:
+            if self._frozen and not self._allow_rejoin:
                 raise ValueError("Active membership cannot be replaced")
             if session_id in self._used_sessions:
                 raise ValueError("Session identity cannot be reused")
@@ -124,6 +125,22 @@ class WorkerRegistry:
     def snapshot(self) -> tuple[WorkerSession, ...]:
         with self._lock:
             return tuple(s for _, s in sorted(self._sessions.items()))
+
+    def disconnect_if_unchanged(self, worker_id, session_id, observed_heartbeat, now) -> bool:
+        """Fence a monitor observation only if no fresh liveness superseded it."""
+        with self._lock:
+            session = self._sessions.get(worker_id)
+            if (
+                session is None
+                or session.session_id != session_id
+                or session.state in _TERMINAL
+                or session.last_heartbeat_at != observed_heartbeat
+            ):
+                return False
+            self._sessions[worker_id] = replace(
+                session, state=SessionState.DISCONNECTED, disconnected_at=now
+            )
+            return True
 
     def _get(self, worker_id: int, session_id: int) -> WorkerSession:
         session = self._sessions.get(worker_id)

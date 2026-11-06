@@ -42,7 +42,7 @@ class CapabilitiesResponse(BaseModel):
     mcp_versions: list[int] = [1]
     runtime_connected: bool
     runtime_instance_id: str | None = None
-    supported_training_strategies: list[str] = ["strict_bsp"]
+    supported_training_strategies: list[str] = ["strict_bsp", "async_sgd"]
     supported_models: list[SupportedModel] = Field(default_factory=list)
     feature_flags: FeatureFlags = FeatureFlags()
 

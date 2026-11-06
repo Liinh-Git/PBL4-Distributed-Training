@@ -84,7 +84,7 @@ def capabilities() -> ItemResponse[CapabilitiesResponse]:
             mcp_versions=[1],
             runtime_connected=gateway.connected,
             runtime_instance_id=gateway.runtime_instance_id,
-            supported_training_strategies=["strict_bsp"],
+            supported_training_strategies=["strict_bsp", "async_sgd"],
             supported_models=models,
             feature_flags=FeatureFlags(
                 attempt_websocket_stream=True,

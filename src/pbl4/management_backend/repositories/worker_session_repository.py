@@ -33,6 +33,28 @@ def upsert_session(
     allocation_id: str | None = None,
 ) -> dict:
     with conn.cursor(row_factory=dict_row) as cur:
+        if state not in {"DISCONNECTED", "FAILED"}:
+            # Serialize session replacement for this Attempt before the active-rank
+            # unique index is touched. Stale snapshots cannot evict a newer session.
+            cur.execute(
+                "SELECT attempt_id FROM attempts WHERE attempt_id = %s FOR UPDATE", (attempt_id,)
+            )
+            cur.execute(
+                """SELECT session_id FROM worker_sessions
+                   WHERE attempt_id = %s AND worker_id = %s AND session_id != %s
+                     AND (connected_at, session_id) > (%s, %s) LIMIT 1""",
+                (attempt_id, worker_id, session_id, connected_at, session_id),
+            )
+            if cur.fetchone() is not None:
+                state, disconnected_at = "DISCONNECTED", disconnected_at or connected_at
+            else:
+                cur.execute(
+                    """UPDATE worker_sessions SET state = 'DISCONNECTED',
+                              disconnected_at = COALESCE(disconnected_at, %s)
+                       WHERE attempt_id = %s AND worker_id = %s AND session_id != %s
+                         AND state NOT IN ('DISCONNECTED', 'FAILED')""",
+                    (connected_at, attempt_id, worker_id, session_id),
+                )
         cur.execute(
             """
             INSERT INTO worker_sessions (
@@ -42,7 +64,8 @@ def upsert_session(
                 node_id, allocation_id
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (session_id) DO UPDATE SET
-                state = EXCLUDED.state,
+                state = CASE WHEN worker_sessions.state IN ('DISCONNECTED', 'FAILED')
+                             THEN worker_sessions.state ELSE EXCLUDED.state END,
                 node_label = CASE
                     WHEN EXCLUDED.node_label IS NOT NULL AND EXCLUDED.node_label != 'node-unknown'
                     THEN EXCLUDED.node_label
@@ -153,7 +176,7 @@ def update_snapshot_projection(
             """
             UPDATE worker_sessions
             SET node_label = %s,
-                state = %s,
+                state = CASE WHEN state IN ('DISCONNECTED', 'FAILED') THEN state ELSE %s END,
                 last_heartbeat_at = COALESCE(%s, last_heartbeat_at),
                 disconnected_at = COALESCE(%s, disconnected_at),
                 failure_code = COALESCE(%s, failure_code),

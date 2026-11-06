@@ -20,10 +20,11 @@ from pbl4.common.artifact_origin import (
     derive_root_manifest_path,
     resolve_artifact_url,
 )
+from pbl4.common.async_training import resolve_async_training
 from pbl4.common.hashing import canonical_json_bytes, derive_model_artifact_token, sha256_bytes
 from pbl4.common.model_profiles import MODEL_PROFILES
 from pbl4.common.work_unit import WorkUnitRef
-from pbl4.protocol.messages import DatasetAssignment, StepStart
+from pbl4.protocol.messages import DatasetAssignment
 from pbl4.protocol.parameter_manifest import ParameterManifest
 from pbl4.protocol.transfer import CompletedTensorTransfer
 from pbl4.runtime.artifact_http import ArtifactHTTP
@@ -32,18 +33,20 @@ from pbl4.runtime.canonical_model import CanonicalModel, ModelSnapshot
 from pbl4.runtime.checkpoint import CheckpointManager, CompleteCheckpoint
 from pbl4.runtime.checkpoint_artifacts import CheckpointArtifacts
 from pbl4.runtime.checkpoint_policy import CheckpointPolicy
-from pbl4.runtime.checkpoint_v1 import CheckpointV1Serializer
+from pbl4.runtime.checkpoint_serializer import TrainingCheckpointSerializer
 from pbl4.runtime.coordinator import Coordinator
 from pbl4.runtime.dataset_manifest_client import DatasetManifestClient, PinnedDatasetManifest
 from pbl4.runtime.event_emitter import EventEmitter
-from pbl4.runtime.heartbeat import HeartbeatMonitor
 from pbl4.runtime.management_endpoint import ManagementEndpoint
 from pbl4.runtime.parameter_server import ParameterServer
 from pbl4.runtime.snapshot import CheckpointSnapshot
 from pbl4.runtime.synchronization.context import Member, StrategyContext
 from pbl4.runtime.synchronization.registry import create_policy
+from pbl4.runtime.training_flows.async_sgd import AsyncCoordinator
+from pbl4.runtime.training_flows.sync import run_sync
 from pbl4.runtime.update_engine import UpdateEngine
 from pbl4.runtime.worker_registry import SessionState, WorkerRegistry
+from pbl4.runtime.workload_pool import GlobalWorkUnitPool
 from pbl4.runtime.workload_scheduler import WorkloadScheduler
 
 logger = logging.getLogger(__name__)
@@ -398,11 +401,21 @@ class _AttemptRunner:
         with self._state_lock:
             self._state = state
 
+    def _accepts_workers(self) -> bool:
+        coordinator = self._coordinator
+        return not self.closing and (
+            not isinstance(coordinator, AsyncCoordinator) or coordinator.accepts_workers
+        )
+
     def _run(self) -> None:
         try:
             contract = self._validate_contract()
             expected_workers = int(contract["synchronization"]["expected_workers"])
-            registry = WorkerRegistry(self.attempt_id, expected_workers)
+            asynchronous = (
+                contract["synchronization"].get("training_strategy", "strict_bsp") == "async_sgd"
+            )
+            settings = resolve_async_training(contract.get("async_training"))
+            registry = WorkerRegistry(self.attempt_id, expected_workers, allow_rejoin=asynchronous)
             self._registry = registry
             server = ParameterServer(
                 self._process._host,
@@ -415,6 +428,16 @@ class _AttemptRunner:
                 worker_admission_secret=self._process._worker_admission_secret,
                 require_worker_admission=self._process._require_worker_admission,
                 require_compute_ms=True,
+                training_strategy=str(
+                    contract["synchronization"].get("training_strategy", "strict_bsp")
+                ),
+                manifest_handler=self._on_manifest if asynchronous else None,
+                model_initialized=lambda: (
+                    self._coordinator is not None
+                    or self._model_init.is_set()
+                    or self._payload.get("execution_mode") == "RESUME"
+                ),
+                admission_open=self._accepts_workers,
                 gradient_handler=self._on_gradient,
                 parameter_applied_handler=self._on_parameter_applied,
                 model_init_handler=self._on_model_init,
@@ -536,18 +559,20 @@ class _AttemptRunner:
 
             worker_ids = sorted(item.worker_id for item in registry.snapshot())
 
-            batch_scheduler = BatchScheduler(
-                work_units=work_units,
-                training_seed=int(contract["training"]["training_seed"]),
-                epochs=int(contract["training"]["epochs"]),
-                work_units_per_step=work_units_per_step,
-                worker_ids=worker_ids,
-            )
-            workload_scheduler = WorkloadScheduler(
-                policy=workload_policy,
-                worker_ids=worker_ids,
-                work_units_per_step=work_units_per_step,
-            )
+            batch_scheduler = workload_scheduler = None
+            if not asynchronous:
+                batch_scheduler = BatchScheduler(
+                    work_units=work_units,
+                    training_seed=int(contract["training"]["training_seed"]),
+                    epochs=int(contract["training"]["epochs"]),
+                    work_units_per_step=work_units_per_step,
+                    worker_ids=worker_ids,
+                )
+                workload_scheduler = WorkloadScheduler(
+                    policy=workload_policy,
+                    worker_ids=worker_ids,
+                    work_units_per_step=work_units_per_step,
+                )
             events = EventEmitter(self.attempt_id, self.job_id, buffer=self._process._event_outbox)
             self._events = events
             checkpoint_template = CheckpointSnapshot(
@@ -581,7 +606,7 @@ class _AttemptRunner:
                 source_manager = CheckpointManager.for_attempt(
                     self._process._checkpoint_dir,
                     source_attempt_id,
-                    CheckpointV1Serializer(),
+                    TrainingCheckpointSerializer(),
                 )
                 complete = source_manager.load(
                     str(descriptor["checkpoint_id"]),
@@ -606,10 +631,29 @@ class _AttemptRunner:
                 model_version,
                 self._manifest.parameter_manifest_hash,
             )
-            coordinator = Coordinator(
+            pool = None
+            if asynchronous:
+                pool = GlobalWorkUnitPool(
+                    work_units,
+                    int(contract["training"]["training_seed"]),
+                    int(contract["training"]["epochs"]),
+                    settings["units_per_contribution"],
+                )
+                if resume_complete is not None:
+                    pool.restore(json.loads(resume_complete.snapshot.async_progress))
+                    if resume_cursor != RecoveryCursor(pool.frontier, 0):
+                        raise ValueError("Async progress and recovery cursor disagree")
+                    if model_version > pool.counts["applied_units"]:
+                        raise ValueError("Async progress and model version disagree")
+            coordinator_type = AsyncCoordinator if asynchronous else Coordinator
+            coordinator = coordinator_type(
                 context,
                 registry,
-                create_policy(context),
+                create_policy(
+                    context,
+                    learning_rate=float(contract["training"]["learning_rate"]),
+                    staleness_threshold=settings["staleness_threshold"],
+                ),
                 model,
                 UpdateEngine(
                     model,
@@ -626,13 +670,14 @@ class _AttemptRunner:
                 CheckpointManager.for_attempt(
                     self._process._checkpoint_dir,
                     self.attempt_id,
-                    CheckpointV1Serializer(),
+                    TrainingCheckpointSerializer(),
                 ),
                 checkpoint_template,
                 events,
                 cursor=resume_cursor,
                 workload_scheduler=workload_scheduler,
                 latest_checkpoint=resume_complete,
+                **({"pool": pool, "settings": settings} if asynchronous else {}),
             )
             self._coordinator = coordinator
             coordinator.advance_initialization()
@@ -651,7 +696,14 @@ class _AttemptRunner:
                 120.0,
                 "model-ready workers",
             )
-            coordinator.advance_initialization()
+            if asynchronous:
+                self._wait_for(
+                    lambda: coordinator.advance_initialization() == "RUNNING",
+                    120.0,
+                    "initial async membership readiness",
+                )
+            else:
+                coordinator.advance_initialization()
             self._set_state("RUNNING")
             self._training_loop(coordinator, server)
             self._final_workers = server.worker_snapshots()
@@ -666,7 +718,7 @@ class _AttemptRunner:
             server.send_stop(
                 attempt_state="COMPLETED",
                 reason_code="ATTEMPT_COMPLETED",
-                reason="All scheduled Strict BSP steps committed.",
+                reason="All scheduled training work completed.",
             )
             time.sleep(1.0)
         except Exception as exc:
@@ -701,66 +753,40 @@ class _AttemptRunner:
             self._closed.set()
 
     def _training_loop(self, coordinator: Coordinator, server: ParameterServer) -> None:
-        monitor = HeartbeatMonitor(self._registry, self._process._heartbeat_timeout)
-        total_epochs = int(self._payload["resolved_contract"]["training"]["epochs"])
-        while not self._abort.is_set():
-            try:
-                operation = coordinator.open_step()
-            except StopIteration:
-                if not coordinator.has_verified_checkpoint_for_current_revision():
-                    coordinator.save_checkpoint_for_current_revision(is_final=True)
-                coordinator.complete()
-                self._set_state("COMPLETED")
-                return
-            self._step_done.clear()
-            for assignment in operation.assignments:
-                server.send_step_start(
-                    assignment.worker_id,
-                    operation.operation_id,
-                    StepStart.from_dict(
-                        {
-                            "attempt_id": self.attempt_id,
-                            "epoch": operation.epoch,
-                            "step_id": operation.step_id,
-                            "batch_ordinal": assignment.batch_ordinal,
-                            "model_version": operation.input_model_version,
-                            "shard_id": assignment.shard_id,
-                            "batch_id": assignment.batch_id,
-                            "expected_sample_count": assignment.sample_count,
-                            "training_strategy": "strict_bsp",
-                            "parameter_manifest_hash": (self._manifest.parameter_manifest_hash),
-                            "work_units": [u.to_dict() for u in assignment.work_units],
-                        }
-                    ),
-                )
-            deadline = time.monotonic() + 1800.0
-            while not self._step_done.wait(0.2):
-                if self._abort.is_set():
-                    coordinator.abort()
-                    return
-                for session in monitor.expired(time.monotonic()):
-                    coordinator.heartbeat_timeout(
-                        session.worker_id, session.session_id, session.last_heartbeat_at
-                    )
-                snapshot = coordinator.snapshot()
-                if snapshot["state"] in {"FAILED", "ABORTED"}:
-                    raise RuntimeError(f"Coordinator entered {snapshot['state']}")
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("Timed out waiting for synchronized Step commit")
-            if self._abort.is_set():
-                coordinator.abort()
-                return
-            snapshot = coordinator.snapshot()
-            if snapshot["state"] in {"FAILED", "ABORTED"}:
-                raise RuntimeError(f"Coordinator entered {snapshot['state']}")
+        if isinstance(coordinator, AsyncCoordinator):
+            coordinator.run(self, server)
+        else:
+            run_sync(self, coordinator, server)
 
-            current_cursor = coordinator.cursor
-            if operation.epoch < current_cursor.epoch < total_epochs:
-                completed_epoch = current_cursor.epoch
-                if coordinator._checkpoint_policy.due_epoch(completed_epoch):
-                    coordinator.save_checkpoint_for_current_revision(is_final=False)
+    def _on_manifest(self, worker_id: int, session_id: int) -> bool | None:
+        coordinator, server = self._coordinator, self._server
+        if (
+            not isinstance(coordinator, AsyncCoordinator)
+            or coordinator.snapshot()["state"] != "RUNNING"
+        ):
+            return
+        self._registry.transition(
+            worker_id, session_id, SessionState.MODEL_SYNCING, time.monotonic()
+        )
+        snapshot = coordinator._model.snapshot()
+        server.send_parameters_to(
+            worker_id,
+            snapshot._parameters,
+            operation_id=0,
+            model_version=snapshot.model_version,
+            initialization=True,
+            session_id=session_id,
+        )
+        return True
 
     def _on_model_init(self, transfer: CompletedTensorTransfer) -> None:
+        if (
+            self._model_init_transfer is not None
+            and self._payload["resolved_contract"]["synchronization"]["training_strategy"]
+            == "async_sgd"
+            and transfer.data == self._model_init_transfer.data
+        ):
+            return
         if transfer.identity.worker_id != 0 or self._model_init_transfer is not None:
             raise ValueError("Invalid or duplicate worker-0 initialization")
         self._model_init_transfer = transfer
@@ -901,11 +927,12 @@ class _AttemptRunner:
             or self._manifest is None
             or model.get("parameter_manifest_hash") != self._manifest.parameter_manifest_hash
             or not isinstance(sync, dict)
-            or sync.get("training_strategy") != "strict_bsp"
+            or sync.get("training_strategy") not in {"strict_bsp", "async_sgd"}
             or type(sync.get("expected_workers")) is not int
             or not isinstance(checkpoint, dict)
             or checkpoint.get("type") != "periodic"
-            or checkpoint.get("schema_version") != 1
+            or checkpoint.get("schema_version")
+            != (2 if sync.get("training_strategy") == "async_sgd" else 1)
             or checkpoint.get("policy_version") != 1
             or type(checkpoint.get("every_n_epochs")) is not int
             or checkpoint["every_n_epochs"] <= 0
@@ -916,6 +943,12 @@ class _AttemptRunner:
             or protocols.get("mcp_version") != 1
         ):
             raise ValueError("START_ATTEMPT contract is incompatible with Runtime V1")
+        if sync["training_strategy"] == "async_sgd":
+            resolve_async_training(contract.get("async_training"))
+            if contract.get("workload", {}).get("policy", "equal") != "equal":
+                raise ValueError("Async does not support DBS")
+        elif "async_training" in contract:
+            raise ValueError("Sync cannot contain async settings")
         workload = contract.get("workload")
         if workload is not None:
             if not isinstance(workload, dict):

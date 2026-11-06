@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import hmac
 import logging
 import math
 import socket
@@ -66,7 +68,7 @@ from pbl4.protocol.transfer import (
     TransferIdentity,
     build_tensor_transfer_frames,
 )
-from pbl4.runtime.contribution import Contribution
+from pbl4.runtime.contribution import Contribution, ContributionRejected
 from pbl4.runtime.synchronization.base import ParameterApplied
 from pbl4.runtime.worker_registry import SessionState, WorkerRegistry
 from pbl4.transport.framed_socket import recv_exact, send_all
@@ -99,6 +101,8 @@ class _Connection:
     last_seen: float = 0.0
     node_id: str | None = None
     allocation_id: str | None = None
+    offered: tuple[int, int, bool] | None = None
+    initialization_version: int | None = None
 
 
 class ParameterServer:
@@ -125,7 +129,13 @@ class ParameterServer:
         worker_admission_secret: str | None = None,
         require_worker_admission: bool = False,
         require_compute_ms: bool = False,
+        training_strategy: str = "strict_bsp",
+        manifest_handler: Callable[[int, int], bool | None] | None = None,
+        model_initialized: Callable[[], bool] | None = None,
+        admission_open: Callable[[], bool] | None = None,
     ) -> None:
+        if training_strategy not in {"strict_bsp", "async_sgd"}:
+            raise ValueError("UNSUPPORTED_TRAINING_STRATEGY")
         if heartbeat_timeout_ms <= heartbeat_interval_ms:
             raise ValueError("heartbeat timeout must exceed interval")
         self.attempt_id = attempt_id
@@ -144,6 +154,13 @@ class ParameterServer:
         self._worker_admission_secret = worker_admission_secret
         self._require_worker_admission = require_worker_admission
         self._require_compute_ms = require_compute_ms
+        self.training_strategy = training_strategy
+        self._manifest_handler = manifest_handler
+        self._model_initialized = model_initialized or (lambda: False)
+        self._admission_open = admission_open or (lambda: True)
+        self._join_bindings: dict[str, tuple[str, str, str, int]] = {}
+        self._dataset_assignments: dict[int, DatasetAssignment] = {}
+        self._initial_parameters = None
         self._server = TcpServer(host, port, self._serve_connection)
         self._lock = threading.Lock()
         self._connections: dict[int, _Connection] = {}
@@ -237,11 +254,45 @@ class ParameterServer:
             hello = decode_control_message(first.header.message_type, first.payload)
             if not isinstance(hello, Hello):
                 raise ProtocolError("Invalid HELLO payload")
-            validator = ConnectionProtocolValidator(inbound_peer=PeerRole.WORKER)
+            if not self._admission_open():
+                self._send_admission_error(
+                    sock, "PROTO_ILLEGAL_MESSAGE_ORDER", "Attempt admission is closed"
+                )
+                return
+            if self.training_strategy not in hello.supported_strategy_capabilities:
+                self._send_admission_error(
+                    sock,
+                    "UNSUPPORTED_TRAINING_STRATEGY",
+                    "Worker does not support the resolved training strategy",
+                )
+                return
+            asynchronous = self.training_strategy == "async_sgd"
+            validator = ConnectionProtocolValidator(
+                inbound_peer=PeerRole.WORKER, asynchronous=asynchronous
+            )
             validator.validate(first.header, hello)
 
             # Admission check strictly BEFORE WorkerRegistry.register()
             is_managed = hello.is_managed
+            join_key = str(hello.allocation_id) if is_managed else str(hello.client_instance_id)
+            token_digest = hashlib.sha256(
+                str(hello.values.get("worker_join_token", "")).encode()
+            ).hexdigest()
+            binding_identity = (
+                token_digest,
+                str(hello.client_instance_id),
+                str(hello.values.get("node_id", "")),
+            )
+            with self._lock:
+                previous = self._join_bindings.get(join_key) if asynchronous else None
+            rejoining = previous is not None
+            if rejoining and is_managed and hello.attempt_id != self.attempt_id:
+                raise ProtocolError("Wrong managed rejoin Attempt")
+            if rejoining and (
+                not hmac.compare_digest(previous[0], token_digest)
+                or previous[1:3] != binding_identity[1:]
+            ):
+                raise ProtocolError("Rejoin credential binding mismatch")
             if self._require_worker_admission and not is_managed:
                 self._send_admission_error(
                     sock,
@@ -251,7 +302,7 @@ class ParameterServer:
                 sock.close()
                 return
 
-            if is_managed:
+            if is_managed and not rejoining:
                 if not self._worker_admission_secret:
                     self._send_admission_error(
                         sock,
@@ -283,15 +334,31 @@ class ParameterServer:
 
             duplicate_admission = False
             with self._membership_changed:
-                if is_managed and hello.allocation_id in self._admitted_allocation_ids:
+                if asynchronous and previous is None and join_key in self._join_bindings:
+                    raise ProtocolError("Concurrent admission; retry the existing identity")
+                if (
+                    asynchronous
+                    and not rejoining
+                    and len(self._join_bindings) >= self.expected_workers
+                ):
+                    raise ProtocolError("Async allocation capacity is full")
+                if (
+                    is_managed
+                    and hello.allocation_id in self._admitted_allocation_ids
+                    and not rejoining
+                ):
                     duplicate_admission = True
                     registered = None
                 else:
                     session_id = int(time.time() * 1000) * 1000 + (self._next_session_id % 1000)
                     self._next_session_id += 1
-                    registered = self.registry.register(session_id, time.monotonic())
+                    registered = self.registry.register(
+                        session_id, time.monotonic(), previous[3] if rejoining else None
+                    )
                     if is_managed:
                         self._admitted_allocation_ids.add(str(hello.allocation_id))
+                    if asynchronous:
+                        self._join_bindings[join_key] = (*binding_identity, registered.worker_id)
 
             if duplicate_admission or registered is None:
                 self._send_admission_error(
@@ -337,6 +404,8 @@ class ParameterServer:
                     allocation_id=str(hello.allocation_id) if is_managed else None,
                 )
                 self._connections[registered.worker_id] = connection
+                if asynchronous:
+                    sock.settimeout(self._heartbeat_timeout_ms / 1000)
                 self._session_metadata[registered.worker_id] = {
                     "worker_id": registered.worker_id,
                     "session_id": session_id,
@@ -359,17 +428,52 @@ class ParameterServer:
                     "session_id": str(session_id),
                     "worker_id": connection.worker_id,
                     "expected_workers": self.expected_workers,
-                    "training_strategy": "strict_bsp",
+                    "training_strategy": self.training_strategy,
                     "heartbeat_interval_ms": self._heartbeat_interval_ms,
                     "heartbeat_timeout_ms": self._heartbeat_timeout_ms,
                     "tensor_encoding": "fp32_le_v1",
                     "max_tensor_chunk_bytes": self._max_chunk,
                     "server_protocol_version": 1,
+                    **({"model_initialized": self._model_initialized()} if asynchronous else {}),
                 }
             )
             self._send_control(connection, ack)
+            with self._lock:
+                assignment = self._dataset_assignments.get(connection.worker_id)
+            if assignment is not None:
+                self._send_control(connection, assignment)
             try:
                 self._read_bound(connection)
+            except ContributionRejected as exc:
+                with contextlib.suppress(Exception):
+                    self._send_control(
+                        connection,
+                        Error.from_dict(
+                            {
+                                "error_code": exc.code,
+                                "scope": "SESSION",
+                                "severity": "ERROR",
+                                "message": str(exc),
+                                "retryable": False,
+                            }
+                        ),
+                    )
+            except ProtocolError:
+                if self.training_strategy == "async_sgd":
+                    with contextlib.suppress(Exception):
+                        self._send_control(
+                            connection,
+                            Error.from_dict(
+                                {
+                                    "error_code": "PROTO_ILLEGAL_MESSAGE_ORDER",
+                                    "scope": "SESSION",
+                                    "severity": "ERROR",
+                                    "message": "Invalid DTP session message",
+                                    "retryable": False,
+                                }
+                            ),
+                        )
+                raise
             except TransportError:
                 with self._lock:
                     terminal_stop_sent = connection.terminal_stop_sent
@@ -386,8 +490,9 @@ class ParameterServer:
                         if meta.get("disconnected_at") is None:
                             meta["disconnected_at"] = now_iso
                 with self._membership_changed:
-                    self._connections.pop(connection.worker_id, None)
-                    self._manifest_workers.discard(connection.worker_id)
+                    if self._connections.get(connection.worker_id) is connection:
+                        self._connections.pop(connection.worker_id)
+                        self._manifest_workers.discard(connection.worker_id)
                     self._membership_changed.notify_all()
                 with contextlib.suppress(ValueError):
                     self.registry.transition(
@@ -494,6 +599,24 @@ class ParameterServer:
                     self._manifest_workers.add(connection.worker_id)
                     self._membership_changed.notify_all()
                 connection.validator.set_phase(ConnectionPhase.INITIALIZING)
+                if self._manifest_handler is not None:
+                    handled = self._manifest_handler(connection.worker_id, connection.session_id)
+                    if not handled and self._initial_parameters is not None:
+                        self.registry.transition(
+                            connection.worker_id,
+                            connection.session_id,
+                            SessionState.MODEL_SYNCING,
+                            time.monotonic(),
+                        )
+                        data, version = self._initial_parameters
+                        self.send_parameters_to(
+                            connection.worker_id,
+                            data,
+                            operation_id=0,
+                            model_version=version,
+                            initialization=True,
+                            session_id=connection.session_id,
+                        )
             elif frame.header.message_type == MESSAGE_TYPE_MODEL_INIT:
                 if connection.worker_id != 0:
                     raise ProtocolError("Only worker 0 may announce MODEL_INIT")
@@ -512,6 +635,11 @@ class ParameterServer:
                     self._model_init_handler(complete)
             elif frame.header.message_type == MESSAGE_TYPE_READY:
                 assert isinstance(message, Ready)
+                if message.parameter_manifest_hash != self.manifest.parameter_manifest_hash or (
+                    connection.initialization_version is not None
+                    and message.model_version != connection.initialization_version
+                ):
+                    raise ProtocolError("READY does not acknowledge the offered initial model")
                 with self._lock:
                     connection.local_model_version = int(message.model_version)
                     meta = self._session_metadata.get(connection.worker_id)
@@ -542,9 +670,33 @@ class ParameterServer:
                 complete = connection.assembler.end_gradient(identity, message)
                 connection.validator.set_phase(ConnectionPhase.WAITING_PARAMETER)
                 if self._gradient_handler is not None:
-                    self._gradient_handler(self._to_contribution(complete))
+                    try:
+                        contribution = self._to_contribution(complete)
+                    except ValueError as exc:
+                        raise ContributionRejected("TRAIN_TENSOR_SHAPE_MISMATCH", str(exc)) from exc
+                    self._gradient_handler(contribution)
             elif frame.header.message_type == MESSAGE_TYPE_PARAMETER_APPLIED:
                 assert isinstance(message, WireParameterApplied)
+                if message.parameter_manifest_hash != self.manifest.parameter_manifest_hash:
+                    raise ProtocolError("Parameter ACK manifest does not match Runtime")
+                if self.training_strategy == "async_sgd":
+                    if message.values.get("training_strategy") != "async_sgd":
+                        raise ProtocolError("Async parameter ACK requires async identity")
+                    offered = connection.offered
+                    if (
+                        offered is None
+                        or (frame.header.operation_id, message.model_version) != offered[:2]
+                    ):
+                        raise ProtocolError("Unexpected async parameter ACK")
+                elif "source_step_id" not in message.values:
+                    raise ProtocolError("Sync parameter ACK requires source_step_id")
+                if self.training_strategy == "async_sgd":
+                    # Release the protocol offer before the Coordinator can dispatch again.
+                    has_work = connection.offered[2]
+                    connection.offered = None
+                    connection.validator.set_phase(
+                        ConnectionPhase.UPLOADING if has_work else ConnectionPhase.WAITING_NEXT
+                    )
                 if self._parameter_applied_handler is not None:
                     self._parameter_applied_handler(
                         ParameterApplied(
@@ -552,11 +704,12 @@ class ParameterServer:
                             session_id=connection.session_id,
                             worker_id=connection.worker_id,
                             operation_id=frame.header.operation_id,
-                            step_id=message.source_step_id,
+                            step_id=message.values.get("source_step_id"),
                             model_version=message.model_version,
                         )
                     )
-                connection.validator.set_phase(ConnectionPhase.WAITING_NEXT)
+                if self.training_strategy != "async_sgd":
+                    connection.validator.set_phase(ConnectionPhase.WAITING_NEXT)
 
     def _to_contribution(self, transfer: CompletedTensorTransfer) -> Contribution:
         meta = transfer.metadata
@@ -575,7 +728,7 @@ class ParameterServer:
             session_id=identity.session_id,
             worker_id=identity.worker_id,
             operation_id=identity.operation_id,
-            step_id=identity.operation_id,
+            step_id=identity.operation_id if self.training_strategy == "strict_bsp" else None,
             model_version=int(meta["model_version"]),
             shard_id=int(meta["shard_id"]),
             batch_id=int(meta["batch_id"]),
@@ -622,6 +775,8 @@ class ParameterServer:
         connection.sender.send_frame(connection.sock, frame)
 
     def send_dataset_assignment(self, worker_id: int, assignment: DatasetAssignment) -> None:
+        with self._lock:
+            self._dataset_assignments[worker_id] = assignment
         self._send_control(self._connection(worker_id), assignment)
 
     def send_error(
@@ -636,7 +791,10 @@ class ParameterServer:
     def mark_model_syncing(self) -> None:
         """Apply the Runtime-owned semantic transition after manifest admission."""
         with self._lock:
-            if len(self._manifest_workers) != self.expected_workers:
+            if (
+                len(self._manifest_workers) != self.expected_workers
+                and self.training_strategy != "async_sgd"
+            ):
                 raise ValueError("Full Parameter Manifest membership is not ready")
         for session in self.registry.snapshot():
             if session.state == SessionState.SHARD_READY:
@@ -662,33 +820,120 @@ class ParameterServer:
         tensor_id: int = 0,
         initialization: bool = False,
     ) -> None:
+        if initialization and self.training_strategy == "async_sgd":
+            self._initial_parameters = (data, model_version)
         for worker_id in self.worker_ids():
-            connection = self._connection(worker_id)
-            chunks = (len(data) + self._max_chunk - 1) // self._max_chunk
-            meta = ParameterMeta.from_dict(
-                {
-                    "transfer_purpose": "model_update",
-                    "parameter_manifest_hash": self.manifest.parameter_manifest_hash,
-                    "total_numel": self.manifest.total_numel,
-                    "total_bytes": self.manifest.total_bytes,
-                    "chunk_count": chunks,
-                    "tensor_encoding": "fp32_le_v1",
-                    "attempt_id": self.attempt_id,
-                    "source_step_id": source_step_id,
-                    "model_version_out": model_version,
-                }
+            if initialization and self.training_strategy == "async_sgd":
+                current = next(s for s in self.registry.snapshot() if s.worker_id == worker_id)
+                if current.state != SessionState.MODEL_SYNCING:
+                    continue
+            self.send_parameters_to(
+                worker_id,
+                data,
+                operation_id=operation_id,
+                source_step_id=source_step_id,
+                model_version=model_version,
+                tensor_id=tensor_id,
+                initialization=initialization,
             )
-            identity = TransferIdentity(connection.session_id, worker_id, operation_id, tensor_id)
-            frames = build_tensor_transfer_frames(
-                kind="parameter",
-                identity=identity,
-                metadata=meta,
-                data=data,
-                chunk_size=self._max_chunk,
-            )
-            if not initialization:
-                connection.validator.set_phase(ConnectionPhase.APPLYING)
-            connection.sender.send_transfer(connection.sock, frames)
+
+    def send_parameters_to(
+        self,
+        worker_id,
+        data,
+        *,
+        operation_id,
+        model_version,
+        source_step_id=0,
+        tensor_id=0,
+        initialization=False,
+        async_metadata=None,
+        session_id=None,
+    ):
+        connection = self._connection(worker_id)
+        if session_id is not None and connection.session_id != session_id:
+            raise ProtocolError("Parameter destination session changed")
+        if initialization:
+            connection.initialization_version = model_version
+        chunks = (len(data) + self._max_chunk - 1) // self._max_chunk
+        values = {
+            "transfer_purpose": "model_update",
+            "parameter_manifest_hash": self.manifest.parameter_manifest_hash,
+            "total_numel": self.manifest.total_numel,
+            "total_bytes": self.manifest.total_bytes,
+            "chunk_count": chunks,
+            "tensor_encoding": "fp32_le_v1",
+            "attempt_id": self.attempt_id,
+            "model_version_out": model_version,
+        }
+        if async_metadata is None:
+            values["source_step_id"] = source_step_id
+        else:
+            values.update(async_metadata)
+            connection.offered = (operation_id, model_version, bool(values["work_units"]))
+        meta = ParameterMeta.from_dict(values)
+        identity = TransferIdentity(connection.session_id, worker_id, operation_id, tensor_id)
+        frames = build_tensor_transfer_frames(
+            kind="parameter",
+            identity=identity,
+            metadata=meta,
+            data=data,
+            chunk_size=self._max_chunk,
+        )
+        if not initialization:
+            connection.validator.set_phase(ConnectionPhase.APPLYING)
+        connection.sender.send_transfer(connection.sock, frames)
+
+    def send_async_offer(self, worker_id, session_id, snapshot, operation, assignment, result):
+        def deliver():
+            metadata = {
+                "training_strategy": "async_sgd",
+                "epoch": assignment.epoch if assignment else 0,
+                "work_units": [u.to_dict() for u in assignment.work_units] if assignment else [],
+            }
+            if result is not None:
+                metadata["gradient_result"] = result
+            try:
+                self.send_parameters_to(
+                    worker_id,
+                    snapshot._parameters,
+                    operation_id=operation,
+                    model_version=snapshot.model_version,
+                    session_id=session_id,
+                    async_metadata=metadata,
+                )
+            except Exception:
+                logger.warning(
+                    "Async parameter delivery failed for worker=%s session=%s",
+                    worker_id,
+                    session_id,
+                )
+                self.fence(worker_id, session_id)
+
+        threading.Thread(target=deliver, name=f"async-send-{worker_id}", daemon=True).start()
+
+    def fence(self, worker_id: int, session_id: int, *, observed_heartbeat=None) -> None:
+        with self._membership_changed:
+            connection = self._connections.get(worker_id)
+            if connection is None or connection.session_id != session_id:
+                return
+            if observed_heartbeat is not None:
+                if not self.registry.disconnect_if_unchanged(
+                    worker_id, session_id, observed_heartbeat, time.monotonic()
+                ):
+                    return
+            else:
+                self.registry.transition(
+                    worker_id, session_id, SessionState.DISCONNECTED, time.monotonic()
+                )
+            self._connections.pop(worker_id)
+            self._manifest_workers.discard(worker_id)
+            self._membership_changed.notify_all()
+        with contextlib.suppress(OSError):
+            connection.sock.shutdown(socket.SHUT_RDWR)
+        connection.sock.close()
+        if self._disconnect_handler is not None:
+            self._disconnect_handler(worker_id, session_id)
 
     def send_stop(self, *, attempt_state: str, reason_code: str, reason: str) -> None:
         message = Stop.from_dict(

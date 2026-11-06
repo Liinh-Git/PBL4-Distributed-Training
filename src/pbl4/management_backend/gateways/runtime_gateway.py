@@ -951,6 +951,12 @@ class RuntimeGateway:
                 current_batch_ordinal=details["batch_ordinal"],
                 current_operation_id=details["operation_id"],
             )
+        elif event_type == "async.progress":
+            snapshot.update(
+                strategy_state=details,
+                model_version=details["model_version"],
+                epoch=details["completed_epochs"],
+            )
         elif event_type == "model.updated":
             snapshot["model_version"] = details["output_model_version"]
         elif event_type == "parameter.applied":
@@ -1055,10 +1061,12 @@ class RuntimeGateway:
             ):
                 with db.get_connection() as conn:
                     self.record_event_seq(attempt_id, seq, conn)
-            if (
-                (ingest_result.inserted or self._redis_events)
-                and event_type == "attempt.state_changed"
-                and event_payload.get("state") in {"RUNNING", "COMPLETED", "FAILED", "ABORTED"}
+            if (ingest_result.inserted or self._redis_events) and (
+                (
+                    event_type == "attempt.state_changed"
+                    and event_payload.get("state") in {"RUNNING", "COMPLETED", "FAILED", "ABORTED"}
+                )
+                or event_type in {"worker.reconnected", "worker.disconnected"}
             ):
                 # Session rows come from authoritative snapshots. Establish them
                 # before model.updated references their IDs, without relying on

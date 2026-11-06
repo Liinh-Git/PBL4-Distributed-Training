@@ -13,12 +13,12 @@ from pbl4.management_backend.schemas.job import (
     RequestedContractV1,
     ResolvedContractV1,
 )
+from pbl4.management_backend.services import job_service
 from pbl4.management_backend.services.contract_resolver import (
     ContractResolutionError,
     hash_contract,
     resolve,
 )
-from pbl4.management_backend.services import job_service
 from pbl4.management_backend.services.model_catalog import (
     FakeModelMetadataProvider,
     get_model_metadata_provider,
@@ -428,3 +428,98 @@ def test_resolved_contract_v1_pydantic_roundtrip():
         h = hash_contract(resolved_dict)
         assert len(h) == 64
         assert h == canonical_json_hash(resolved_dict)
+
+
+def test_async_resolution_and_strict_settings_preserve_sync_shape():
+    requested = {
+        "dataset_build_id": "build",
+        "model_id": "resnet18_groupnorm",
+        "epochs": 2,
+        "learning_rate": 0.1,
+        "training_seed": 42,
+    }
+    build = {
+        "dataset_build_id": "build",
+        "dataset_id": "dataset",
+        "state": "READY",
+        "dataset_manifest_hash": "a" * 64,
+        "batch_size": 2,
+        "shard_count": 3,
+    }
+    with (
+        patch(
+            "pbl4.management_backend.services.contract_resolver.dataset_build_repository.get_build",
+            return_value=build,
+        ),
+        patch(
+            "pbl4.management_backend.services.contract_resolver._get_task_type",
+            return_value="image_classification",
+        ),
+    ):
+        sync = resolve(MagicMock(), requested)
+        assert "async_training" not in sync
+        assert sync["checkpoint_policy"]["schema_version"] == 1
+        asynchronous = {**requested, "training_strategy": "async_sgd"}
+        resolved = resolve(MagicMock(), asynchronous)
+        assert resolved["checkpoint_policy"]["schema_version"] == 2
+        assert ResolvedContractV1.model_validate(resolved).async_training.staleness_threshold == 6
+        assert hash_contract(resolved) != hash_contract(sync)
+        for bad in (
+            {"workload_policy": "dbs"},
+            {"work_units_per_step": 3},
+            {"async_training": {"staleness_threshold": True}},
+        ):
+            with pytest.raises(ContractResolutionError):
+                resolve(MagicMock(), {**asynchronous, **bad})
+        with pytest.raises(ValidationError):
+            RequestedContractPatchV1(async_training={"staleness_threshold": True})
+
+
+@pytest.mark.parametrize(
+    "old_strategy,new_strategy,old_field,new_field",
+    [
+        (
+            "strict_bsp",
+            "async_sgd",
+            {"work_units_per_step": 4},
+            {"async_training": {"staleness_threshold": 0}},
+        ),
+        (
+            "async_sgd",
+            "strict_bsp",
+            {"async_training": {"staleness_threshold": 0}},
+            {"work_units_per_step": 4},
+        ),
+    ],
+)
+def test_draft_strategy_switch_removes_other_mode_settings(
+    old_strategy, new_strategy, old_field, new_field
+):
+    requested = {
+        "dataset_build_id": "build",
+        "model_id": "resnet18_groupnorm",
+        "epochs": 2,
+        "learning_rate": 0.1,
+        "training_seed": 42,
+        "training_strategy": old_strategy,
+        **old_field,
+    }
+    draft = {"job_id": "job", "state": "DRAFT", "requested_contract": requested}
+    with (
+        patch(
+            "pbl4.management_backend.services.job_service.job_repository.get_job",
+            return_value=draft,
+        ),
+        patch(
+            "pbl4.management_backend.services.job_service.job_repository.update_job",
+            side_effect=lambda *args, **fields: {
+                **draft,
+                "requested_contract": fields["requested_contract"],
+            },
+        ),
+    ):
+        saved = job_service.update_job(
+            MagicMock(), "job", requested_contract={"training_strategy": new_strategy, **new_field}
+        )
+    assert not set(old_field).intersection(saved["requested_contract"])
+    assert saved["requested_contract"]["training_strategy"] == new_strategy

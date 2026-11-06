@@ -7,6 +7,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { AttemptsService, isActiveAttempt } from '../attempts';
 import { JobsService } from '../jobs';
 import { ApiClient } from '../client';
+import { defaultAsyncSettings, trainingStrategyFields } from '../trainingStrategy';
 import type { AttemptListItemData, AttemptState } from '../../types/api';
 
 const activeStates = ['CREATED', 'WAITING_WORKERS', 'PROVISIONING', 'INITIALIZING', 'RUNNING', 'COMPLETING'];
@@ -198,6 +199,7 @@ test('Create saves exactly one Draft; Save as Draft never sends Start', async ()
   const env = handlerEnv({
     createdJob: null, isEditMode: false, selectedModel: 'model', supportedModels: [{ model_id: 'model' }],
     workloadPolicy: 'equal', existingWups: undefined, everyNEpochs: 5, jobName: 'Training', jobDescription: '',
+    trainingStrategy: 'strict_bsp', asyncSettings: defaultAsyncSettings, trainingStrategyFields,
     selectedBuildId: 'build', epochs: 2, learningRate: 0.1, seed: 42,
     setValidating: () => {}, setCreatedJob: () => {}, setValidationResult: () => {}, setStep: () => {},
     jobsService: {

@@ -1,5 +1,16 @@
 # Implementation Contract — PBL4 Distributed Training
 
+User-approved Sync + Async + Rejoin scope (2026-11-04): preserve StrictBSP
+with equal/DBS, its fail-stop/resume behavior and checkpoint V1. Add opt-in
+`async_sgd` with independent Worker dispatch, bounded staleness, no epoch barrier,
+same-process/same-Attempt rejoin and checkpoint schema V2 carrying sparse async
+progress. Applied and stale-dropped work both count as processed. Runtime verifies
+initial managed credentials; known rejoin bindings remain local execution data.
+No new lifecycle enum, DTP opcode/header, process or database schema is introduced.
+The approved extension is specified in [ASYNC_EXECUTION_CONTRACT.md](ASYNC_EXECUTION_CONTRACT.md)
+and tracked in [ASYNC_REJOIN_PLAN_VI.md](ASYNC_REJOIN_PLAN_VI.md). Historical
+StrictBSP-only/V1-only descriptions below continue to apply to the sync mode.
+
 User-approved checkpoint/model-export scope (2026-11-02): preserve the current
 periodic every_n_epochs policy, manual request and final save behavior. Keep the
 three newest verified COMPLETE artifacts per Job plus durable resume references.

@@ -439,7 +439,11 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
               runtime_event_seq: seq, observed_at: newEventItem.occurred_at, stale: false,
             };
             if (details.strategy_state) observation.strategy_state = details.strategy_state;
-            if (newEventItem.event_type === 'step.started') {
+            if (newEventItem.event_type === 'async.progress') {
+              observation.strategy_state = { ...details, type: 'async_sgd' };
+              observation.model_version = details.model_version;
+              observation.epoch = details.completed_epochs;
+            } else if (newEventItem.event_type === 'step.started') {
               observation.epoch = details.epoch;
               observation.current_batch_ordinal = details.batch_ordinal;
               observation.current_operation_id = details.operation_id;
@@ -492,7 +496,9 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
             }
             // Local step/model updates avoid a REST round-trip per training event.
             if (newEventItem.event_type.startsWith('checkpoint.') ||
-              newEventItem.event_type === 'attempt.state_changed') triggerCoalescedRefresh();
+              newEventItem.event_type === 'attempt.state_changed' ||
+              newEventItem.event_type === 'worker.disconnected' ||
+              newEventItem.event_type === 'worker.reconnected') triggerCoalescedRefresh();
           } else if (frame.kind === 'SNAPSHOT') {
             const snapPayload = frame.payload;
             if (snapPayload.snapshot_seq != null && snapPayload.snapshot_seq < lastSeqRef.current) return;

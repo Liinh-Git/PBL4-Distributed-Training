@@ -93,6 +93,10 @@ class WorkerClient:
         self.job_id: str | None = None
         self.expected_workers: int | None = None
         self.max_tensor_chunk_bytes = 1024 * 1024
+        self.training_strategy = "strict_bsp"
+        self.model_initialized = False
+        self._write_started: float | None = None
+        self._write_timeout_seconds = 5.0
 
     @property
     def connected(self) -> bool:
@@ -100,6 +104,7 @@ class WorkerClient:
 
     def connect(self) -> HelloAck:
         self._transport.connect()
+        self._transport.sock.settimeout(5.0)
         hello_data: dict[str, object] = {
             "node_label": self.node_label,
             "client_instance_id": self.client_instance_id,
@@ -107,7 +112,7 @@ class WorkerClient:
             "protocol_version": 1,
             "framework_adapter": "pytorch",
             "supported_tensor_encoding": ["fp32_le_v1"],
-            "supported_strategy_capabilities": ["strict_bsp"],
+            "supported_strategy_capabilities": ["strict_bsp", "async_sgd"],
         }
         if self.managed_attempt_id is not None:
             hello_data["attempt_id"] = self.managed_attempt_id
@@ -133,9 +138,16 @@ class WorkerClient:
         self.attempt_id = str(message.attempt_id)
         self.job_id = str(message.job_id)
         self.expected_workers = int(message.expected_workers)
+        self.training_strategy = str(message.training_strategy)
+        if self.training_strategy not in {"strict_bsp", "async_sgd"}:
+            raise ProtocolError("Unsupported Runtime training strategy")
+        self.model_initialized = bool(message.values.get("model_initialized", False))
+        self._write_timeout_seconds = int(message.heartbeat_timeout_ms) / 1000
+        self._validator.asynchronous = self.training_strategy == "async_sgd"
         self.max_tensor_chunk_bytes = int(message.max_tensor_chunk_bytes)
         self._validator.validate(frame.header, message)
         self._validator.bind(self.session_id, self.worker_id)
+        self._transport.sock.settimeout(None)
         self._closing.clear()
         self._reader = threading.Thread(
             target=self._read_loop,
@@ -159,9 +171,16 @@ class WorkerClient:
             raise TransportError("Worker is not registered")
         return self.session_id, self.worker_id
 
-    @staticmethod
-    def _write_frame(sock: socket.socket, frame: DTPFrame) -> None:
-        frame.write_to(sock, send_all)
+    def _write_frame(self, sock: socket.socket, frame: DTPFrame) -> None:
+        self._write_started = time.monotonic()
+        try:
+            frame.write_to(sock, send_all)
+        finally:
+            self._write_started = None
+
+    def write_timed_out(self, now: float) -> bool:
+        started = self._write_started
+        return started is not None and now - started >= self._write_timeout_seconds
 
     def _send_control(
         self, message: DtpControlMessage, *, operation_id: int = NO_OPERATION
@@ -223,6 +242,7 @@ class WorkerClient:
         self._sender.send_transfer(self._transport.sock, frames)
 
     def send_ready(self, *, model_version: int, dataset_build_id: str, shard_id: int) -> None:
+        self._validator.set_phase(ConnectionPhase.READY)
         self._send_control(
             Ready.from_dict(
                 {
@@ -289,12 +309,13 @@ class WorkerClient:
             chunk_size=self.max_tensor_chunk_bytes,
             gradient_end=end,
         )
-        self._sender.send_transfer(self._transport.sock, frames)
         self._validator.set_phase(ConnectionPhase.WAITING_PARAMETER)
+        self._sender.send_transfer(self._transport.sock, frames)
 
     def send_parameter_applied(
-        self, *, operation_id: int, source_step_id: int, model_version: int
+        self, *, operation_id: int, source_step_id: int | None, model_version: int
     ) -> None:
+        self._validator.set_phase(ConnectionPhase.WAITING_NEXT)
         self._send_control(
             ParameterApplied.from_dict(
                 {
@@ -302,7 +323,11 @@ class WorkerClient:
                     "model_version": model_version,
                     "parameter_manifest_hash": self.manifest.parameter_manifest_hash,
                     "apply_ok": True,
-                    "source_step_id": source_step_id,
+                    **(
+                        {"source_step_id": source_step_id}
+                        if source_step_id is not None
+                        else {"training_strategy": "async_sgd"}
+                    ),
                 }
             ),
             operation_id=operation_id,
@@ -389,6 +414,22 @@ class WorkerClient:
                         )
                 elif message is not None and self._message_handler is not None:
                     self._message_handler(message, frame.header.operation_id)
+        except ProtocolError as exc:
+            if not self._closing.is_set() and self._message_handler is not None:
+                self._message_handler(
+                    Error.from_dict(
+                        {
+                            "error_code": "PROTO_ILLEGAL_MESSAGE_ORDER",
+                            "scope": "SESSION",
+                            "severity": "ERROR",
+                            "message": str(exc),
+                            "retryable": False,
+                        }
+                    ),
+                    NO_OPERATION,
+                )
+            if not self._closing.is_set() and self._disconnect_handler is not None:
+                self._disconnect_handler()
         except Exception:
             if not self._closing.is_set() and self._disconnect_handler is not None:
                 self._disconnect_handler()

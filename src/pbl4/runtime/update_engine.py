@@ -4,6 +4,7 @@ from threading import Lock
 
 from pbl4.runtime.aggregator import AggregatedGradient
 from pbl4.runtime.canonical_model import CanonicalModel, ModelSnapshot
+from pbl4.runtime.contribution import Contribution
 from pbl4.runtime.sgd_updater import SGDUpdater
 from pbl4.runtime.synchronization.update_plan import UpdatePlan
 
@@ -24,6 +25,7 @@ class UpdateEngine:
         self._updater = SGDUpdater()
         self._last: tuple[UpdatePlan, AggregatedGradient, ModelSnapshot] | None = None
         self._applied: set[tuple[str, str, int]] = set()
+        self._async_operations: dict[int, int] = {}
         model._bind_writer(self)
 
     def apply_once(self, plan: UpdatePlan, aggregate: AggregatedGradient) -> ModelSnapshot:
@@ -53,4 +55,28 @@ class UpdateEngine:
             # Retain one replay result; older input versions are rejected before mutation.
             self._last = plan, aggregate, after
             self._applied.add(plan.identity)
+            return after
+
+    def apply_async_once(
+        self, contribution: Contribution, current_version: int, learning_rate: float
+    ) -> ModelSnapshot:
+        """Execute a policy-approved update; the Coordinator serializes its ledger commit."""
+        with self._lock:
+            before = self._model.snapshot()
+            if (
+                contribution.attempt_id != self._attempt_id
+                or contribution.parameter_manifest_hash != before.parameter_manifest_hash
+                or before.model_version != current_version
+                or contribution.operation_id
+                <= self._async_operations.get(contribution.worker_id, -1)
+            ):
+                raise ValueError("Invalid or duplicate async update")
+            candidate = self._updater.update(
+                before.parameters, contribution.gradient, learning_rate
+            )
+            after = ModelSnapshot(
+                current_version + 1, before.parameter_manifest_hash, candidate.tobytes()
+            )
+            self._model._publish(self, before, after)
+            self._async_operations[contribution.worker_id] = contribution.operation_id
             return after

@@ -239,6 +239,8 @@ class HelloAck(DtpControlMessage):
         "server_protocol_version": "int",
     }
 
+    OPTIONAL = {"model_initialized": "bool"}
+
     def _validate(self, data: dict[str, object]) -> None:
         if data["worker_id"] == UNASSIGNED_WORKER_ID:
             raise ProtocolError("HELLO_ACK contains an invalid assigned identity")
@@ -345,6 +347,10 @@ class ParameterMeta(DtpControlMessage):
         "model_version": "nonnegative_int",
         "source_step_id": "nonnegative_int",
         "model_version_out": "nonnegative_int",
+        "training_strategy": "string",
+        "epoch": "nonnegative_int",
+        "work_units": "array",
+        "gradient_result": "object",
     }
     ENUMS = {"transfer_purpose": frozenset({"model_init", "model_update"})}
 
@@ -352,15 +358,54 @@ class ParameterMeta(DtpControlMessage):
         if data["tensor_encoding"] != TENSOR_ENCODING_FP32_LE_V1:
             raise ProtocolError("PARAMETER_META tensor_encoding must be fp32_le_v1")
         purpose = data["transfer_purpose"]
+        asynchronous = data.get("training_strategy") == "async_sgd"
         required = (
             {"model_version"}
             if purpose == "model_init"
             else {
                 "attempt_id",
-                "source_step_id",
                 "model_version_out",
             }
         )
+        if not asynchronous and purpose == "model_update":
+            required.add("source_step_id")
+        extension = {"training_strategy", "epoch", "work_units", "gradient_result"}
+        if asynchronous:
+            if (
+                purpose != "model_update"
+                or not {"epoch", "work_units"} <= data.keys()
+                or "source_step_id" in data
+            ):
+                raise ProtocolError("Invalid async parameter metadata")
+            units = data["work_units"]
+            if len(units) > 4096:
+                raise ProtocolError("Too many async Work Units")
+            identities = set()
+            for raw in units:
+                if not isinstance(raw, dict) or set(raw) != {
+                    "shard_id",
+                    "batch_id",
+                    "sample_count",
+                }:
+                    raise ProtocolError("Invalid async Work Unit fields")
+                try:
+                    unit = WorkUnitRef(**raw)
+                except (TypeError, ValueError) as exc:
+                    raise ProtocolError("Invalid async Work Unit") from exc
+                key = (unit.shard_id, unit.batch_id)
+                if key in identities:
+                    raise ProtocolError("Duplicate async Work Unit")
+                identities.add(key)
+            result = data.get("gradient_result")
+            if result is not None and (
+                set(result) != {"operation_id", "applied", "staleness"}
+                or not _is_type(result["operation_id"], "nonnegative_int")
+                or not _is_type(result["staleness"], "nonnegative_int")
+                or type(result["applied"]) is not bool
+            ):
+                raise ProtocolError("Invalid async gradient result")
+        elif extension & data.keys():
+            raise ProtocolError("Async extension requires async_sgd")
         forbidden = (
             {"attempt_id", "source_step_id", "model_version_out"}
             if purpose == "model_init"
@@ -524,13 +569,21 @@ class ParameterApplied(DtpControlMessage):
         "model_version": "nonnegative_int",
         "parameter_manifest_hash": "string",
         "apply_ok": "bool",
-        "source_step_id": "nonnegative_int",
     }
-    OPTIONAL = {"apply_ms": "number"}
+    OPTIONAL = {
+        "apply_ms": "number",
+        "source_step_id": "nonnegative_int",
+        "training_strategy": "string",
+    }
 
     def _validate(self, data: dict[str, object]) -> None:
         if data["apply_ok"] is not True:
             raise ProtocolError("PARAMETER_APPLIED is only an ACK when apply_ok is true")
+        if data.get("training_strategy") == "async_sgd":
+            if "source_step_id" in data:
+                raise ProtocolError("Async ACK has no global Step")
+        elif "source_step_id" not in data or "training_strategy" in data:
+            raise ProtocolError("Sync ACK requires source_step_id")
 
 
 class Heartbeat(DtpControlMessage):
