@@ -88,6 +88,44 @@ class AttemptBroadcastHub:
             except RuntimeError:
                 pass
 
+    async def broadcast_batch(self, attempt_id: str, messages: list[dict[str, Any]]) -> None:
+        """Push a batch of messages to all clients subscribed to attempt_id."""
+        if not messages:
+            return
+        subs = self._subscribers.get(attempt_id, set())
+        for q in list(subs):
+            if q in self._dirty:
+                continue
+            for msg in messages:
+                try:
+                    q.put_nowait(msg)
+                except asyncio.QueueFull:
+                    logger.warning(
+                        "WebSocket queue full for attempt %s; invalidating semantic stream.",
+                        attempt_id,
+                    )
+                    self._dirty.add(q)
+                    with contextlib.suppress(Exception):
+                        while not q.empty():
+                            q.get_nowait()
+                        q.put_nowait({"kind": "OVERFLOW_INVALIDATE"})
+                    break
+
+    def broadcast_batch_sync(self, attempt_id: str, messages: list[dict[str, Any]]) -> None:
+        """Thread-safe batch broadcast dispatch."""
+        if not messages:
+            return
+        if self._loop and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(self.broadcast_batch(attempt_id, messages), self._loop)
+        else:
+            try:
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(self.broadcast_batch(attempt_id, messages))
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+            except RuntimeError:
+                pass
+
     def subscriber_count(self, attempt_id: str) -> int:
         return len(self._subscribers.get(attempt_id, set()))
 
@@ -128,7 +166,6 @@ async def _attempt_ws(websocket: WebSocket, attempt_id: str) -> None:
     # to eliminate any race condition where live events arriving during DB catch-up are lost.
     q = hub.subscribe(attempt_id)
     last_contiguous_sent_seq: int | None = None
-    pending_live_events: dict[int, dict] = {}
 
     try:
         # Check for after_seq query parameter for reconnection catch-up
@@ -269,50 +306,15 @@ async def _attempt_ws(websocket: WebSocket, attempt_id: str) -> None:
                         )
 
                         if e_seq <= baseline:
-                            # CASE A: duplicate / already replayed -> ignore
+                            # duplicate / already replayed -> ignore
                             continue
-                        elif e_seq == baseline + 1:
-                            # CASE B: exactly contiguous -> send and drain buffer
-                            await websocket.send_json(event)
-                            last_contiguous_sent_seq = e_seq
-                            while (
-                                last_contiguous_sent_seq is not None
-                                and (last_contiguous_sent_seq + 1) in pending_live_events
-                            ):
-                                next_seq = last_contiguous_sent_seq + 1
-                                next_ev = pending_live_events.pop(next_seq)
-                                await websocket.send_json(next_ev)
-                                last_contiguous_sent_seq = next_seq
-                        else:
-                            # CASE C: out-of-order future event -> buffer without sending
-                            pending_live_events[e_seq] = event
-                            if len(pending_live_events) > 500:
-                                logger.warning(
-                                    "Closing WebSocket for %s: pending buffer overflow",
-                                    attempt_id,
-                                )
-                                await websocket.close(
-                                    code=1013,
-                                    reason="Pending buffer overflow: unresolvable live gap",
-                                )
-                                break
+                        await websocket.send_json(event)
+                        last_contiguous_sent_seq = e_seq
                     elif isinstance(event, dict) and event.get("kind") == "SNAPSHOT":
                         s_seq = event.get("payload", {}).get("snapshot_seq")
                         if s_seq is not None:
                             last_contiguous_sent_seq = s_seq
-                            # Discard buffered events with seq <= s_seq
-                            pending_live_events = {
-                                seq: ev for seq, ev in pending_live_events.items() if seq > s_seq
-                            }
                         await websocket.send_json(event)
-                        while (
-                            last_contiguous_sent_seq is not None
-                            and (last_contiguous_sent_seq + 1) in pending_live_events
-                        ):
-                            next_seq = last_contiguous_sent_seq + 1
-                            next_ev = pending_live_events.pop(next_seq)
-                            await websocket.send_json(next_ev)
-                            last_contiguous_sent_seq = next_seq
                     else:
                         await websocket.send_json(event)
                 except Exception as exc:

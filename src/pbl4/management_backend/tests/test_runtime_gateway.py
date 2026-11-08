@@ -835,12 +835,12 @@ def test_event_gap_preflight_fences_projection_and_prevents_db_mutation() -> Non
 
 
 def test_missing_event_arrival_drains_gap_and_reconciles_db_projection() -> None:
-    """Arrival of missing event projects it, drains subsequent stored events, and un-fences."""
-    gateway = RuntimeGateway(FakeMcpClientPort(initially_connected=True))
+    """When an event gap occurs over TCP, Backend fetches STATE_SNAPSHOT and reconciles."""
+    port = FakeMcpClientPort(initially_connected=True)
+    gateway = RuntimeGateway(port)
     cursor = gateway.get_cursor("attempt-gap-2")
     cursor.highest_contiguous_seq = 100
-    cursor.max_seen_seq = 102
-    cursor.gap_fenced = True
+    cursor.max_seen_seq = 100
 
     fake_conn = MagicMock()
 
@@ -852,84 +852,62 @@ def test_missing_event_arrival_drains_gap_and_reconciles_db_projection() -> None
     def fake_get_connection():
         yield fake_conn
 
-    # Missing event 101 arriving now
-    event_101_payload = {
+    # Event 105 arrives (seq > expected = 101, gap caused by Runtime queue overflow)
+    event_105_payload = {
         "attempt_id": "attempt-gap-2",
         "job_id": "job-1",
-        "runtime_event_seq": 101,
+        "runtime_event_seq": 105,
         "event_type": "step.started",
         "event_schema_version": 1,
         "severity": "INFO",
         "occurred_at": datetime.now(UTC).isoformat(),
         "source_component": "runtime",
         "details": {
-            "step_id": 1,
+            "step_id": 5,
             "operation_id": 1,
             "training_strategy": "strict_bsp",
             "epoch": 0,
-            "batch_ordinal": 0,
-            "input_model_version": 0,
+            "batch_ordinal": 4,
+            "input_model_version": 4,
         },
     }
 
-    # Event 102 was already persisted in DB during previous out-of-order arrival
-    db_event_102 = {
-        "attempt_id": "attempt-gap-2",
-        "job_id": "job-1",
-        "runtime_event_seq": 102,
-        "event_type": "attempt.state_changed",
-        "event_schema_version": 1,
-        "severity": "INFO",
-        "occurred_at": datetime.now(UTC),
-        "source_component": "runtime",
-        "payload_jsonb": {"state": "COMPLETED"},
-    }
-
-    def fake_get_event_by_seq(_conn: Any, _attempt_id: str, seq: int) -> dict[str, Any] | None:
-        if seq == 101:
-            return {
-                "event_type": event_101_payload["event_type"],
-                "severity": event_101_payload["severity"],
-                "occurred_at": datetime.fromisoformat(event_101_payload["occurred_at"]),
-                "source_component": event_101_payload["source_component"],
-                "payload_jsonb": event_101_payload["details"],
-            }
-        if seq == 102:
-            return db_event_102
-        return None
-
-    projected_events: list[dict[str, Any]] = []
-
-    def fake_project(_conn: Any, payload: dict[str, Any]) -> None:
-        projected_events.append(payload)
+    snapshot_payload = _valid_snapshot_dict(
+        active_attempt_id="attempt-gap-2",
+        last_runtime_event_seq=105,
+        attempt_state="RUNNING",
+    )
+    port.snapshot_to_return = snapshot_payload
 
     with (
         patch("pbl4.management_backend.db.transaction", fake_transaction),
         patch("pbl4.management_backend.db.get_connection", fake_get_connection),
         patch(
             "pbl4.management_backend.services.event_ingest.ingest_runtime_event",
-            return_value=RuntimeEventIngestResult(row={"id": 101}, inserted=True),
+            return_value=RuntimeEventIngestResult(row={"id": 105}, inserted=True),
         ),
         patch(
-            "pbl4.management_backend.repositories.event_repository.get_event_by_seq",
-            side_effect=fake_get_event_by_seq,
+            "pbl4.management_backend.repositories.attempt_repository.get_attempt",
+            return_value={"state": "RUNNING", "runtime_metadata": {}},
         ),
-        patch.object(gateway, "_project_runtime_event", side_effect=fake_project),
-        patch("pbl4.management_backend.websocket.hub.broadcast_sync"),
-        patch("pbl4.management_backend.services.event_ingest.broadcast_runtime_event") as broadcast,
+        patch("pbl4.management_backend.repositories.attempt_repository.update_attempt_state"),
+        patch("pbl4.management_backend.websocket.hub.broadcast_sync") as hub_broadcast,
     ):
-        gateway.handle_runtime_event(event_101_payload)
+        gateway.handle_runtime_event(event_105_payload)
 
     # Invariants:
-    # 1. Event 101 was projected, and pre-persisted event 102 was drained and projected
-    assert len(projected_events) == 2
-    assert projected_events[0]["runtime_event_seq"] == 101
-    assert projected_events[1]["runtime_event_seq"] == 102
-    assert [call.kwargs["runtime_event_seq"] for call in broadcast.call_args_list] == [101, 102]
-    # 2. Cursor continuity reconciled and un-fenced
-    cursor = gateway.get_cursor("attempt-gap-2")
-    assert cursor.highest_contiguous_seq == 102
-    assert cursor.max_seen_seq == 102
+    # 1. GAP frame was broadcast via WebSocket
+    gap_frames = [
+        call.args[1]
+        for call in hub_broadcast.call_args_list
+        if isinstance(call.args[1], dict) and call.args[1].get("kind") == "GAP"
+    ]
+    assert len(gap_frames) == 1
+    assert gap_frames[0]["payload"]["expected_seq"] == 101
+    assert gap_frames[0]["payload"]["received_seq"] == 105
+
+    # 2. Snapshot reconciled cursor to 105 and un-fenced gap
+    assert cursor.highest_contiguous_seq == 105
     assert cursor.gap_fenced is False
 
 
@@ -957,16 +935,6 @@ def test_failed_projection_stops_cursor_and_retries_buffered_events() -> None:
             "details": {"step_id": seq},
         }
 
-    rows = {
-        seq: {
-            "event_type": "step.started",
-            "severity": "INFO",
-            "occurred_at": datetime.now(UTC),
-            "source_component": "runtime",
-            "payload_jsonb": {"step_id": seq},
-        }
-        for seq in (101, 102)
-    }
     event_101 = event(101)
     projected: list[int] = []
     fail_once = True
@@ -984,35 +952,27 @@ def test_failed_projection_stops_cursor_and_retries_buffered_events() -> None:
         patch(
             "pbl4.management_backend.services.event_ingest.ingest_runtime_event",
             side_effect=[
-                RuntimeEventIngestResult(row=rows[102], inserted=True),
-                RuntimeEventIngestResult(row=rows[101], inserted=True),
-                RuntimeEventIngestResult(row=rows[101], inserted=False),
+                RuntimeEventIngestResult(row={"id": 101}, inserted=True),
+                RuntimeEventIngestResult(row={"id": 101}, inserted=False),
             ],
-        ),
-        patch(
-            "pbl4.management_backend.repositories.event_repository.get_event_by_seq",
-            side_effect=lambda _conn, _attempt, seq: rows.get(seq),
         ),
         patch.object(gateway, "_project_runtime_event", side_effect=project),
         patch("pbl4.management_backend.websocket.hub.broadcast_sync"),
         patch("pbl4.management_backend.services.event_ingest.broadcast_runtime_event") as broadcast,
     ):
-        gateway.handle_runtime_event(event(102))
-        assert cursor.highest_contiguous_seq == 100
-        broadcast.assert_not_called()
-
+        # First attempt: projection fails
         gateway.handle_runtime_event(event_101)
         assert cursor.highest_contiguous_seq == 100
-        assert cursor.gap_fenced is True
         assert projected == [101]
         broadcast.assert_not_called()
         conn.rollback.assert_called_once()
 
+        # Retry attempt: projection succeeds
         gateway.handle_runtime_event(event_101)
-        assert cursor.highest_contiguous_seq == 102
+        assert cursor.highest_contiguous_seq == 101
         assert cursor.gap_fenced is False
-        assert projected == [101, 101, 102]
-        assert [call.kwargs["runtime_event_seq"] for call in broadcast.call_args_list] == [101, 102]
+        assert projected == [101, 101]
+        assert [call.kwargs["runtime_event_seq"] for call in broadcast.call_args_list] == [101]
 
 
 def test_authoritative_snapshot_reconciles_gap_and_unfences_projection() -> None:

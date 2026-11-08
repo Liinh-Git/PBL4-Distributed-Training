@@ -127,9 +127,19 @@ class RuntimeGateway:
             metadata = json.loads(metadata)
         cursor.highest_contiguous_seq = int(metadata.get("highest_contiguous_seq") or 0)
 
-    def record_event_seq(self, attempt_id: str, seq: int, conn: Any) -> None:
-        """Track one Attempt's event continuity and fence gaps."""
-        from pbl4.management_backend.repositories import event_repository
+    def record_event_seq(
+        self,
+        attempt_id: str,
+        seq: int,
+        conn: Any,
+        current_payload: dict[str, Any] | None = None,
+    ) -> None:
+        """Track event continuity.
+
+        Over TCP, packets arrive strictly in-order. If seq > expected, Runtime's
+        bounded memory queue overflowed and dropped events. Reconcile immediately
+        from Authoritative Snapshot rather than waiting for missing events.
+        """
         from pbl4.management_backend.websocket import hub
 
         cursor = self.get_cursor(attempt_id)
@@ -149,7 +159,8 @@ class RuntimeGateway:
 
         if seq > expected:
             logger.warning(
-                "Event gap detected for attempt %s: expected %s, received %s (fencing projection)",
+                "Event gap detected for attempt %s: expected %s, received %s "
+                "(Runtime dropped events, reconciling via snapshot)",
                 attempt_id,
                 expected,
                 seq,
@@ -173,21 +184,17 @@ class RuntimeGateway:
                     },
                 },
             )
-        elif seq == expected:
-            # Persisted events are not applied until their projection commits.  The
-            # arriving event and any buffered successors use the same path, so a
-            # duplicate delivery can retry a previously failed projection.
-            while True:
-                next_seq = expected
-                if next_seq > cursor.max_seen_seq:
-                    break
-                try:
-                    next_ev = event_repository.get_event_by_seq(conn, attempt_id, next_seq)
-                except Exception as read_err:
-                    logger.warning("Failed to read event %s for projection: %s", next_seq, read_err)
-                    if self._redis_events:
-                        raise
-                    break
+            snapshot = self._port.request_state()
+            if snapshot and snapshot.get("active_attempt_id") == attempt_id:
+                self.handle_state_snapshot(snapshot)
+            return
+
+        if seq == expected:
+            payload = current_payload
+            if payload is None:
+                from pbl4.management_backend.repositories import event_repository
+
+                next_ev = event_repository.get_event_by_seq(conn, attempt_id, seq)
                 if next_ev is not None:
                     details = next_ev.get("payload_jsonb")
                     if isinstance(details, str):
@@ -199,52 +206,39 @@ class RuntimeGateway:
                         details = {}
 
                     occurred_at_val = next_ev.get("occurred_at")
-                    if isinstance(occurred_at_val, datetime):
-                        occurred_at_str = occurred_at_val.isoformat()
-                    else:
-                        occurred_at_str = str(occurred_at_val or datetime.now(UTC).isoformat())
+                    occurred_at_str = (
+                        occurred_at_val.isoformat()
+                        if isinstance(occurred_at_val, datetime)
+                        else str(occurred_at_val or datetime.now(UTC).isoformat())
+                    )
 
-                    next_payload = {
+                    payload = {
                         "attempt_id": attempt_id,
-                        "runtime_event_seq": next_seq,
+                        "runtime_event_seq": seq,
                         "event_type": next_ev.get("event_type"),
                         "severity": next_ev.get("severity", "INFO"),
                         "occurred_at": occurred_at_str,
                         "source_component": next_ev.get("source_component", "Runtime"),
                         "details": details,
                     }
-                    try:
-                        self._project_runtime_event(conn, next_payload)
-                        if self._redis_events:
-                            from pbl4.management_backend.repositories import attempt_repository
 
-                            attempt_repository.record_event_projection_cursor(
-                                conn, attempt_id, next_seq
-                            )
-                        conn.commit()
-                    except Exception as proj_err:
-                        logger.warning("Failed to project drained event %s: %s", next_seq, proj_err)
-                        conn.rollback()
-                        if self._redis_events:
-                            raise
-                        break
-                    cursor.highest_contiguous_seq = next_seq
-                    expected = next_seq + 1
-                    self._broadcast_projected_event(next_payload)
-                else:
-                    break
+            if payload is not None:
+                try:
+                    self._project_runtime_event(conn, payload)
+                    if self._redis_events:
+                        from pbl4.management_backend.repositories import attempt_repository
 
-            if (
-                cursor.highest_contiguous_seq is not None
-                and cursor.highest_contiguous_seq >= cursor.max_seen_seq
-            ):
-                if cursor.gap_fenced:
-                    logger.info(
-                        "Event gap closed for attempt %s; contiguous cursor at %s",
-                        attempt_id,
-                        cursor.highest_contiguous_seq,
-                    )
+                        attempt_repository.record_event_projection_cursor(conn, attempt_id, seq)
+                    conn.commit()
+                except Exception as proj_err:
+                    logger.warning("Failed to project event %s: %s", seq, proj_err)
+                    conn.rollback()
+                    if self._redis_events:
+                        raise
+                    return
+                cursor.highest_contiguous_seq = seq
                 cursor.gap_fenced = False
+                self._broadcast_projected_event(payload)
 
     def _empty_snapshot(self) -> dict[str, Any]:
         return {
@@ -447,7 +441,10 @@ class RuntimeGateway:
             self.handle_command_result(payload)
         elif msg_type == "RUNTIME_EVENT":
             if not self._redis_events:
-                self.handle_runtime_event(payload)
+                if self.event_consumer is not None and hasattr(self.event_consumer, "enqueue"):
+                    self.event_consumer.enqueue(payload)
+                else:
+                    self.handle_runtime_event(payload)
         elif msg_type == "DISCONNECTED":
             self.on_disconnect()
         else:
@@ -846,7 +843,7 @@ class RuntimeGateway:
             return 0
         with self._projection_lock:
             payloads = [RuntimeEvent.from_dict(payload).to_dict() for payload in payloads]
-            if not self._redis_events or self._needs_event_snapshot(payloads[0]):
+            if self._needs_event_snapshot(payloads[0]):
                 self._handle_runtime_event(payloads[0])
                 return 1
 
@@ -896,7 +893,10 @@ class RuntimeGateway:
                 for payload in projected:
                     self._broadcast_projected_event(payload)
                 if not processed:
-                    self._ingest_stream_event(payloads[0])
+                    if self._redis_events:
+                        self._ingest_stream_event(payloads[0])
+                    else:
+                        self._handle_runtime_event(payloads[0])
                     return 1
                 return processed
             except Exception:
@@ -1060,7 +1060,7 @@ class RuntimeGateway:
                 self._redis_events or ingest_result.inserted or is_contiguous
             ):
                 with db.get_connection() as conn:
-                    self.record_event_seq(attempt_id, seq, conn)
+                    self.record_event_seq(attempt_id, seq, conn, current_payload=payload)
             if (ingest_result.inserted or self._redis_events) and (
                 (
                     event_type == "attempt.state_changed"
@@ -1252,26 +1252,27 @@ class RuntimeGateway:
                 started_at=datetime.fromisoformat(
                     details.get("started_at", payload["occurred_at"])
                 ),
+                state="COLLECTING_GRADIENTS",
             )
-            step_repository.update_step(conn, attempt_id, step_id, state="COLLECTING_GRADIENTS")
             return
         if event_type == "model.updated":
             step_id = int(details["step_id"])
-            for item in details.get("contributions", []):
-                sample_count = int(item["sample_count"])
-                step_repository.upsert_worker_step(
-                    conn,
-                    attempt_id=attempt_id,
-                    step_id=step_id,
-                    worker_id=int(item["worker_id"]),
-                    session_id=int(item["session_id"]),
-                    shard_id=int(item["shard_id"]),
-                    batch_id=int(item["batch_id"]),
-                    sample_count=sample_count,
-                    loss=item.get("loss"),
-                    accuracy=None,
-                    compute_ms=float(item.get("compute_ms", 0.0)),
-                )
+            contributions = [
+                {
+                    "attempt_id": attempt_id,
+                    "step_id": step_id,
+                    "worker_id": int(item["worker_id"]),
+                    "session_id": int(item["session_id"]),
+                    "shard_id": int(item["shard_id"]),
+                    "batch_id": int(item["batch_id"]),
+                    "sample_count": int(item["sample_count"]),
+                    "loss": item.get("loss"),
+                    "accuracy": None,
+                    "compute_ms": float(item.get("compute_ms", 0.0)),
+                }
+                for item in details.get("contributions", [])
+            ]
+            step_repository.upsert_worker_steps_batch(conn, contributions)
             step_repository.update_step(
                 conn,
                 attempt_id,
