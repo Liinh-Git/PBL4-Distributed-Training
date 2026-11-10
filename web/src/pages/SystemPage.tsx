@@ -28,6 +28,7 @@ export const SystemPage: React.FC = () => {
 
   // System API states
   const [healthData, setHealthData] = useState<HealthData | null>(null);
+  const [healthError, setHealthError] = useState(false);
   const [capabilitiesData, setCapabilitiesData] = useState<CapabilitiesData | null>(null);
   const [apiEvents, setApiEvents] = useState<EventListItemData[]>([]);
   const [liveWorkers, setLiveWorkers] = useState<WorkerSessionItemData[]>([]);
@@ -54,6 +55,9 @@ export const SystemPage: React.FC = () => {
 
       if (healthRes.status === 'fulfilled') {
         setHealthData(healthRes.value.data);
+        setHealthError(false);
+      } else {
+        setHealthError(true);
       }
       if (capRes.status === 'fulfilled') {
         setCapabilitiesData(capRes.value.data);
@@ -83,10 +87,11 @@ export const SystemPage: React.FC = () => {
     fetchSystemData();
   }, []);
 
-  const isHealthy = deriveHealthState(healthData, { isRuntimeStale }) === 'healthy';
+  const isHealthy = !healthError && deriveHealthState(healthData, { isRuntimeStale }) === 'healthy';
 
   // Map dependencies from real Health API fields
   const coreServices = useMemo(() => {
+    const lastSeen = healthData?.timestamp ? formatDateTime(healthData.timestamp) : '—';
     const backendStatus = mapSubsystemStatus(healthData?.backend);
     const postgresStatus = mapSubsystemStatus(healthData?.postgres);
     const runtimeStatus = isRuntimeStale ? 'DEGRADED' : mapSubsystemStatus(healthData?.runtime_mcp);
@@ -97,7 +102,7 @@ export const SystemPage: React.FC = () => {
         id: 'backend',
         name: 'Backend API',
         status: backendStatus,
-        lastSeen: 'Vừa xong',
+        lastSeen,
         latency: 'Chưa có dữ liệu',
         protocol: 'HTTP REST',
       },
@@ -105,7 +110,7 @@ export const SystemPage: React.FC = () => {
         id: 'runtime',
         name: 'Coordinator Runtime',
         status: runtimeStatus,
-        lastSeen: isRuntimeStale ? 'Mất tín hiệu' : 'Vừa xong',
+        lastSeen,
         latency: 'Chưa có dữ liệu',
         protocol: 'MCP/1',
       },
@@ -113,7 +118,7 @@ export const SystemPage: React.FC = () => {
         id: 'database',
         name: 'Cơ sở dữ liệu PostgreSQL',
         status: postgresStatus,
-        lastSeen: 'Vừa xong',
+        lastSeen,
         latency: 'Chưa có dữ liệu',
         protocol: 'PostgreSQL',
       },
@@ -121,7 +126,7 @@ export const SystemPage: React.FC = () => {
         id: 'dataset_mgr',
         name: 'Quản lý tập dữ liệu (Dataset Manager)',
         status: dmStatus,
-        lastSeen: 'Vừa xong',
+        lastSeen,
         latency: 'Chưa có dữ liệu',
         protocol: 'HTTP Service',
       },
@@ -217,6 +222,11 @@ export const SystemPage: React.FC = () => {
             {error && (
               <span className="text-[11px] text-rose-400 font-mono">
                 ({error})
+              </span>
+            )}
+            {healthError && (
+              <span role="alert" className="text-[11px] text-amber-400">
+                Không lấy được trạng thái dịch vụ. Nhấn làm mới để thử lại.
               </span>
             )}
           </div>
@@ -340,7 +350,7 @@ export const SystemPage: React.FC = () => {
                         {svc.name}
                       </td>
                       <td className="py-2.5 px-3">
-                        <SubsystemHealthBadge status={svc.status} />
+                        <SubsystemHealthBadge status={!healthData || healthError ? null : svc.status} />
                       </td>
                       <td className="py-2.5 px-3.5 text-right text-[#a1a1a8]">
                         {svc.lastSeen}
