@@ -41,10 +41,18 @@ def environment() -> dict[str, str]:
     return env
 
 
+def get_state_dir(env: dict[str, str]) -> Path:
+    raw = env.get("PBL4_STATE_DIR") or (env.get("HOME") if env.get("HOME") in (".var", "var") else None)
+    if raw:
+        p = Path(raw)
+        return p if p.is_absolute() else (ROOT / p).resolve()
+    return (ROOT / "var").resolve()
+
+
 def prepare_manifests(env: dict[str, str]) -> Path:
     from pbl4.common.model_profiles import MODEL_PROFILES
 
-    directory = Path(env.get("PBL4_STATE_DIR", str(ROOT / "var"))) / "manifests"
+    directory = get_state_dir(env) / "manifests"
     for model_id in MODEL_PROFILES:
         path = directory / f"{model_id}.json"
         # Derive from installed model definitions so stale manifests cannot survive an update.
@@ -77,12 +85,16 @@ def command(service: str, env: dict[str, str], manifests: Path, extra: list[str]
             cmd.extend(["--port", env.get("RUNTIME_PORT", "9000")])
         if not any(arg == "--management-port" or arg.startswith("--management-port=") for arg in extra):
             cmd.extend(["--management-port", env.get("RUNTIME_MANAGEMENT_PORT", "9001")])
+        if not any(arg == "--log-level" or arg.startswith("--log-level=") for arg in extra):
+            log_level = env.get("LOG_LEVEL")
+            if log_level:
+                cmd.extend(["--log-level", log_level])
         cmd.extend(
             [
                 "--dataset-manager-url",
-                env["DATASET_MANAGER_URL"],
+                env.get("DATASET_MANAGER_URL", "http://127.0.0.1:9200"),
                 "--checkpoint-dir",
-                str(Path(env.get("PBL4_STATE_DIR", str(ROOT / "var"))) / "checkpoints"),
+                str(get_state_dir(env) / "checkpoints"),
                 "--manifest-dir",
                 str(manifests),
                 *extra,
@@ -97,16 +109,27 @@ def command(service: str, env: dict[str, str], manifests: Path, extra: list[str]
         port = env.get("BACKEND_PORT")
         if port and not any(arg == "--port" or arg.startswith("--port=") for arg in extra):
             cmd.extend(["--port", str(port)])
+        if not any(arg == "--log-level" or arg.startswith("--log-level=") for arg in extra):
+            log_level = env.get("LOG_LEVEL")
+            if log_level:
+                cmd.extend(["--log-level", log_level])
         cmd.extend(extra)
         return cmd
     if service == "agent":
         cmd = [sys.executable, "-m", "pbl4.node_agent.entrypoint", "start"]
         if not any(arg == "--backend-url" or arg.startswith("--backend-url=") for arg in extra):
-            backend_host = env.get("BACKEND_HOST", "127.0.0.1")
-            if backend_host in ("0.0.0.0", "::"):
-                backend_host = env.get("RUNTIME_ADVERTISED_HOST") or "127.0.0.1"
-            backend_port = env.get("BACKEND_PORT", "8000")
-            cmd.extend(["--backend-url", f"http://{backend_host}:{backend_port}"])
+            # 1. Ưu tiên cao nhất từ .env: Biến URL chuyên dụng của Node Agent
+            if explicit_url := env.get("PBL4_BACKEND_URL"):
+                cmd.extend(["--backend-url", explicit_url])
+            else:
+                # 2. Nếu không có, tìm host của Backend: ưu tiên BACKEND_ADVERTISED_HOST
+                backend_port = env.get("BACKEND_PORT", "8000")
+                backend_host = env.get("BACKEND_HOST", "127.0.0.1")
+                if backend_host in ("0.0.0.0", "::"):
+                    backend_host = env.get("BACKEND_ADVERTISED_HOST") or env.get("RUNTIME_ADVERTISED_HOST") or "127.0.0.1"
+                else:
+                    backend_host = env.get("BACKEND_ADVERTISED_HOST") or backend_host
+                cmd.extend(["--backend-url", f"http://{backend_host}:{backend_port}"])
         cmd.extend(extra)
         return cmd
     raise ValueError(f"Unknown service: {service}")
@@ -175,7 +198,8 @@ def main(service: str = "all") -> None:
 
     backend_host = env.get("BACKEND_HOST", "127.0.0.1")
     public_backend_host = (
-        env.get("RUNTIME_ADVERTISED_HOST")
+        env.get("BACKEND_ADVERTISED_HOST")
+        or env.get("RUNTIME_ADVERTISED_HOST")
         or (backend_host if backend_host not in ("0.0.0.0", "::") else "127.0.0.1")
     )
     backend_origin = f"http://{public_backend_host}:{backend_port}"
@@ -199,7 +223,7 @@ def main(service: str = "all") -> None:
     env["CORS_ORIGINS"] = json.dumps(sorted(cors_origins))
 
     manifests = prepare_manifests(env)
-    state_root = Path(env.get("PBL4_STATE_DIR", str(ROOT / "var"))).resolve()
+    state_root = get_state_dir(env)
     logs = state_root / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     children: list[subprocess.Popen] = []
