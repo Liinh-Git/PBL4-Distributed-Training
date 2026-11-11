@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 
 
 def main() -> None:
@@ -44,6 +45,12 @@ def main() -> None:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--model-id", default=None)
     parser.add_argument("--heartbeat-interval", type=float, default=5.0)
+    parser.add_argument(
+        "--connect-timeout-seconds",
+        type=float,
+        default=60.0,
+        help="Maximum seconds to retry DTP connection before terminating.",
+    )
     parser.add_argument("--attempt-id", default=None, help="Managed execution attempt ID.")
     parser.add_argument("--allocation-id", default=None, help="Managed worker allocation ID.")
     parser.add_argument("--node-id", default=None, help="Managed node ID.")
@@ -51,8 +58,6 @@ def main() -> None:
     args = parser.parse_args()
     if args.runtime_port is None:
         parser.error("--runtime-port is required")
-
-    import os
 
     join_token = os.getenv("PBL4_WORKER_JOIN_TOKEN")
     if join_token and not args.model_id:
@@ -80,6 +85,7 @@ def main() -> None:
             runtime_port=args.runtime_port,
             cache_dir=args.cache_dir,
             heartbeat_interval_seconds=args.heartbeat_interval,
+            connect_timeout_seconds=args.connect_timeout_seconds,
             log_level=args.log_level,
             attempt_id=args.attempt_id,
             allocation_id=args.allocation_id,
@@ -90,7 +96,7 @@ def main() -> None:
         model_id=args.model_id,
         device=args.device,
     )
-    raise SystemExit(0 if process.run() else 1)
+    raise SystemExit(0 if process.run() else (1 if process.retryable_failure else 2))
 
 
 if __name__ == "__main__":

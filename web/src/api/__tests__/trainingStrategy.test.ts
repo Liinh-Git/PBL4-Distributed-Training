@@ -7,6 +7,7 @@ import { TrainingStrategySettings } from '../../components/training/TrainingStra
 import { AsyncProgressPanel } from '../../components/training/AsyncProgressPanel';
 
 test('switching modes never leaks hidden settings into a training contract', () => {
+  assert.equal(defaultAsyncSettings.reconnect_grace_seconds, 60);
   const async = trainingStrategyFields('async_sgd', 'dbs', 9, defaultAsyncSettings);
   assert.equal(async.workload_policy, 'equal');
   assert.equal('work_units_per_step' in async, false);

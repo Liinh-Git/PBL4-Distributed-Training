@@ -184,7 +184,12 @@ def cmd_start(args: argparse.Namespace) -> int:
         )
 
         logger.info("Initializing WorkerProcessSupervisor for node_id='%s'...", identity.node_id)
-        supervisor = WorkerProcessSupervisor(var_dir=config.var_dir, node_id=identity.node_id)
+        supervisor = WorkerProcessSupervisor(
+            var_dir=config.var_dir,
+            node_id=identity.node_id,
+            max_crash_retries=config.max_worker_crash_retries,
+            crash_retry_delay_seconds=config.crash_retry_delay_seconds,
+        )
 
         # Reconcile surviving workers on startup
         reconciled = supervisor.reconcile_on_startup()

@@ -381,6 +381,134 @@ class TestWorkerProcessSupervisor(unittest.TestCase):
             self.assertIsNone(rec1_after.exit_code)
             self.assertIsNone(rec2_after.exit_code)
 
+    @patch("psutil.Process")
+    @patch("subprocess.Popen")
+    def test_15_crash_auto_respawn_with_backoff_and_budget(
+        self, mock_popen: MagicMock, mock_psutil_proc: MagicMock
+    ) -> None:
+        """Unexpected crash respawns up to max_crash_retries with exponential backoff."""
+        mock_psutil_proc.return_value.create_time.return_value = 1000.0
+        procs = []
+        for pid in (7001, 7002, 7003):
+            p = MagicMock()
+            p.pid = pid
+            p.poll.return_value = None
+            procs.append(p)
+        mock_popen.side_effect = procs
+
+        supervisor = WorkerProcessSupervisor(
+            self.var_dir,
+            node_id="node-retry",
+            max_crash_retries=2,
+            crash_retry_delay_seconds=2.0,
+        )
+        cmd = _make_start_command("alloc-respawn")
+        status, err = supervisor.spawn_worker(cmd)
+        self.assertEqual((status, err), (COMMAND_STATUS_ACCEPTED, None))
+        self.assertEqual(supervisor.get_record("alloc-respawn").pid, 7001)
+
+        # First crash (ret=1): enters backoff (delay=2s), stays RUNNING
+        procs[0].poll.return_value = 1
+        with patch("pbl4.node_agent.supervisor.time.monotonic", side_effect=[100.0, 101.5, 102.1]):
+            supervisor.poll()
+            rec = supervisor.get_record("alloc-respawn")
+            self.assertEqual(rec.local_state, LOCAL_STATE_RUNNING)
+            self.assertEqual(rec.crash_count, 1)
+            self.assertEqual(mock_popen.call_count, 1)
+
+            # Before 2.0s deadline: no respawn yet
+            supervisor.poll()
+            self.assertEqual(mock_popen.call_count, 1)
+
+            # After 2.0s deadline: respawns second process
+            supervisor.poll()
+            rec = supervisor.get_record("alloc-respawn")
+            self.assertEqual(rec.local_state, LOCAL_STATE_RUNNING)
+            self.assertEqual(rec.pid, 7002)
+            self.assertIsNone(rec.exit_code)
+            self.assertEqual(mock_popen.call_count, 2)
+
+        # Second crash (ret=137): enters backoff (delay=4s)
+        procs[1].poll.return_value = 137
+        with patch("pbl4.node_agent.supervisor.time.monotonic", side_effect=[200.0, 203.0, 204.1]):
+            supervisor.poll()
+            self.assertEqual(supervisor.get_record("alloc-respawn").crash_count, 2)
+            supervisor.poll()
+            self.assertEqual(mock_popen.call_count, 2)
+            supervisor.poll()
+            self.assertEqual(mock_popen.call_count, 3)
+            self.assertEqual(supervisor.get_record("alloc-respawn").pid, 7003)
+
+        # Third crash exhausts budget -> transitions to FAILED
+        procs[2].poll.return_value = 1
+        supervisor.poll()
+        rec_final = supervisor.get_record("alloc-respawn")
+        self.assertEqual(rec_final.local_state, LOCAL_STATE_FAILED)
+        self.assertEqual(rec_final.exit_code, 1)
+        self.assertEqual(rec_final.crash_count, 2)
+        self.assertEqual(mock_popen.call_count, 3)
+
+    @patch("psutil.Process")
+    @patch("subprocess.Popen")
+    def test_16_non_retryable_exit_code_2_fails_immediately(
+        self, mock_popen: MagicMock, mock_psutil_proc: MagicMock
+    ) -> None:
+        """Exit code 2 marks allocation FAILED immediately without respawning."""
+        mock_psutil_proc.return_value.create_time.return_value = 1000.0
+        fake_proc = MagicMock()
+        fake_proc.pid = 7100
+        fake_proc.poll.return_value = 2
+        mock_popen.return_value = fake_proc
+
+        supervisor = WorkerProcessSupervisor(
+            self.var_dir,
+            node_id="node-nonretry",
+            max_crash_retries=3,
+            crash_retry_delay_seconds=0.0,
+        )
+        supervisor.spawn_worker(_make_start_command("alloc-fatal"))
+        supervisor.poll()
+
+        rec = supervisor.get_record("alloc-fatal")
+        self.assertEqual(rec.local_state, LOCAL_STATE_FAILED)
+        self.assertEqual(rec.exit_code, 2)
+        self.assertEqual(rec.crash_count, 0)
+        self.assertEqual(mock_popen.call_count, 1)
+
+    @patch("psutil.Process")
+    @patch("subprocess.Popen")
+    def test_17_stop_worker_during_crash_backoff_cancels_respawn(
+        self, mock_popen: MagicMock, mock_psutil_proc: MagicMock
+    ) -> None:
+        """STOP_WORKER during crash retry backoff transitions cleanly to STOPPED."""
+        mock_psutil_proc.return_value.create_time.return_value = 1000.0
+        fake_proc = MagicMock()
+        fake_proc.pid = 7200
+        fake_proc.poll.return_value = 1
+        mock_popen.return_value = fake_proc
+
+        supervisor = WorkerProcessSupervisor(
+            self.var_dir,
+            node_id="node-stop-backoff",
+            max_crash_retries=3,
+            crash_retry_delay_seconds=10.0,
+        )
+        supervisor.spawn_worker(_make_start_command("alloc-backoff-stop"))
+        supervisor.poll()
+        self.assertEqual(
+            supervisor.get_record("alloc-backoff-stop").local_state, LOCAL_STATE_RUNNING
+        )
+
+        status, err = supervisor.stop_worker("alloc-backoff-stop")
+        self.assertEqual((status, err), (COMMAND_STATUS_ACCEPTED, None))
+        self.assertEqual(
+            supervisor.get_record("alloc-backoff-stop").local_state, LOCAL_STATE_STOPPED
+        )
+
+        # Further polling does not respawn
+        supervisor.poll()
+        self.assertEqual(mock_popen.call_count, 1)
+
 
 class TestRealProcessSupervisorIntegration(unittest.TestCase):
     """End-to-end unit test spawning a real Python subprocess and testing supervisor control."""

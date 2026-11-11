@@ -10,6 +10,7 @@ class WorkerConfig:
     runtime_port: int = 9000
     cache_dir: str = "var/worker-cache"
     heartbeat_interval_seconds: float = 5.0
+    connect_timeout_seconds: float = 60.0
     log_level: str = "INFO"
     attempt_id: str | None = None
     allocation_id: str | None = None
@@ -23,6 +24,8 @@ class WorkerConfig:
             or not 0 < self.runtime_port < 65536
             or not self.cache_dir
             or self.heartbeat_interval_seconds <= 0
+            or isinstance(self.connect_timeout_seconds, bool)
+            or self.connect_timeout_seconds <= 0
         ):
             raise ValueError("Invalid Worker configuration")
 

@@ -462,7 +462,9 @@ def test_async_resolution_and_strict_settings_preserve_sync_shape():
         asynchronous = {**requested, "training_strategy": "async_sgd"}
         resolved = resolve(MagicMock(), asynchronous)
         assert resolved["checkpoint_policy"]["schema_version"] == 2
-        assert ResolvedContractV1.model_validate(resolved).async_training.staleness_threshold == 6
+        parsed_async = ResolvedContractV1.model_validate(resolved).async_training
+        assert parsed_async.staleness_threshold == 6
+        assert parsed_async.reconnect_grace_seconds == 60
         assert hash_contract(resolved) != hash_contract(sync)
         for bad in (
             {"workload_policy": "dbs"},

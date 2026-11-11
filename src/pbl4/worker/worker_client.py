@@ -197,12 +197,12 @@ class WorkerClient:
         )
 
     def send_shard_ready(self, ready: ShardReady) -> None:
-        self._send_control(ready)
         self._validator.set_phase(ConnectionPhase.SHARD_READY)
+        self._send_control(ready)
 
     def send_model_manifest(self) -> None:
-        self._send_control(ModelManifest.from_dict(self.manifest.to_dict()))
         self._validator.set_phase(ConnectionPhase.INITIALIZING)
+        self._send_control(ModelManifest.from_dict(self.manifest.to_dict()))
 
     def send_model_init(self, data: bytes, *, initialization_seed: int, tensor_id: int = 0) -> None:
         session_id, worker_id = self._identity()
@@ -253,7 +253,6 @@ class WorkerClient:
                 }
             )
         )
-        self._validator.set_phase(ConnectionPhase.READY)
 
     def send_gradient(
         self,
@@ -332,7 +331,6 @@ class WorkerClient:
             ),
             operation_id=operation_id,
         )
-        self._validator.set_phase(ConnectionPhase.WAITING_NEXT)
 
     def send_error(self, error: Error, *, operation_id: int = NO_OPERATION) -> None:
         self._send_control(error, operation_id=operation_id)

@@ -20,6 +20,8 @@ class NodeAgentConfig:
     telemetry_interval_seconds: float = 10.0
     reconnect_min_seconds: float = 1.0
     reconnect_max_seconds: float = 30.0
+    max_worker_crash_retries: int = 3
+    crash_retry_delay_seconds: float = 2.0
     log_level: str = "INFO"
 
     def __post_init__(self) -> None:
@@ -28,25 +30,41 @@ class NodeAgentConfig:
         if not isinstance(self.var_dir, str) or not self.var_dir.strip():
             raise ValueError("var_dir must be a non-empty string")
         if (
-            not isinstance(self.heartbeat_interval_seconds, (int, float))
+            isinstance(self.heartbeat_interval_seconds, bool)
+            or not isinstance(self.heartbeat_interval_seconds, (int, float))
             or self.heartbeat_interval_seconds <= 0
         ):
             raise ValueError("heartbeat_interval_seconds must be a positive number")
         if (
-            not isinstance(self.telemetry_interval_seconds, (int, float))
+            isinstance(self.telemetry_interval_seconds, bool)
+            or not isinstance(self.telemetry_interval_seconds, (int, float))
             or self.telemetry_interval_seconds <= 0
         ):
             raise ValueError("telemetry_interval_seconds must be a positive number")
         if (
-            not isinstance(self.reconnect_min_seconds, (int, float))
+            isinstance(self.reconnect_min_seconds, bool)
+            or not isinstance(self.reconnect_min_seconds, (int, float))
             or self.reconnect_min_seconds <= 0
         ):
             raise ValueError("reconnect_min_seconds must be a positive number")
         if (
-            not isinstance(self.reconnect_max_seconds, (int, float))
+            isinstance(self.reconnect_max_seconds, bool)
+            or not isinstance(self.reconnect_max_seconds, (int, float))
             or self.reconnect_max_seconds < self.reconnect_min_seconds
         ):
             raise ValueError("reconnect_max_seconds must be >= reconnect_min_seconds")
+        if (
+            isinstance(self.max_worker_crash_retries, bool)
+            or not isinstance(self.max_worker_crash_retries, int)
+            or self.max_worker_crash_retries < 0
+        ):
+            raise ValueError("max_worker_crash_retries must be a non-negative integer")
+        if (
+            isinstance(self.crash_retry_delay_seconds, bool)
+            or not isinstance(self.crash_retry_delay_seconds, (int, float))
+            or self.crash_retry_delay_seconds < 0
+        ):
+            raise ValueError("crash_retry_delay_seconds must be a non-negative number")
         if self.log_level.upper() not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             raise ValueError(f"Invalid log_level: {self.log_level}")
 
@@ -69,6 +87,16 @@ class NodeAgentConfig:
         reconnect_max = overrides.get("reconnect_max_seconds") or float(
             os.getenv("PBL4_RECONNECT_MAX_SECONDS", "30.0")
         )
+        max_retries_raw = overrides.get("max_worker_crash_retries")
+        retry_delay_raw = overrides.get("crash_retry_delay_seconds")
+        if isinstance(max_retries_raw, bool) or (
+            max_retries_raw is not None and not isinstance(max_retries_raw, int)
+        ):
+            raise ValueError("max_worker_crash_retries must be a non-negative integer")
+        if isinstance(retry_delay_raw, bool) or (
+            retry_delay_raw is not None and not isinstance(retry_delay_raw, (int, float))
+        ):
+            raise ValueError("crash_retry_delay_seconds must be a non-negative number")
         log_level = overrides.get("log_level") or os.getenv("PBL4_LOG_LEVEL", "INFO")
 
         return cls(
@@ -78,5 +106,11 @@ class NodeAgentConfig:
             telemetry_interval_seconds=float(telemetry_interval),
             reconnect_min_seconds=float(reconnect_min),
             reconnect_max_seconds=float(reconnect_max),
+            max_worker_crash_retries=(
+                3 if max_retries_raw is None else max_retries_raw
+            ),
+            crash_retry_delay_seconds=(
+                2.0 if retry_delay_raw is None else float(retry_delay_raw)
+            ),
             log_level=str(log_level),
         )
