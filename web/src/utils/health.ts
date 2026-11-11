@@ -1,4 +1,5 @@
 import { HealthData } from '../types/api';
+import type { SubsystemStatus } from '../types';
 
 export type OverallHealthState = 'healthy' | 'degraded' | 'down';
 
@@ -51,11 +52,11 @@ export function deriveHealthState(
 export function mapSubsystemStatus(
   status: string | undefined,
   isStale: boolean = false
-): 'HEALTHY' | 'DEGRADED' | 'DOWN' {
+): SubsystemStatus {
   if (isStale) return 'DEGRADED';
-  if (!status) return 'DOWN';
+  if (!status) return 'DISCONNECTED';
   const s = status.toLowerCase();
   if (s === 'healthy' || s === 'connected' || s === 'ok') return 'HEALTHY';
   if (s === 'degraded' || s === 'disconnected' || s === 'unknown') return 'DEGRADED';
-  return 'DOWN';
+  return 'DISCONNECTED';
 }

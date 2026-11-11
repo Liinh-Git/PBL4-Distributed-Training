@@ -28,6 +28,7 @@ class McpEventConsumer:
         self._max_wait = max_wait
         self._stopping = threading.Event()
         self._thread = threading.Thread(target=self._run, name="mcp-events", daemon=True)
+        self.degraded = False
 
     def enqueue(self, payload: dict[str, Any]) -> None:
         """Non-blocking enqueue from MCP dispatch thread."""
@@ -67,17 +68,26 @@ class McpEventConsumer:
                         break
                     batch.append(item)
                     # Immediate flush on lifecycle state changes
-                    if (
-                        item.get("event_type") == "attempt.state_changed"
-                        and item.get("details", {}).get("state")
-                        in {"RUNNING", "COMPLETED", "FAILED", "ABORTED"}
-                    ):
+                    if item.get("event_type") == "attempt.state_changed" and item.get(
+                        "details", {}
+                    ).get("state") in {"RUNNING", "COMPLETED", "FAILED", "ABORTED"}:
                         break
                 except queue.Empty:
                     break
 
             if batch:
                 try:
-                    self._ingest(batch)
+                    offset = 0
+                    while offset < len(batch) and not self._stopping.is_set():
+                        # Ingestion commits only a prefix when it reaches a
+                        # lifecycle/snapshot fence or a sequence gap. Preserve
+                        # and process the suffix before taking newer events.
+                        count = self._ingest(batch[offset:])
+                        if not 0 < count <= len(batch) - offset:
+                            raise ValueError("Event ingestion must commit a nonempty prefix")
+                        offset += count
+                    if offset == len(batch):
+                        self.degraded = False
                 except Exception as exc:
+                    self.degraded = True
                     logger.error("Error ingesting MCP in-memory event batch: %s", exc)

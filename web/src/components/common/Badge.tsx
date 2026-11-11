@@ -320,7 +320,7 @@ export const StepStateBadge: React.FC<{ state: StepState }> = ({ state }) => {
   }
 };
 
-export const SubsystemHealthBadge: React.FC<{ status: SubsystemStatus }> = ({ status }) => {
+export const SubsystemHealthBadge: React.FC<{ status: SubsystemStatus | null }> = ({ status }) => {
   switch (status) {
     case 'HEALTHY':
       return (
@@ -343,6 +343,8 @@ export const SubsystemHealthBadge: React.FC<{ status: SubsystemStatus }> = ({ st
           Disconnected
         </Badge>
       );
+    default:
+      return <Badge variant="neutral">Chưa xác định</Badge>;
   }
 };
 
