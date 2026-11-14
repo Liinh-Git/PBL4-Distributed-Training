@@ -39,6 +39,8 @@ from pbl4.agent_protocol.messages import (
 
 logger = logging.getLogger(__name__)
 
+NON_RETRYABLE_WORKER_EXIT_CODE = 2
+
 LOCAL_STATE_STARTING = "STARTING"
 LOCAL_STATE_RUNNING = "RUNNING"
 LOCAL_STATE_STOPPED = "STOPPED"
@@ -70,6 +72,7 @@ class LocalAllocationRecord:
     pid: int | None = None
     create_time: float | None = None
     exit_code: int | None = None
+    crash_count: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.allocation_id, str) or not self.allocation_id:
@@ -107,6 +110,7 @@ class LocalAllocationRecord:
             "pid": self.pid,
             "create_time": self.create_time,
             "exit_code": self.exit_code,
+            "crash_count": self.crash_count,
         }
 
     @classmethod
@@ -121,20 +125,36 @@ class LocalAllocationRecord:
             pid=data.get("pid"),
             create_time=float(data["create_time"]) if data.get("create_time") is not None else None,
             exit_code=data.get("exit_code"),
+            crash_count=int(data.get("crash_count", 0)),
         )
 
 
 class WorkerProcessSupervisor:
     """Supervises Worker OS processes launched locally on this Node."""
 
-    def __init__(self, var_dir: str | Path, *, node_id: str = "node-default") -> None:
+    def __init__(
+        self,
+        var_dir: str | Path,
+        *,
+        node_id: str = "node-default",
+        max_crash_retries: int = 0,
+        crash_retry_delay_seconds: float = 2.0,
+    ) -> None:
+        if isinstance(max_crash_retries, bool) or max_crash_retries < 0:
+            raise ValueError("max_crash_retries must be a non-negative integer")
+        if isinstance(crash_retry_delay_seconds, bool) or crash_retry_delay_seconds < 0:
+            raise ValueError("crash_retry_delay_seconds must be a non-negative number")
         self.var_dir = Path(var_dir)
         self.var_dir.mkdir(parents=True, exist_ok=True)
         self.node_id = node_id
+        self._max_crash_retries = int(max_crash_retries)
+        self._crash_retry_delay_seconds = float(crash_retry_delay_seconds)
         self._records_file = self.var_dir / "allocations.json"
         self._lock = threading.Lock()
         self._records: dict[str, LocalAllocationRecord] = {}
         self._subprocesses: dict[str, subprocess.Popen[Any]] = {}
+        self._commands: dict[str, StartWorkerPayload] = {}
+        self._retry_after: dict[str, float] = {}
 
         self._load_records()
 
@@ -224,6 +244,59 @@ class WorkerProcessSupervisor:
             self._save_records()
             return list(self._records.values())
 
+    def _launch_worker_subprocess(
+        self, command: StartWorkerPayload, record: LocalAllocationRecord
+    ) -> subprocess.Popen[Any]:
+        cmd_args = [
+            sys.executable,
+            "-m",
+            "pbl4.worker.entrypoint",
+            "--runtime-host",
+            command.runtime_host,
+            "--runtime-port",
+            str(command.runtime_port),
+            "--attempt-id",
+            command.attempt_id,
+            "--allocation-id",
+            command.allocation_id,
+            "--node-id",
+            self.node_id,
+            "--device",
+            command.device,
+            "--initialization-seed",
+            str(command.initialization_seed),
+            "--model-id",
+            command.model_id,
+            "--cache-dir",
+            str(self.var_dir / "worker-cache"),
+        ]
+
+        env = os.environ.copy()
+        # Token passed strictly via environment variable, never command line
+        env["PBL4_WORKER_JOIN_TOKEN"] = command.worker_join_token
+
+        spawn_kwargs: dict[str, Any] = {}
+        if os.name == "nt":
+            spawn_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            spawn_kwargs["start_new_session"] = True
+
+        log_file_path = self.var_dir / f"worker-{command.allocation_id}.log"
+        with open(log_file_path, "a", encoding="utf-8") as log_file:
+            proc = subprocess.Popen(
+                cmd_args, env=env, stdout=log_file, stderr=subprocess.STDOUT, **spawn_kwargs
+            )
+        self._subprocesses[command.allocation_id] = proc
+        record.pid = proc.pid
+        record.exit_code = None
+
+        try:
+            p_info = psutil.Process(proc.pid)
+            record.create_time = float(p_info.create_time())
+        except Exception:
+            record.create_time = float(time.time())
+        return proc
+
     def spawn_worker(self, command: StartWorkerPayload) -> tuple[str, str | None]:
         """Spawn a new Worker process for the specified allocation.
 
@@ -264,55 +337,9 @@ class WorkerProcessSupervisor:
             self._records[command.allocation_id] = record
             self._save_records()
 
-            cmd_args = [
-                sys.executable,
-                "-m",
-                "pbl4.worker.entrypoint",
-                "--runtime-host",
-                command.runtime_host,
-                "--runtime-port",
-                str(command.runtime_port),
-                "--attempt-id",
-                command.attempt_id,
-                "--allocation-id",
-                command.allocation_id,
-                "--node-id",
-                self.node_id,
-                "--device",
-                command.device,
-                "--initialization-seed",
-                str(command.initialization_seed),
-                "--model-id",
-                command.model_id,
-                "--cache-dir",
-                str(self.var_dir / "worker-cache"),
-            ]
-
-            env = os.environ.copy()
-            # Token passed strictly via environment variable, never command line
-            env["PBL4_WORKER_JOIN_TOKEN"] = command.worker_join_token
-
-            spawn_kwargs: dict[str, Any] = {}
-            if os.name == "nt":
-                spawn_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-            else:
-                spawn_kwargs["start_new_session"] = True
-
             try:
-                log_file_path = self.var_dir / f"worker-{command.allocation_id}.log"
-                with open(log_file_path, "a", encoding="utf-8") as log_file:
-                    proc = subprocess.Popen(
-                        cmd_args, env=env, stdout=log_file, stderr=subprocess.STDOUT, **spawn_kwargs
-                    )
-                self._subprocesses[command.allocation_id] = proc
-                record.pid = proc.pid
-
-                try:
-                    p_info = psutil.Process(proc.pid)
-                    record.create_time = float(p_info.create_time())
-                except Exception:
-                    record.create_time = float(time.time())
-
+                proc = self._launch_worker_subprocess(command, record)
+                self._commands[command.allocation_id] = command
                 record.transition_to(LOCAL_STATE_RUNNING)
                 self._save_records()
                 logger.info(
@@ -359,6 +386,7 @@ class WorkerProcessSupervisor:
                 return (COMMAND_STATUS_ACCEPTED, None)
 
             # Process active or starting
+            waiting_retry = allocation_id in self._retry_after
             proc = self._subprocesses.get(allocation_id)
             exit_code: int | None = None
             stopped = False
@@ -384,6 +412,8 @@ class WorkerProcessSupervisor:
                 except Exception as exc:
                     logger.warning("Error stopping subprocess for %s: %s", allocation_id, exc)
                     return (COMMAND_STATUS_REJECTED, ERROR_CODE_WORKER_STOP_FAILED)
+            elif waiting_retry:
+                stopped = True
             elif record.pid is not None:
                 # Process was reattached or spawned in previous agent instance
                 try:
@@ -414,6 +444,8 @@ class WorkerProcessSupervisor:
 
             if not stopped:
                 return (COMMAND_STATUS_REJECTED, ERROR_CODE_WORKER_STOP_FAILED)
+            self._retry_after.pop(allocation_id, None)
+            self._commands.pop(allocation_id, None)
             self._subprocesses.pop(allocation_id, None)
             record.transition_to(LOCAL_STATE_STOPPED, exit_code=exit_code)
             self._save_records()
@@ -421,51 +453,127 @@ class WorkerProcessSupervisor:
             return (COMMAND_STATUS_ACCEPTED, None)
 
     def poll(self) -> list[LocalAllocationRecord]:
-        """Poll active workers and detect unexpected termination.
-
-        Any worker exiting outside the stop_worker flow is transitioned to FAILED.
-        """
+        """Poll active workers, respawn eligible crashes, and detect terminal failure."""
         with self._lock:
             state_changed = False
+            now = time.monotonic()
             for allocation_id, record in list(self._records.items()):
-                if record.local_state == LOCAL_STATE_RUNNING:
-                    proc = self._subprocesses.get(allocation_id)
-                    if proc is not None:
-                        ret = proc.poll()
-                        if ret is not None:
+                if record.local_state != LOCAL_STATE_RUNNING:
+                    continue
+
+                if allocation_id in self._retry_after:
+                    if now < self._retry_after[allocation_id]:
+                        continue
+                    self._retry_after.pop(allocation_id, None)
+                    command = self._commands.get(allocation_id)
+                    if command is None:
+                        record.transition_to(LOCAL_STATE_FAILED, exit_code=record.exit_code)
+                        state_changed = True
+                        continue
+                    try:
+                        proc = self._launch_worker_subprocess(command, record)
+                        logger.info(
+                            "Worker allocation %s respawned (PID=%d, retry %d/%d)",
+                            allocation_id,
+                            proc.pid,
+                            record.crash_count,
+                            self._max_crash_retries,
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "Failed respawning crashed worker allocation %s: %s",
+                            allocation_id,
+                            exc,
+                        )
+                        self._commands.pop(allocation_id, None)
+                        record.transition_to(LOCAL_STATE_FAILED, exit_code=record.exit_code)
+                    state_changed = True
+                    continue
+
+                proc = self._subprocesses.get(allocation_id)
+                if proc is not None:
+                    ret = proc.poll()
+                    if ret is not None:
+                        self._subprocesses.pop(allocation_id, None)
+                        if (
+                            ret != 0
+                            and ret != NON_RETRYABLE_WORKER_EXIT_CODE
+                            and record.crash_count < self._max_crash_retries
+                            and allocation_id in self._commands
+                        ):
+                            record.crash_count += 1
+                            delay = self._crash_retry_delay_seconds * (
+                                2 ** (record.crash_count - 1)
+                            )
                             logger.warning(
-                                "Worker allocation %s terminated unexpectedly with "
-                                "returncode %d. Transitioning to FAILED.",
+                                "Worker allocation %s crashed (returncode=%d). "
+                                "Auto-respawning (%d/%d) in %.1fs...",
                                 allocation_id,
                                 ret,
+                                record.crash_count,
+                                self._max_crash_retries,
+                                delay,
                             )
-                            self._subprocesses.pop(allocation_id, None)
-                            record.transition_to(
-                                LOCAL_STATE_STOPPED if ret == 0 else LOCAL_STATE_FAILED,
-                                exit_code=ret,
-                            )
+                            if delay <= 0:
+                                try:
+                                    proc = self._launch_worker_subprocess(
+                                        self._commands[allocation_id], record
+                                    )
+                                    logger.info(
+                                        "Worker allocation %s respawned immediately "
+                                        "(PID=%d, retry %d/%d)",
+                                        allocation_id,
+                                        proc.pid,
+                                        record.crash_count,
+                                        self._max_crash_retries,
+                                    )
+                                except Exception as exc:
+                                    logger.error(
+                                        "Failed respawning crashed worker allocation %s: %s",
+                                        allocation_id,
+                                        exc,
+                                    )
+                                    self._commands.pop(allocation_id, None)
+                                    record.transition_to(LOCAL_STATE_FAILED, exit_code=ret)
+                            else:
+                                record.exit_code = int(ret)
+                                self._retry_after[allocation_id] = now + delay
                             state_changed = True
-                    elif record.pid is not None:
-                        try:
-                            p = psutil.Process(record.pid)
-                            if not p.is_running() or p.status() == psutil.STATUS_ZOMBIE:
-                                logger.warning(
-                                    "Worker allocation %s (PID=%d) terminated unexpectedly. "
-                                    "Transitioning to FAILED.",
-                                    allocation_id,
-                                    record.pid,
-                                )
-                                record.transition_to(LOCAL_STATE_FAILED, exit_code=None)
-                                state_changed = True
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        else:
+                            target_state = LOCAL_STATE_STOPPED if ret == 0 else LOCAL_STATE_FAILED
                             logger.warning(
-                                "Worker allocation %s (PID=%d) no longer exists. "
+                                "Worker allocation %s terminated unexpectedly with "
+                                "returncode %d. Transitioning to %s.",
+                                allocation_id,
+                                ret,
+                                target_state,
+                            )
+                            self._commands.pop(allocation_id, None)
+                            record.transition_to(target_state, exit_code=ret)
+                            state_changed = True
+                elif record.pid is not None:
+                    try:
+                        p = psutil.Process(record.pid)
+                        if not p.is_running() or p.status() == psutil.STATUS_ZOMBIE:
+                            logger.warning(
+                                "Worker allocation %s (PID=%d) terminated unexpectedly. "
                                 "Transitioning to FAILED.",
                                 allocation_id,
                                 record.pid,
                             )
+                            self._commands.pop(allocation_id, None)
                             record.transition_to(LOCAL_STATE_FAILED, exit_code=None)
                             state_changed = True
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        logger.warning(
+                            "Worker allocation %s (PID=%d) no longer exists. "
+                            "Transitioning to FAILED.",
+                            allocation_id,
+                            record.pid,
+                        )
+                        self._commands.pop(allocation_id, None)
+                        record.transition_to(LOCAL_STATE_FAILED, exit_code=None)
+                        state_changed = True
 
             if state_changed or not self._records_file.exists():
                 self._save_records()

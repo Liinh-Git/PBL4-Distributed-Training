@@ -64,6 +64,7 @@ def test_operation_ids_stay_unique_across_idle_assignments_and_reclaim():
     ],
 )
 def test_each_setting_uses_its_own_bounds(name, low, high):
+    assert resolve_async_training()["reconnect_grace_seconds"] == 60
     for valid in (low, high):
         assert resolve_async_training({name: valid})[name] == valid
     for invalid in (low - 1, high + 1, True, 1.5):

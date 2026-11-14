@@ -226,6 +226,13 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             settings.redis_url, settings.redis_event_stream, runtime_gateway.handle_runtime_events
         )
         runtime_gateway.event_consumer.start()
+    else:
+        from pbl4.management_backend.gateways.mcp_events import McpEventConsumer
+
+        runtime_gateway.event_consumer = McpEventConsumer(
+            runtime_gateway.handle_runtime_events
+        )
+        runtime_gateway.event_consumer.start()
 
     # Initialize node control gateway
     node_control_gateway = init_node_control_gateway()

@@ -37,7 +37,7 @@ class WorkerProcess:
         initialization_seed: int,
         model_id: str | None = None,
         device: str = "cpu",
-        connect_timeout_seconds: float = 60.0,
+        connect_timeout_seconds: float | None = None,
         opener: Callable[..., object] | None = None,
     ) -> None:
         self._config = config
@@ -52,10 +52,18 @@ class WorkerProcess:
             local_gradient_reduction="mean",
         )
         self._initialization_seed = initialization_seed
-        self._connect_timeout = connect_timeout_seconds
+        timeout = (
+            config.connect_timeout_seconds
+            if connect_timeout_seconds is None
+            else connect_timeout_seconds
+        )
+        if isinstance(timeout, bool) or timeout <= 0:
+            raise ValueError("connect_timeout_seconds must be positive")
+        self._connect_timeout = float(timeout)
         self._opener = opener
         self._stop = threading.Event()
         self._failed = threading.Event()
+        self._non_retryable = False
         self._busy = threading.Event()
         self._lock = threading.Lock()
         self._loop: TrainingLoop | None = None
@@ -66,7 +74,12 @@ class WorkerProcess:
         self._last_step: int | None = None
         self._epoch = 0
         self._next_batch_ordinal = 0
-        self._client_instance_id = str(uuid.uuid4())
+        if self._config.allocation_id:
+            self._client_instance_id = str(
+                uuid.uuid5(uuid.NAMESPACE_OID, self._config.allocation_id)
+            )
+        else:
+            self._client_instance_id = str(uuid.uuid4())
         self._connection_lost = threading.Event()
         self._jobs = Queue(maxsize=2)
         self._asynchronous = False
@@ -107,6 +120,7 @@ class WorkerProcess:
         try:
             self._jobs.put_nowait((client, callback, args))
         except Full:
+            logger.error("Worker job queue full; stopping")
             self._failed.set()
             self._stop.set()
             client.disconnect()
@@ -132,6 +146,10 @@ class WorkerProcess:
     @property
     def client_instance_id(self) -> str:
         return self._client_instance_id
+
+    @property
+    def retryable_failure(self) -> bool:
+        return not self._non_retryable
 
     @property
     def dataset_cache(self) -> DatasetCache | None:
@@ -169,10 +187,15 @@ class WorkerProcess:
                             self._reconnect_deadline is not None
                             and time.monotonic() >= self._reconnect_deadline
                         ):
+                            logger.error(
+                                "Worker reconnect readiness exceeded %.1fs timeout; stopping",
+                                self._connect_timeout,
+                            )
                             self._failed.set()
                             self._stop.set()
                 except ProtocolError:
                     logger.exception("Runtime rejected the Worker handshake")
+                    self._non_retryable = True
                     self._failed.set()
                     self._stop.set()
                 except Exception as exc:
@@ -181,6 +204,10 @@ class WorkerProcess:
                 if self._stop.is_set():
                     break
                 if time.monotonic() >= (self._reconnect_deadline or deadline):
+                    logger.error(
+                        "Worker connection timeout exceeded %.1fs; terminating",
+                        self._connect_timeout,
+                    )
                     self._failed.set()
                     break
                 if self._stop.wait(delay):
@@ -206,6 +233,7 @@ class WorkerProcess:
                 self._connection_lost.set()
             else:
                 logger.error("Runtime DTP connection closed unexpectedly")
+                self._non_retryable = True
                 self._failed.set()
                 self._stop.set()
 
@@ -223,9 +251,12 @@ class WorkerProcess:
                     message.reason_code,
                 )
                 if message.attempt_state != "COMPLETED":
+                    self._non_retryable = True
                     self._failed.set()
                 self._stop.set()
             elif isinstance(message, Error):
+                if not message.retryable:
+                    self._non_retryable = True
                 raise RuntimeError(
                     f"Runtime protocol error: {message.error_code}: {message.message}"
                 )

@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
+from fastapi.encoders import jsonable_encoder
 
 from pbl4.management_backend.repositories import event_repository
 
@@ -198,7 +199,7 @@ def snapshot_frame(snapshot: dict[str, Any]) -> dict[str, Any]:
             "snapshot_seq": snapshot.get(
                 "authoritative_snapshot_seq", snapshot.get("last_runtime_event_seq")
             ),
-            "state": state,
+            "state": jsonable_encoder(state),
         },
     }
 

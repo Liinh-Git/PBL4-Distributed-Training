@@ -41,10 +41,18 @@ def environment() -> dict[str, str]:
     return env
 
 
+def get_state_dir(env: dict[str, str]) -> Path:
+    raw = env.get("PBL4_STATE_DIR") or (env.get("HOME") if env.get("HOME") in (".var", "var") else None)
+    if raw:
+        p = Path(raw)
+        return p if p.is_absolute() else (ROOT / p).resolve()
+    return (ROOT / "var").resolve()
+
+
 def prepare_manifests(env: dict[str, str]) -> Path:
     from pbl4.common.model_profiles import MODEL_PROFILES
 
-    directory = Path(env.get("PBL4_STATE_DIR", str(ROOT / "var"))) / "manifests"
+    directory = get_state_dir(env) / "manifests"
     for model_id in MODEL_PROFILES:
         path = directory / f"{model_id}.json"
         # Derive from installed model definitions so stale manifests cannot survive an update.
@@ -69,27 +77,62 @@ def prepare_manifests(env: dict[str, str]) -> Path:
 
 def command(service: str, env: dict[str, str], manifests: Path, extra: list[str]) -> list[str]:
     if service == "runtime":
-        return [
-            sys.executable,
-            "-m",
-            "pbl4.runtime.entrypoint",
-            "--host",
-            env.get("RUNTIME_BIND_HOST", "127.0.0.1"),
-            "--port",
-            env.get("RUNTIME_PORT", "5000"),
-            "--management-port",
-            env.get("RUNTIME_MANAGEMENT_PORT", "7443"),
-            "--dataset-manager-url",
-            env["DATASET_MANAGER_URL"],
-            "--checkpoint-dir",
-            str(Path(env.get("PBL4_STATE_DIR", str(ROOT / "var"))) / "checkpoints"),
-            "--manifest-dir",
-            str(manifests),
-            *extra,
-        ]
+        cmd = [sys.executable, "-m", "pbl4.runtime.entrypoint"]
+        if not any(arg == "--host" or arg.startswith("--host=") for arg in extra):
+            host = env.get("RUNTIME_BIND_HOST") or env.get("RUNTIME_HOST", "127.0.0.1")
+            cmd.extend(["--host", host])
+        if not any(arg == "--port" or arg.startswith("--port=") for arg in extra):
+            cmd.extend(["--port", env.get("RUNTIME_PORT", "9000")])
+        if not any(arg == "--management-port" or arg.startswith("--management-port=") for arg in extra):
+            cmd.extend(["--management-port", env.get("RUNTIME_MANAGEMENT_PORT", "9001")])
+        if not any(arg == "--log-level" or arg.startswith("--log-level=") for arg in extra):
+            log_level = env.get("LOG_LEVEL")
+            if log_level:
+                cmd.extend(["--log-level", log_level])
+        cmd.extend(
+            [
+                "--dataset-manager-url",
+                env.get("DATASET_MANAGER_URL", "http://127.0.0.1:9200"),
+                "--checkpoint-dir",
+                str(get_state_dir(env) / "checkpoints"),
+                "--manifest-dir",
+                str(manifests),
+                *extra,
+            ]
+        )
+        return cmd
     if service == "backend":
-        return [sys.executable, "-m", "pbl4.management_backend.entrypoint", "--http", "h11", *extra]
-    return [sys.executable, "-m", "pbl4.node_agent.entrypoint", "start", *extra]
+        cmd = [sys.executable, "-m", "pbl4.management_backend.entrypoint", "--http", "h11"]
+        bind_host = env.get("BACKEND_HOST")
+        if bind_host and not any(arg == "--host" or arg.startswith("--host=") for arg in extra):
+            cmd.extend(["--host", bind_host])
+        port = env.get("BACKEND_PORT")
+        if port and not any(arg == "--port" or arg.startswith("--port=") for arg in extra):
+            cmd.extend(["--port", str(port)])
+        if not any(arg == "--log-level" or arg.startswith("--log-level=") for arg in extra):
+            log_level = env.get("LOG_LEVEL")
+            if log_level:
+                cmd.extend(["--log-level", log_level])
+        cmd.extend(extra)
+        return cmd
+    if service == "agent":
+        cmd = [sys.executable, "-m", "pbl4.node_agent.entrypoint", "start"]
+        if not any(arg == "--backend-url" or arg.startswith("--backend-url=") for arg in extra):
+            # 1. Ưu tiên cao nhất từ .env: Biến URL chuyên dụng của Node Agent
+            if explicit_url := env.get("PBL4_BACKEND_URL"):
+                cmd.extend(["--backend-url", explicit_url])
+            else:
+                # 2. Nếu không có, tìm host của Backend: ưu tiên BACKEND_ADVERTISED_HOST
+                backend_port = env.get("BACKEND_PORT", "8000")
+                backend_host = env.get("BACKEND_HOST", "127.0.0.1")
+                if backend_host in ("0.0.0.0", "::"):
+                    backend_host = env.get("BACKEND_ADVERTISED_HOST") or env.get("RUNTIME_ADVERTISED_HOST") or "127.0.0.1"
+                else:
+                    backend_host = env.get("BACKEND_ADVERTISED_HOST") or backend_host
+                cmd.extend(["--backend-url", f"http://{backend_host}:{backend_port}"])
+        cmd.extend(extra)
+        return cmd
+    raise ValueError(f"Unknown service: {service}")
 
 
 def main(service: str = "all") -> None:
@@ -104,17 +147,28 @@ def main(service: str = "all") -> None:
     parser = argparse.ArgumentParser(
         description="Start local PBL4 infrastructure (Runtime, Backend, WebUI)."
     )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default=None,
+        help="Host interface/IP for services (defaults to .env or 127.0.0.1)",
+    )
     parser.add_argument("--web-port", type=int, default=3000)
     args = parser.parse_args()
-    # All-in-one mode always uses loopback; no machine-specific LAN address is needed.
-    env.update(
-        RUNTIME_HOST="127.0.0.1",
-        RUNTIME_BIND_HOST="127.0.0.1",
-        RUNTIME_ADVERTISED_HOST="127.0.0.1",
-        BACKEND_HOST="127.0.0.1",
-    )
-    env.setdefault("RUNTIME_PORT", "5000")
-    env.setdefault("RUNTIME_MANAGEMENT_PORT", "7443")
+
+    if args.host:
+        env["RUNTIME_HOST"] = args.host
+        env["RUNTIME_BIND_HOST"] = args.host
+        env["RUNTIME_ADVERTISED_HOST"] = args.host
+        env["BACKEND_HOST"] = args.host
+    else:
+        env.setdefault("RUNTIME_HOST", "127.0.0.1")
+        env.setdefault("RUNTIME_BIND_HOST", env["RUNTIME_HOST"])
+        env.setdefault("RUNTIME_ADVERTISED_HOST", env["RUNTIME_HOST"])
+        env.setdefault("BACKEND_HOST", "127.0.0.1")
+
+    env.setdefault("RUNTIME_PORT", "9000")
+    env.setdefault("RUNTIME_MANAGEMENT_PORT", "9001")
     backend_port = int(env.get("BACKEND_PORT") or "8000")
     ports = [
         int(env["RUNTIME_PORT"]),
@@ -127,7 +181,7 @@ def main(service: str = "all") -> None:
     for port in ports:
         with socket.socket() as probe:
             try:
-                probe.bind(("127.0.0.1", port))
+                probe.bind(("", port))
             except OSError:
                 parser.error(f"Port {port} is already in use. Stop the previous service first.")
     npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
@@ -141,13 +195,35 @@ def main(service: str = "all") -> None:
         parser.error(
             "Configure DATABASE_URL, DATASET_MANAGER_URL and PBL4_WORKER_ADMISSION_SECRET in .env"
         )
-    env["CORS_ORIGINS"] = json.dumps(
-        [f"http://127.0.0.1:{args.web_port}", f"http://localhost:{args.web_port}"]
+
+    backend_host = env.get("BACKEND_HOST", "127.0.0.1")
+    public_backend_host = (
+        env.get("BACKEND_ADVERTISED_HOST")
+        or env.get("RUNTIME_ADVERTISED_HOST")
+        or (backend_host if backend_host not in ("0.0.0.0", "::") else "127.0.0.1")
     )
-    env["VITE_API_BASE_URL"] = f"http://127.0.0.1:{backend_port}"
-    env["VITE_WS_BASE_URL"] = f"ws://127.0.0.1:{backend_port}"
+    backend_origin = f"http://{public_backend_host}:{backend_port}"
+    env["VITE_API_BASE_URL"] = backend_origin
+    env["VITE_WS_BASE_URL"] = f"ws://{public_backend_host}:{backend_port}"
+
+    cors_origins = {
+        f"http://127.0.0.1:{args.web_port}",
+        f"http://localhost:{args.web_port}",
+    }
+    if public_backend_host not in ("127.0.0.1", "localhost"):
+        cors_origins.add(f"http://{public_backend_host}:{args.web_port}")
+    extra_cors = env.get("CORS_ORIGINS", "")
+    if extra_cors:
+        try:
+            parsed = json.loads(extra_cors)
+            if isinstance(parsed, list):
+                cors_origins.update(parsed)
+        except (json.JSONDecodeError, TypeError):
+            cors_origins.update(o.strip() for o in extra_cors.split(",") if o.strip())
+    env["CORS_ORIGINS"] = json.dumps(sorted(cors_origins))
+
     manifests = prepare_manifests(env)
-    state_root = Path(env.get("PBL4_STATE_DIR", str(ROOT / "var"))).resolve()
+    state_root = get_state_dir(env)
     logs = state_root / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     children: list[subprocess.Popen] = []
@@ -165,18 +241,23 @@ def main(service: str = "all") -> None:
         start("runtime", command("runtime", env, manifests, []))
         start("backend", command("backend", env, manifests, []))
         deadline = time.monotonic() + 60
+        connect_host = "127.0.0.1" if backend_host in ("0.0.0.0", "::") else backend_host
         while True:
             if any(p.poll() is not None for p in children):
                 raise RuntimeError("A service exited during startup; inspect var/logs")
             try:
-                with socket.create_connection(("127.0.0.1", backend_port), timeout=1):
+                with socket.create_connection((connect_host, backend_port), timeout=1):
                     break
             except OSError:
-                if time.monotonic() >= deadline:
-                    raise RuntimeError(
-                        "Backend startup timed out; inspect var/logs/backend.log"
-                    ) from None
-                time.sleep(0.5)
+                try:
+                    with socket.create_connection(("127.0.0.1", backend_port), timeout=1):
+                        break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(
+                            "Backend startup timed out; inspect var/logs/backend.log"
+                        ) from None
+                    time.sleep(0.5)
 
         start(
             "web",
@@ -186,7 +267,7 @@ def main(service: str = "all") -> None:
                 "dev",
                 "--",
                 "--host",
-                "127.0.0.1",
+                "0.0.0.0",
                 "--port",
                 str(args.web_port),
                 "--strictPort",
@@ -194,7 +275,14 @@ def main(service: str = "all") -> None:
             ROOT / "web",
         )
         print(
-            f"Open http://127.0.0.1:{args.web_port}; create jobs in WebUI.\n"
+            f"PBL4 services running:\n"
+            f"  - WebUI (Local):   http://127.0.0.1:{args.web_port}\n"
+            + (
+                f"  - WebUI (Network): http://{public_backend_host}:{args.web_port}\n"
+                if public_backend_host not in ("127.0.0.1", "localhost")
+                else ""
+            )
+            + f"  - Backend API:     {backend_origin}\n"
             "Start Node Agents in separate terminals using: python services/node-agent.py\n"
             "Ctrl+C stops services.",
             flush=True,
@@ -226,3 +314,7 @@ def main(service: str = "all") -> None:
                 process.kill()
         for handle in handles:
             handle.close()
+
+
+if __name__ == "__main__":
+    main()
