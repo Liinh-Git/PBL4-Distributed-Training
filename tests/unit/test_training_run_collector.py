@@ -6,9 +6,12 @@ import io
 import json
 import threading
 import zipfile
+from collections import namedtuple
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.error import URLError
 from urllib.parse import parse_qs, urlparse
 
@@ -385,3 +388,70 @@ def test_retired_checkpoint_is_reported_and_async_does_not_invent_steps(tmp_path
     assert summary["committed_steps_observed"] == 0
     assert summary["samples_per_s"] is None
     assert summary["latest_async_progress"]["processed_samples"] == 48
+
+
+def test_network_rates_reset_and_link_state(tmp_path, monkeypatch):
+    counter = namedtuple("Counter", "bytes_sent bytes_recv errin errout dropin dropout")
+    snapshots = iter(
+        [
+            {"Ethernet": counter(1000, 2000, 0, 0, 0, 0)},
+            {"Ethernet": counter(1500, 3000, 0, 0, 2, 0)},
+            {"Ethernet": counter(10, 20, 0, 0, 0, 0)},
+        ]
+    )
+    ticks = iter([10, 15, 20])
+    monkeypatch.setattr(collector.time, "monotonic", lambda: next(ticks))
+    link = SimpleNamespace(isup=True, speed=1000, mtu=1500)
+    monitor = collector.NetworkMonitor([])
+    monitor.provider = SimpleNamespace(
+        net_io_counters=lambda **kwargs: next(snapshots),
+        net_if_stats=lambda: {"Ethernet": link},
+    )
+    first = monitor.sample(tmp_path)["interfaces"]["Ethernet"]
+    assert first["tx_bytes_per_s"] is None
+    second = monitor.sample(tmp_path)["interfaces"]["Ethernet"]
+    assert second["tx_bytes_per_s"] == 100
+    assert second["rx_bytes_per_s"] == 200
+    assert second["counters_since_os_reset"]["dropin"] == 2
+    link.isup = False
+    third = monitor.sample(tmp_path)["interfaces"]["Ethernet"]
+    assert third["counter_reset_detected"]
+    assert third["tx_bytes_per_s"] is None
+    assert third["is_up"] is False
+    assert len((tmp_path / "network.jsonl").read_text().splitlines()) == 3
+
+
+def test_network_probe_success_failure_and_optional_dependency(tmp_path, monkeypatch):
+    monitor = collector.NetworkMonitor([("localhost", 8000), ("localhost", 1)])
+    monitor.provider = None
+
+    def connect(address, **kwargs):
+        if address[1] == 1:
+            raise ConnectionRefusedError("closed")
+        return nullcontext()
+
+    monkeypatch.setattr(collector.socket, "create_connection", connect)
+    result = monitor.sample(tmp_path)
+    assert "unavailable" in result["counter_error"]
+    assert not result["interfaces"]
+    assert result["tcp_probes"][0]["connected"]
+    assert result["tcp_probes"][0]["connect_ms"] >= 0
+    assert not result["tcp_probes"][1]["connected"]
+    assert result["tcp_probes"][1]["connect_ms"] is None
+
+
+def test_network_target_parsing_ipv6_and_deduplication():
+    assert collector.network_targets("http://localhost:8000", ["localhost:8000", "[::1]:5000"]) == [
+        ("localhost", 8000),
+        ("::1", 5000),
+    ]
+    with pytest.raises(ValueError):
+        collector.network_targets("http://localhost:8000", ["host:bad-port"])
+
+
+def test_real_os_network_sampling(tmp_path):
+    pytest.importorskip("psutil")
+    monitor = collector.NetworkMonitor([])
+    result = monitor.sample(tmp_path)
+    assert result["counter_error"] is None
+    assert isinstance(result["interfaces"], dict)

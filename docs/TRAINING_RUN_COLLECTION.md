@@ -1,7 +1,13 @@
 # Thu kết quả một phiên training
 
 Chạy collector trên **máy Runtime** để ưu tiên file local. Collector dùng Python
-standard library, không cần cài thêm package và không launch/abort/thay đổi training.
+standard library cho việc thu training; dùng thêm `psutil` nếu có để đọc bộ đếm
+card mạng. `psutil` đã nằm trong dependencies của Node Agent. Không tự cài package,
+không launch/abort/thay đổi training. Thiếu `psutil` vẫn thu training/model và ghi
+rõ chưa đo được counters mạng; TCP probes vẫn hoạt động.
+
+Trên Windows nên dùng Python trong môi trường dự án đã cài Node Agent dependencies
+để có `psutil`: `.\.venv\Scripts\python.exe scripts/collect_training_run.py`.
 
 ```powershell
 python scripts/collect_training_run.py
@@ -76,6 +82,8 @@ báo thiếu model. Checkpoint đã bị retention xóa trước khi thu cũng k
 - `checkpoints/<hash>/model.zip`, `detail.json`: checkpoint và manifest phục vụ
   inference; `checkpoints.json` ghi inventory local hoặc API.
 - `node-resources.jsonl`, `logs/`, `log-capture.json`: resource snapshots và log local.
+- `network.jsonl`: trạng thái card mạng, bộ đếm byte/packet/error/drop, tốc độ gửi/nhận
+  theo chênh lệch counter và TCP connection checks trên máy collector.
 - `collector-environment.json`: Python/OS/commit của **máy collector**, không chứng
   minh commit hay dependency của Worker trên máy khác.
 - `sha256.json`: checksum các file trong gói (ngoại trừ chính checksum manifest).
@@ -105,3 +113,35 @@ Chọn model theo `model_version` trong `summary.json`, không theo tên hash fo
 Không gọi model cuối là model tốt nhất nếu chưa có validation để chọn. Đọc
 `checkpoint.json` để đối chiếu recovery cursor và schema trước khi dùng lại dữ liệu
 cho công cụ resume; collector không đăng ký/import checkpoint sang một hệ thống mới.
+
+## Đo mạng độc lập
+
+Collector tự đọc thống kê mạng từ hệ điều hành qua `psutil`, không cần sửa Worker,
+Runtime hoặc wire protocol. Mỗi lần poll lưu một mẫu cho từng interface: up/down,
+link speed do OS báo, MTU, counters gửi/nhận/error/drop. Tốc độ thực tế tính bằng
+chênh lệch byte chia thời gian monotonic giữa hai mẫu; mẫu đầu hoặc sau khi counter
+reset không có tốc độ, để null. Không cộng gộp interface vật lý/VPN/loopback để
+tránh đếm trùng traffic. Link speed không phải bandwidth thực tế đo được của đường WAN.
+
+Mặc định script còn thử một kết nối TCP tới host/port của Backend, timeout socket
+1 giây, không gửi application payload. `connect_ms` là thời gian mở kết nối, có thể
+bao gồm DNS; không gọi đó là ICMP ping RTT, packet-loss rate hay thời gian upload
+gradient. Backend ở localhost thì probe đó chỉ kiểm tra kết nối local. Có thể thêm
+đích IP/port cụ thể (tối đa 4 đích tính cả Backend):
+
+```powershell
+python scripts/collect_training_run.py --network-target 192.168.1.10:5000
+```
+
+Chỉ thêm port DTP nếu chấp nhận kết nối probe ngắn có thể tạo log disconnect ở
+Runtime. Không tự kết nối vào mọi máy/port trong cluster. Dùng `--no-network` để tắt.
+
+Số liệu là **toàn bộ traffic của máy collector**, gồm ứng dụng khác, telemetry và
+chính việc export; không thể quy hết thành byte training/DTP. Error/drop là counters
+của interface, không phải packet loss end-to-end. Muốn đo mỗi Worker ở máy khác
+cần chạy monitor tại máy đó; snapshot Node hiện có không thay thế đo interface này.
+Lịch lấy mẫu theo vòng poll: API chậm sẽ làm khoảng cách mẫu lớn hơn, luôn giữ
+timestamp và interval thực tế. Chạy collector sau khi training đã kết thúc không
+khôi phục được lịch sử mạng quá khứ. Không chạy speed test tải lớn.
+
+Tham khảo API bộ đếm: [psutil network](https://psutil.readthedocs.io/stable/#network).

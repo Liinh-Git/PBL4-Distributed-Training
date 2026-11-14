@@ -1,4 +1,4 @@
-"""Observe existing Management APIs and archive one training run (stdlib only)."""
+"""Archive a training run; optional psutil supplies host network interface counters."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import json
 import os
 import platform
 import shutil
+import socket
 import statistics
 import subprocess
 import sys
@@ -16,11 +17,96 @@ import time
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import urlopen
 
 TERMINAL = {"COMPLETED", "FAILED", "ABORTED"}
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class NetworkMonitor:
+    """Sample collector-host interfaces and TCP handshakes, never tensor payloads."""
+
+    def __init__(self, targets):
+        self.targets = targets
+        self.previous = None
+        try:
+            import psutil
+
+            self.provider = psutil
+        except ImportError:
+            self.provider = None
+
+    def sample(self, directory):
+        tick = time.monotonic()
+        observation = {
+            "observed_at": now(),
+            "scope": "all traffic on collector host; not DTP-only",
+            "interfaces": {},
+            "tcp_probes": [],
+            "counter_error": None,
+        }
+        if self.provider is None:
+            observation["counter_error"] = "psutil unavailable; interface counters not measured"
+        else:
+            try:
+                counters = self.provider.net_io_counters(pernic=True, nowrap=False)
+                stats = self.provider.net_if_stats()
+                previous_tick, previous = self.previous or (tick, {})
+                interval = tick - previous_tick
+                for name in sorted(counters.keys() | stats.keys()):
+                    values = counters[name]._asdict() if name in counters else {}
+                    old = previous.get(name)
+                    reset = bool(old) and any(values.get(key, 0) < old[key] for key in old)
+                    ready = bool(values and old) and interval > 0 and not reset
+                    link = stats.get(name)
+                    observation["interfaces"][name] = {
+                        "is_up": link.isup if link else None,
+                        "link_speed_mbps": (link.speed or None) if link else None,
+                        "mtu": link.mtu if link else None,
+                        "counters_since_os_reset": values,
+                        "counter_reset_detected": reset,
+                        "sample_interval_s": interval if old else None,
+                        "tx_bytes_per_s": (values["bytes_sent"] - old["bytes_sent"]) / interval
+                        if ready
+                        else None,
+                        "rx_bytes_per_s": (values["bytes_recv"] - old["bytes_recv"]) / interval
+                        if ready
+                        else None,
+                    }
+                self.previous = (tick, {name: value._asdict() for name, value in counters.items()})
+            except Exception as exc:
+                self.previous = None
+                observation["counter_error"] = f"{type(exc).__name__}: {exc}"
+        for host, port in self.targets:
+            started = time.monotonic()
+            probe = {"host": host, "port": port, "connected": False, "connect_ms": None}
+            try:
+                # Numeric address lookup is cheap; DNS names may add resolution time.
+                with socket.create_connection((host, port), timeout=1):
+                    probe["connected"] = True
+                    probe["connect_ms"] = (time.monotonic() - started) * 1000
+            except OSError as exc:
+                probe["error"] = f"{type(exc).__name__}: {exc}"
+            observation["tcp_probes"].append(probe)
+        with (directory / "network.jsonl").open("a", encoding="utf-8") as output:
+            output.write(json.dumps(observation, ensure_ascii=False) + "\n")
+        return observation
+
+
+def network_targets(backend_url, extra):
+    targets = []
+    for value in [backend_url, *extra]:
+        parsed = urlsplit(value if "://" in value else "//" + value)
+        if not parsed.hostname:
+            raise ValueError("Network targets require a host")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        target = (parsed.hostname, port)
+        if target not in targets:
+            targets.append(target)
+    if len(targets) > 4:
+        raise ValueError("At most four TCP probe targets are supported")
+    return targets
 
 
 def now():
@@ -255,7 +341,7 @@ def seconds(start, end):
 
 
 class Collector:
-    def __init__(self, api, attempt_id, output, local=None):
+    def __init__(self, api, attempt_id, output, local=None, network=None):
         self.api = api
         self.attempt_id = attempt_id
         self.path = output / ("attempt-" + safe_id(attempt_id)[:20])
@@ -274,6 +360,7 @@ class Collector:
         self.last_page_complete = False
         self.started_at = now()
         self.local = local
+        self.network = network
         self.job = None
         self.workers = None
         # Keep verified copies even if Runtime retention removed the source after capture.
@@ -307,6 +394,8 @@ class Collector:
         self.errors[key] = message
 
     def poll(self):
+        if self.network:
+            self.network.sample(self.path)
         if self.local:
             self.local.logs(self.path)
         self.attempt = self.api.get(self.endpoint)["data"]
@@ -504,6 +593,7 @@ class Collector:
                 "Step latency: start to commit; epoch/final checkpoint time is in training span.",
                 "No synthetic steps or sync throughput are computed for async.",
                 "Node resources are sampled Agent snapshots, not all-host profiling.",
+                "network.jsonl: host interface traffic and TCP checks; not DTP-only.",
                 "Local logs: bounded initial tail, then append; datasets/source not copied.",
             ],
         }
@@ -574,6 +664,14 @@ def main(argv=None):
     )
     parser.add_argument("--output", type=Path, default=ROOT / "output" / "training-runs")
     parser.add_argument("--poll-seconds", type=float, default=5)
+    parser.add_argument(
+        "--network-target",
+        action="append",
+        default=[],
+        metavar="HOST:PORT",
+        help="Additional TCP reachability target (default probe: Backend)",
+    )
+    parser.add_argument("--no-network", action="store_true", help="Disable host network sampling")
     parser.add_argument("--settle-seconds", type=float, default=20)
     parser.add_argument("--finalize-timeout", type=float, default=120)
     args = parser.parse_args(argv)
@@ -584,6 +682,14 @@ def main(argv=None):
     ):
         parser.error("poll > 0 and finalize-timeout >= settle-seconds >= 0 are required")
     api = API(args.backend_url)
+    try:
+        network = (
+            None
+            if args.no_network
+            else NetworkMonitor(network_targets(args.backend_url, args.network_target))
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     started = datetime.now(UTC)
     collector = None
     terminal_since = None
@@ -599,7 +705,7 @@ def main(argv=None):
                     identity = args.attempt_id or discover(api, started, args.job_id)
                     if identity:
                         collector = Collector(
-                            api, identity, args.output, LocalArtifacts(args.state_dir)
+                            api, identity, args.output, LocalArtifacts(args.state_dir), network
                         )
                         print(f"Detected Attempt: {identity}", flush=True)
                         try:
