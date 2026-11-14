@@ -3,6 +3,7 @@
 | Tài liệu | Mục đích |
 |---|---|
 | [DISTRIBUTED_DEMO_GUIDE.md](DISTRIBUTED_DEMO_GUIDE.md) | Khởi chạy dịch vụ và thao tác qua WebUI |
+| [TRAINING_RUN_COLLECTION.md](TRAINING_RUN_COLLECTION.md) | Tự thu metrics, log và model/checkpoint cho một lần chạy |
 | [API.md](API.md) | Tra cứu REST/WebSocket implementation và contract tests hiện tại |
 | [IMPLEMENTATION_CONTRACT.md](IMPLEMENTATION_CONTRACT.md) | Projection kiến trúc và ràng buộc triển khai |
 | [OPEN_ISSUES.md](OPEN_ISSUES.md) | Câu hỏi thiết kế còn mở, cần đối chiếu canonical trước khi xử lý |
