@@ -108,12 +108,18 @@ def test_worker_provision_all_shards_success(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", opener)
 
     config = WorkerConfig(
+        attempt_id="unit-attempt",
+        allocation_id="unit-allocation",
+        node_id="unit-node",
+        worker_join_token="unit-token",
         node_label="node-1",
         runtime_host="127.0.0.1",
         runtime_port=9000,
         cache_dir=str(tmp_path / "cache"),
     )
-    worker = WorkerProcess(config, initialization_seed=42, opener=opener)
+    worker = WorkerProcess(
+        config, initialization_seed=42, model_id="resnet18_groupnorm", opener=opener
+    )
 
     # Mock worker client
     mock_client = MagicMock()
@@ -180,12 +186,18 @@ def test_worker_provision_assigned_shard_legacy(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", opener)
 
     config = WorkerConfig(
+        attempt_id="unit-attempt",
+        allocation_id="unit-allocation",
+        node_id="unit-node",
+        worker_join_token="unit-token",
         node_label="node-1",
         runtime_host="127.0.0.1",
         runtime_port=9000,
         cache_dir=str(tmp_path / "cache"),
     )
-    worker = WorkerProcess(config, initialization_seed=42, opener=opener)
+    worker = WorkerProcess(
+        config, initialization_seed=42, model_id="resnet18_groupnorm", opener=opener
+    )
 
     mock_client = MagicMock()
     mock_client.expected_workers = 2
@@ -239,12 +251,18 @@ def test_worker_provision_all_shards_fails_if_any_shard_missing(tmp_path: Path, 
     monkeypatch.setattr(urllib.request, "urlopen", opener)
 
     config = WorkerConfig(
+        attempt_id="unit-attempt",
+        allocation_id="unit-allocation",
+        node_id="unit-node",
+        worker_join_token="unit-token",
         node_label="node-1",
         runtime_host="127.0.0.1",
         runtime_port=9000,
         cache_dir=str(tmp_path / "cache"),
     )
-    worker = WorkerProcess(config, initialization_seed=42, opener=opener)
+    worker = WorkerProcess(
+        config, initialization_seed=42, model_id="resnet18_groupnorm", opener=opener
+    )
 
     mock_client = MagicMock()
     mock_client.expected_workers = 3

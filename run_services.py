@@ -212,10 +212,9 @@ def main() -> None:
             raise SystemExit(
                 "DATASET_MANAGER_URL is required; set it in .env or in run_services.py."
             )
-        if not env.get("PBL4_WORKER_ADMISSION_SECRET") and "--allow-unmanaged-workers" not in extra:
+        if not env.get("PBL4_WORKER_ADMISSION_SECRET"):
             raise SystemExit(
-                "PBL4_WORKER_ADMISSION_SECRET is required; set it in .env or in run_services.py, "
-                "or pass --allow-unmanaged-workers to the runtime."
+                "PBL4_WORKER_ADMISSION_SECRET is required; set it in .env or in run_services.py."
             )
     if START_BACKEND and not env.get("DATABASE_URL"):
         raise SystemExit(

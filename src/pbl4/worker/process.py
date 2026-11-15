@@ -41,11 +41,10 @@ class WorkerProcess:
         opener: Callable[..., object] | None = None,
     ) -> None:
         self._config = config
+        if not config.is_managed:
+            raise ValueError("Workers must be started by Node Agent with managed identity")
         if model_id is None:
-            if config.worker_join_token:
-                raise ValueError("model_id is required for managed Workers")
-            # Preserve the explicit unmanaged/legacy construction path.
-            model_id = "resnet18_groupnorm"
+            raise ValueError("model_id is required for managed Workers")
         self._adapter = PyTorchAdapter(
             build_model(model_id, initialization_seed=initialization_seed, device=device),
             functional.cross_entropy,
@@ -55,6 +54,8 @@ class WorkerProcess:
         self._connect_timeout = connect_timeout_seconds
         self._opener = opener
         self._stop = threading.Event()
+        self._completed = threading.Event()
+        self._send_lock = threading.RLock()
         self._failed = threading.Event()
         self._busy = threading.Event()
         self._lock = threading.Lock()
@@ -93,7 +94,7 @@ class WorkerProcess:
         return client
 
     def _received(self, client, message, operation):
-        if client is not self._client:
+        if client is not self._client or self._completed.is_set():
             return
         self._asynchronous = client.training_strategy == "async_sgd"
         if isinstance(message, (Stop, Error)):
@@ -102,7 +103,7 @@ class WorkerProcess:
             self._enqueue(client, self._on_message, message, operation)
 
     def _enqueue(self, client, callback, *args):
-        if client is not self._client or self._stop.is_set():
+        if client is not self._client or self._stop.is_set() or self._completed.is_set():
             return
         try:
             self._jobs.put_nowait((client, callback, args))
@@ -117,7 +118,12 @@ class WorkerProcess:
                 client, callback, args = self._jobs.get(timeout=0.1)
             except Empty:
                 continue
-            if client is self._client and client.connected and not self._stop.is_set():
+            if (
+                client is self._client
+                and client.connected
+                and not self._stop.is_set()
+                and not self._completed.is_set()
+            ):
                 callback(*args, client=client)
 
     def _lost(self, client):
@@ -153,6 +159,9 @@ class WorkerProcess:
         delay = 0.5
         try:
             while not self._stop.is_set():
+                if self._completed.is_set():
+                    self._stop.wait()
+                    break
                 client = self._client
                 self._connection_lost.clear()
                 try:
@@ -160,6 +169,8 @@ class WorkerProcess:
                     self._asynchronous = ack.training_strategy == "async_sgd"
                     delay = 0.5
                     while not self._stop.is_set() and not self._connection_lost.wait(0.1):
+                        if self._completed.is_set():
+                            break
                         if client.write_timed_out(time.monotonic()):
                             logger.warning("Runtime DTP write stalled; closing the connection")
                             self._lost(client)
@@ -180,6 +191,8 @@ class WorkerProcess:
                 client.disconnect()
                 if self._stop.is_set():
                     break
+                if self._completed.is_set():
+                    continue
                 if time.monotonic() >= (self._reconnect_deadline or deadline):
                     self._failed.set()
                     break
@@ -199,7 +212,7 @@ class WorkerProcess:
         return not self._failed.is_set()
 
     def _on_disconnect(self) -> None:
-        if not self._stop.is_set():
+        if not self._stop.is_set() and not self._completed.is_set():
             if self._asynchronous:
                 if self._reconnect_deadline is None:
                     self._reconnect_deadline = time.monotonic() + self._connect_timeout
@@ -218,13 +231,18 @@ class WorkerProcess:
                 self._compute(message, operation_id, client=client)
             elif isinstance(message, Stop):
                 logger.info(
-                    "Runtime stopped worker: state=%s reason=%s",
+                    "Runtime training finished: state=%s reason=%s",
                     message.attempt_state,
                     message.reason_code,
                 )
-                if message.attempt_state != "COMPLETED":
+                if message.attempt_state == "COMPLETED":
+                    with self._send_lock:
+                        self._completed.set()
+                    logger.info("Waiting for Node Agent STOP_WORKER")
+                    client.disconnect()
+                else:
                     self._failed.set()
-                self._stop.set()
+                    self._stop.set()
             elif isinstance(message, Error):
                 raise RuntimeError(
                     f"Runtime protocol error: {message.error_code}: {message.message}"
@@ -233,7 +251,11 @@ class WorkerProcess:
             self._lost(client)
             client.disconnect()
         except Exception:
-            if client is not self._client or self._connection_lost.is_set():
+            if (
+                client is not self._client
+                or self._connection_lost.is_set()
+                or self._completed.is_set()
+            ):
                 return
             logger.exception("Worker message processing failed")
             self._failed.set()
@@ -301,7 +323,7 @@ class WorkerProcess:
                 provision.bytes_downloaded,
             )
 
-        if client is not self._client or self._connection_lost.is_set():
+        if client is not self._client or self._connection_lost.is_set() or self._completed.is_set():
             return
         with self._lock:
             self._loop = TrainingLoop(
@@ -313,26 +335,35 @@ class WorkerProcess:
             self._dataset_cache = dataset_cache
         shard_manifest = result.shard.shard_manifest
         root_reference = result.shard.root_manifest["shards"][key.shard_id]
-        client.send_shard_ready(
-            ShardReady.from_dict(
-                {
-                    "dataset_build_id": key.dataset_build_id,
-                    "dataset_manifest_hash": key.dataset_manifest_hash,
-                    "shard_id": key.shard_id,
-                    "shard_manifest_hash": root_reference["shard_manifest_sha256"],
-                    "verified_batch_count": shard_manifest["batch_count"],
-                    "verified_sample_count": shard_manifest["sample_count"],
-                    "cache_key": key.directory_key,
-                    "completed_at": datetime.now(UTC).isoformat(),
-                }
+        with self._send_lock:
+            if self._completed.is_set():
+                return
+            client.send_shard_ready(
+                ShardReady.from_dict(
+                    {
+                        "dataset_build_id": key.dataset_build_id,
+                        "dataset_manifest_hash": key.dataset_manifest_hash,
+                        "shard_id": key.shard_id,
+                        "shard_manifest_hash": root_reference["shard_manifest_sha256"],
+                        "verified_batch_count": shard_manifest["batch_count"],
+                        "verified_sample_count": shard_manifest["sample_count"],
+                        "cache_key": key.directory_key,
+                        "completed_at": datetime.now(UTC).isoformat(),
+                    }
+                )
             )
-        )
-        client.send_model_manifest()
+        with self._send_lock:
+            if self._completed.is_set():
+                return
+            client.send_model_manifest()
         if client.worker_id == 0 and not client.model_initialized:
-            client.send_model_init(
-                flatten_bundle(self._adapter.export_parameters()),
-                initialization_seed=self._initialization_seed,
-            )
+            with self._send_lock:
+                if self._completed.is_set():
+                    return
+                client.send_model_init(
+                    flatten_bundle(self._adapter.export_parameters()),
+                    initialization_seed=self._initialization_seed,
+                )
         logger.info(
             "Shard ready shard_id=%s samples=%s batches=%s cache_reused=%s bytes=%s cache_scope=%s",
             key.shard_id,
@@ -345,6 +376,8 @@ class WorkerProcess:
 
     def _compute(self, message: StepStart, operation_id: int, *, client=None) -> None:
         client = client or self._client
+        if self._completed.is_set():
+            return
         self._busy.set()
         try:
             with self._lock:
@@ -365,31 +398,41 @@ class WorkerProcess:
             t_start = time.perf_counter()
             computed = loop.compute(assignment)
             compute_ms = max((time.perf_counter() - t_start) * 1000.0, 0.001)
-            if client is not self._client or self._connection_lost.is_set() or self._stop.is_set():
+            if (
+                client is not self._client
+                or self._connection_lost.is_set()
+                or self._stop.is_set()
+                or self._completed.is_set()
+            ):
                 self._busy.clear()
                 return
             with self._lock:
                 self._pending = assignment
                 self._epoch = int(message.epoch)
                 self._next_batch_ordinal = assignment.batch_ordinal
-            client.send_gradient(
-                flatten_bundle(computed.local_gradient.bundle),
-                operation_id=operation_id,
-                model_version=assignment.input_model_version,
-                shard_id=assignment.shard_id,
-                batch_id=assignment.batch_id,
-                batch_ordinal=assignment.batch_ordinal,
-                sample_count=computed.local_gradient.sample_count,
-                tensor_id=client.worker_id,
-                loss=computed.local_gradient.loss,
-                compute_ms=compute_ms,
-                correct_count=computed.local_gradient.correct_count,
-            )
+            with self._send_lock:
+                if self._completed.is_set():
+                    return
+                client.send_gradient(
+                    flatten_bundle(computed.local_gradient.bundle),
+                    operation_id=operation_id,
+                    model_version=assignment.input_model_version,
+                    shard_id=assignment.shard_id,
+                    batch_id=assignment.batch_id,
+                    batch_ordinal=assignment.batch_ordinal,
+                    sample_count=computed.local_gradient.sample_count,
+                    tensor_id=client.worker_id,
+                    loss=computed.local_gradient.loss,
+                    compute_ms=compute_ms,
+                    correct_count=computed.local_gradient.correct_count,
+                )
         except Exception:
             self._busy.clear()
             raise
 
     def _on_parameters(self, transfer: CompletedTensorTransfer, *, client=None) -> None:
+        if self._completed.is_set():
+            return
         from pbl4.worker.training_flows import async_sgd, sync
 
         handler = async_sgd if "work_units" in transfer.metadata else sync
@@ -408,14 +451,17 @@ class WorkerProcess:
                     step = self._last_step
                     epoch = self._epoch
                     ordinal = self._next_batch_ordinal
-                client.send_heartbeat(
-                    local_model_version=version,
-                    last_completed_operation_id=operation,
-                    worker_state="WAITING",
-                    epoch=epoch,
-                    next_batch_ordinal=ordinal,
-                    last_completed_step_id=step,
-                )
+                with self._send_lock:
+                    if self._completed.is_set():
+                        return
+                    client.send_heartbeat(
+                        local_model_version=version,
+                        last_completed_operation_id=operation,
+                        worker_state="WAITING",
+                        epoch=epoch,
+                        next_batch_ordinal=ordinal,
+                        last_completed_step_id=step,
+                    )
             except Exception:
                 logger.exception("Heartbeat transmission failed")
                 self._lost(client)

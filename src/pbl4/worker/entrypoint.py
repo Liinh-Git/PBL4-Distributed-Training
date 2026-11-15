@@ -58,11 +58,11 @@ def main() -> None:
     if join_token and not args.model_id:
         parser.error("--model-id is required for managed Workers")
     managed_items = (args.attempt_id, args.allocation_id, args.node_id, join_token)
-    if any(item is not None for item in managed_items) and not all(
+    if not all(
         isinstance(item, str) and item for item in managed_items
     ):
         parser.error(
-            "When running with managed identity, --attempt-id, --allocation-id, "
+            "Workers must be started by Node Agent; --attempt-id, --allocation-id, "
             "--node-id, and PBL4_WORKER_JOIN_TOKEN environment variable must all be provided"
         )
 

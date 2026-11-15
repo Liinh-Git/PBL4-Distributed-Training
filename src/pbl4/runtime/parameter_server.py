@@ -127,7 +127,6 @@ class ParameterServer:
         heartbeat_timeout_ms: int = 15_000,
         max_tensor_chunk_bytes: int = 1024 * 1024,
         worker_admission_secret: str | None = None,
-        require_worker_admission: bool = False,
         require_compute_ms: bool = False,
         training_strategy: str = "strict_bsp",
         manifest_handler: Callable[[int, int], bool | None] | None = None,
@@ -152,7 +151,6 @@ class ParameterServer:
         self._heartbeat_timeout_ms = heartbeat_timeout_ms
         self._max_chunk = max_tensor_chunk_bytes
         self._worker_admission_secret = worker_admission_secret
-        self._require_worker_admission = require_worker_admission
         self._require_compute_ms = require_compute_ms
         self.training_strategy = training_strategy
         self._manifest_handler = manifest_handler
@@ -274,7 +272,16 @@ class ParameterServer:
 
             # Admission check strictly BEFORE WorkerRegistry.register()
             is_managed = hello.is_managed
-            join_key = str(hello.allocation_id) if is_managed else str(hello.client_instance_id)
+            if not is_managed:
+                self._send_admission_error(
+                    sock,
+                    ERROR_CODE_WORKER_ADMISSION_REQUIRED,
+                    "Managed worker admission is required; missing join credentials",
+                )
+                sock.close()
+                return
+
+            join_key = str(hello.allocation_id)
             token_digest = hashlib.sha256(
                 str(hello.values.get("worker_join_token", "")).encode()
             ).hexdigest()
@@ -286,23 +293,14 @@ class ParameterServer:
             with self._lock:
                 previous = self._join_bindings.get(join_key) if asynchronous else None
             rejoining = previous is not None
-            if rejoining and is_managed and hello.attempt_id != self.attempt_id:
+            if rejoining and hello.attempt_id != self.attempt_id:
                 raise ProtocolError("Wrong managed rejoin Attempt")
             if rejoining and (
                 not hmac.compare_digest(previous[0], token_digest)
                 or previous[1:3] != binding_identity[1:]
             ):
                 raise ProtocolError("Rejoin credential binding mismatch")
-            if self._require_worker_admission and not is_managed:
-                self._send_admission_error(
-                    sock,
-                    ERROR_CODE_WORKER_ADMISSION_REQUIRED,
-                    "Managed worker admission is required; missing join credentials",
-                )
-                sock.close()
-                return
-
-            if is_managed and not rejoining:
+            if not rejoining:
                 if not self._worker_admission_secret:
                     self._send_admission_error(
                         sock,
@@ -342,11 +340,7 @@ class ParameterServer:
                     and len(self._join_bindings) >= self.expected_workers
                 ):
                     raise ProtocolError("Async allocation capacity is full")
-                if (
-                    is_managed
-                    and hello.allocation_id in self._admitted_allocation_ids
-                    and not rejoining
-                ):
+                if hello.allocation_id in self._admitted_allocation_ids and not rejoining:
                     duplicate_admission = True
                     registered = None
                 else:
@@ -355,8 +349,7 @@ class ParameterServer:
                     registered = self.registry.register(
                         session_id, time.monotonic(), previous[3] if rejoining else None
                     )
-                    if is_managed:
-                        self._admitted_allocation_ids.add(str(hello.allocation_id))
+                    self._admitted_allocation_ids.add(str(hello.allocation_id))
                     if asynchronous:
                         self._join_bindings[join_key] = (*binding_identity, registered.worker_id)
 
@@ -400,8 +393,8 @@ class ParameterServer:
                     connected_at=connected_at,
                     last_heartbeat_at=connected_at,
                     last_seen=time.monotonic(),
-                    node_id=str(hello.node_id) if is_managed else None,
-                    allocation_id=str(hello.allocation_id) if is_managed else None,
+                    node_id=str(hello.node_id),
+                    allocation_id=str(hello.allocation_id),
                 )
                 self._connections[registered.worker_id] = connection
                 if asynchronous:
@@ -414,8 +407,8 @@ class ParameterServer:
                     "connected_at": connected_at,
                     "last_heartbeat_at": connected_at,
                     "disconnected_at": None,
-                    "node_id": str(hello.node_id) if is_managed else None,
-                    "allocation_id": str(hello.allocation_id) if is_managed else None,
+                    "node_id": str(hello.node_id),
+                    "allocation_id": str(hello.allocation_id),
                     "shard_id": None,
                     "local_model_version": None,
                 }

@@ -144,7 +144,6 @@ class RuntimeProcess:
         parameter_manifests: dict[str, ParameterManifest] | None = None,
         heartbeat_timeout_seconds: float = 120.0,
         worker_admission_secret: str | None = None,
-        require_worker_admission: bool = True,
         redis_url: str | None = None,
         redis_event_stream: str = "pbl4:runtime-events",
     ) -> None:
@@ -159,7 +158,6 @@ class RuntimeProcess:
             raise ValueError("At least one parameter manifest is required")
         self._heartbeat_timeout = heartbeat_timeout_seconds
         self._worker_admission_secret = worker_admission_secret
-        self._require_worker_admission = require_worker_admission
         self._redis_url = redis_url
         self._redis_event_stream = redis_event_stream
         self._lock = threading.Lock()
@@ -426,7 +424,6 @@ class _AttemptRunner:
                 manifest=self._manifest,
                 registry=registry,
                 worker_admission_secret=self._process._worker_admission_secret,
-                require_worker_admission=self._process._require_worker_admission,
                 require_compute_ms=True,
                 training_strategy=str(
                     contract["synchronization"].get("training_strategy", "strict_bsp")

@@ -62,17 +62,15 @@ def plan_topology(
         print(f"  Node [{label}]:")
         print(f"    Target Runtime DTP: {runtime_host}:{dtp_display}")
         print(f"    Initial Identity: node_label='{label}' (worker_id assigned upon registration)")
-        print(
-            f"    Command: uv run pbl4-worker --node-label {label} "
-            f"--runtime-host {runtime_host} --runtime-port {dtp_display} "
-            f"--initialization-seed {initialization_seed}"
-        )
+        print("    Start Node Agent and select its enrolled Node through Backend job APIs.")
+        print("    Backend issues START_WORKER; Node Agent supplies managed credentials.")
         print("    Note: Uses identical DTP/1 TCP socket path regardless of assigned logical rank.")
 
     print("")
     print("Process Flow:")
     print("  1. Runtime starts and opens DTP/1 TCP listening socket.")
-    print("  2. Workers connect to Runtime over TCP and transmit HELLO handshake.")
+    print("  2. Backend commands Node Agents to start Workers with managed credentials.")
+    print("     Workers connect to Runtime over DTP/1 and transmit HELLO.")
     print("  3. Runtime registers sessions and assigns logical worker ranks dynamically.")
     print(
         "  4. Whichever session is assigned worker_id=0 communicates over TCP "

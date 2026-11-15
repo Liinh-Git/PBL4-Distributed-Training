@@ -14,7 +14,6 @@ import os
 import shutil
 import socket
 import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -340,303 +339,7 @@ class Harness:
         )
 
     def run(self) -> dict[str, Any]:
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        env["PYTHONPATH"] = str(self.repo / "src")
-        cache_archive = (self.repo / ".var" / "cache" / "cifar-10-binary.tar.gz").resolve()
-        if cache_archive.is_file():
-            env["PBL4_CIFAR10_SOURCE_ARCHIVE"] = str(cache_archive)
-        self.setup_postgres(env)
-        assert self.database_url is not None
-        env["DATABASE_URL"] = self.database_url
-
-        manifest_path = self.artifacts / "parameter-manifest.json"
-        self.checked(
-            "derive-parameter-manifest",
-            [
-                sys.executable,
-                str(self.repo / "scripts" / "derive_parameter_manifest.py"),
-                "--output",
-                str(manifest_path),
-                "--seed",
-                str(self.args.training_seed),
-            ],
-            env=env,
-        )
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        parameter_hash = manifest["parameter_manifest_hash"]
-        if (
-            _sha256(
-                _canonical(
-                    {
-                        key: value
-                        for key, value in manifest.items()
-                        if key != "parameter_manifest_hash"
-                    }
-                )
-            )
-            != parameter_hash
-        ):
-            raise AssertionError("Derived Parameter Manifest self-hash mismatch")
-        self.result["parameter_manifest_hash"] = parameter_hash
-        env["CANONICAL_PARAMETER_MANIFEST_HASH"] = parameter_hash
-
-        self.checked(
-            "alembic-upgrade-head", [sys.executable, "-m", "alembic", "upgrade", "head"], env=env
-        )
-        self.result["migrations"] = "upgrade head succeeded"
-
-        checkpoint_dir = self.artifacts / "checkpoints"
-        self.wait_http(f"{self.dataset_manager_url}/healthz", 30, "Dataset Manager")
-        self.start_child(
-            "runtime",
-            [
-                sys.executable,
-                "-m",
-                "pbl4.runtime.entrypoint",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(self.dtp_port),
-                "--management-port",
-                str(self.management_port),
-                "--dataset-manager-url",
-                self.dataset_manager_url,
-                "--checkpoint-dir",
-                str(checkpoint_dir),
-                "--parameter-manifest",
-                str(manifest_path),
-                "--heartbeat-timeout",
-                str(self.args.heartbeat_timeout),
-            ],
-            env,
-        )
-        backend_env = {
-            **env,
-            "BACKEND_HOST": "127.0.0.1",
-            "BACKEND_PORT": str(self.backend_port),
-            "RUNTIME_HOST": "127.0.0.1",
-            "RUNTIME_MANAGEMENT_PORT": str(self.management_port),
-            "DATASET_MANAGER_URL": self.dataset_manager_url,
-            "DATASET_MANAGER_HOST": "127.0.0.1",
-            "DATASET_MANAGER_PORT": str(self.dataset_port),
-            "EXPECTED_WORKERS": "3",
-        }
-        self.start_child(
-            "backend",
-            [
-                sys.executable,
-                "-m",
-                "pbl4.management_backend.entrypoint",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(self.backend_port),
-            ],
-            backend_env,
-        )
-        self.wait_http(f"{self.base_url}/api/v1/health", 60, "Management Backend")
-        health = self.request("GET", "/api/v1/health")["data"]
-        if health["postgres"] != "healthy" or health["dataset_manager"] != "healthy":
-            raise AssertionError(f"Management health is degraded: {health}")
-        self.wait_value(
-            lambda: self.request("GET", "/api/v1/runtime/snapshot")["data"],
-            lambda value: not value["stale"] and bool(value["runtime_instance_id"]),
-            60,
-            "Backend-to-Runtime MCP/1 connection",
-        )
-
-        if self.args.reuse_build_id:
-            build_id = self.args.reuse_build_id
-            dataset = {"dataset_id": self.args.reuse_dataset_id}
-        else:
-            dataset = self.request(
-                "POST",
-                "/api/v1/datasets",
-                {
-                    "name": f"CIFAR-10 E2E {self.run_id}",
-                    "task_type": "image_classification",
-                    "source_type": "builtin",
-                    "source_reference": "cifar10",
-                },
-                idempotency_key=f"{self.run_id}-dataset",
-            )["data"]
-            build_start = self.request(
-                "POST",
-                "/api/v1/dataset-builds",
-                {
-                    "dataset_id": dataset["dataset_id"],
-                    "profile": "CNN_IMAGE_CLASSIFICATION_V1",
-                    "batch_size": self.args.batch_size,
-                    "partition_seed": self.args.partition_seed,
-                },
-                idempotency_key=f"{self.run_id}-build",
-                timeout=60,
-            )["data"]
-            build_id = build_start["dataset_build_id"]
-        build = self.wait_value(
-            lambda: self.request("GET", f"/api/v1/dataset-builds/{build_id}")["data"],
-            lambda value: value["state"] in {"READY", "FAILED"},
-            self.args.dataset_timeout,
-            "Dataset Build READY",
-        )
-        if build["state"] != "READY":
-            raise AssertionError(f"Dataset Build failed: {build}")
-        manifest_url = build["manifest_summary"]["artifact_base_url"] + "/manifest.json"
-        with urllib.request.urlopen(manifest_url, timeout=30) as response:
-            root_bytes = response.read()
-        root_manifest = json.loads(root_bytes)
-        if _canonical(root_manifest) != root_bytes:
-            raise AssertionError("Dataset Manifest is not canonical JSON")
-        if _sha256(root_bytes) != build["manifest_summary"]["dataset_manifest_hash"]:
-            raise AssertionError("Dataset Manifest hash mismatch")
-        if (
-            root_manifest["sample_count"] != 50_000
-            or root_manifest["shard_count"] != 3
-            or len(root_manifest["shards"]) != 3
-        ):
-            raise AssertionError(
-                f"Dataset is not the full real CIFAR-10 training set: {root_manifest}"
-            )
-        total_steps = int(root_manifest["batch_count_per_shard"])
-        self.result["dataset"] = {
-            "dataset_id": dataset["dataset_id"],
-            "dataset_build_id": build_id,
-            "dataset_manifest_hash": build["manifest_summary"]["dataset_manifest_hash"],
-            "sample_count": root_manifest["sample_count"],
-            "shard_count": root_manifest["shard_count"],
-            "batch_count_per_shard": total_steps,
-        }
-
-        job = self.request(
-            "POST",
-            "/api/v1/jobs",
-            {
-                "display_name": f"E2E-HAPPY-01 {self.run_id}",
-                "description": "Real CIFAR-10, three-process-worker Strict BSP acceptance run",
-                "requested_contract": {
-                    "dataset_build_id": build_id,
-                    "model_id": "resnet18_groupnorm",
-                    "epochs": 1,
-                    "learning_rate": self.args.learning_rate,
-                    "training_seed": self.args.training_seed,
-                    "training_strategy": "strict_bsp",
-                },
-            },
-            idempotency_key=f"{self.run_id}-job",
-        )["data"]
-        job_id = job["job_id"]
-        validation = self.request("POST", f"/api/v1/jobs/{job_id}/validate")["data"]
-        if validation["errors"] or validation["resolved_preview"] is None:
-            raise AssertionError(f"Job validation failed: {validation}")
-        preview = validation["resolved_preview"]
-        if (
-            preview["model"]["parameter_manifest_hash"] != parameter_hash
-            or preview["synchronization"]["expected_workers"] != 3
-        ):
-            raise AssertionError("Resolved preview does not contain real model/3-worker identity")
-        started = self.request(
-            "POST",
-            f"/api/v1/jobs/{job_id}/start",
-            {"note": "E2E-HAPPY-01"},
-            idempotency_key=f"{self.run_id}-start",
-        )["data"]
-        attempt_id = started["attempt_id"]
-        frozen = self.request("GET", f"/api/v1/jobs/{job_id}")["data"]
-        if (
-            frozen["state"] != "READY"
-            or not frozen["contract_hash"]
-            or frozen["resolved_contract"]["model"]["parameter_manifest_hash"] != parameter_hash
-        ):
-            raise AssertionError(f"Job was not canonically frozen by start: {frozen}")
-        self.result["job"] = {
-            "job_id": job_id,
-            "contract_hash": frozen["contract_hash"],
-            "attempt_id": attempt_id,
-            "execution_mode": started["execution_mode"],
-        }
-
-        workers = []
-        for index in range(3):
-            cache_dir = self.runtime_data / f"worker-{index}-cache"
-            workers.append(
-                self.start_child(
-                    f"worker-{index}",
-                    [
-                        sys.executable,
-                        "-m",
-                        "pbl4.worker.entrypoint",
-                        "--runtime-host",
-                        "127.0.0.1",
-                        "--runtime-port",
-                        str(self.dtp_port),
-                        "--node-label",
-                        f"local-worker-process-{index}",
-                        "--cache-dir",
-                        str(cache_dir),
-                        "--initialization-seed",
-                        str(self.args.training_seed),
-                        "--device",
-                        "cpu",
-                        "--heartbeat-interval",
-                        str(self.args.heartbeat_interval),
-                    ],
-                    env,
-                )
-            )
-
-        if self.args.smoke_steps:
-            smoke = self.wait_value(
-                lambda: self._poll_smoke(attempt_id),
-                lambda value: len(value["steps"]) >= self.args.smoke_steps,
-                self.args.training_timeout,
-                f"at least {self.args.smoke_steps} committed synchronized updates",
-            )
-            self._controlled_abort = True
-            self.request(
-                "POST",
-                f"/api/v1/attempts/{attempt_id}/abort",
-                {"reason": "Black-box smoke proof complete"},
-                idempotency_key=f"{self.run_id}-abort",
-            )
-            final_snapshot = self.wait_value(
-                lambda: self._poll_attempt(attempt_id),
-                lambda value: value["attempt"]["state"] == "ABORTED",
-                120,
-                "controlled smoke Attempt ABORTED",
-            )
-            for worker in workers:
-                worker.process.wait(timeout=60)
-            committed = len(smoke["steps"])
-            self.verify(attempt_id, committed, parameter_hash, checkpoint_dir, is_smoke=True)
-            self.result["duration_seconds"] = round(time.monotonic() - self.started_at, 3)
-            self.result["finished_at"] = _now()
-            self.result["verdict"] = "SMOKE_PASS"
-            return self.result
-
-        final_snapshot = self.wait_value(
-            lambda: self._poll_attempt(attempt_id),
-            lambda value: value["attempt"]["state"] in {"COMPLETED", "FAILED", "ABORTED"},
-            self.args.training_timeout,
-            "Attempt terminal state",
-        )
-        if final_snapshot["attempt"]["state"] != "COMPLETED":
-            raise AssertionError(f"Attempt did not complete: {final_snapshot}")
-        for worker in workers:
-            try:
-                code = worker.process.wait(timeout=60)
-            except subprocess.TimeoutExpired as exc:
-                raise AssertionError(f"{worker.name} did not terminate after completion") from exc
-            if code != 0:
-                raise AssertionError(f"{worker.name} exited {code}; see {worker.log_path}")
-
-        self.verify(attempt_id, total_steps, parameter_hash, checkpoint_dir)
-        self.result["final_runtime"] = final_snapshot["runtime"]
-        self.result["final_attempt"] = final_snapshot["attempt"]
-        self.result["duration_seconds"] = round(time.monotonic() - self.started_at, 3)
-        self.result["finished_at"] = _now()
-        self.result["verdict"] = "PASS"
-        return self.result
+        raise RuntimeError("Use scripts/e2e_agents.py; Workers must be created by Node Agent")
 
     def _poll_attempt(self, attempt_id: str) -> dict[str, Any]:
         runtime = self.request("GET", "/api/v1/runtime/snapshot")["data"]
@@ -737,12 +440,7 @@ class Harness:
             if item["details"]["source_operation_id"] < total_steps
         ]
 
-        if not (
-            len(started)
-            == len(updated)
-            == total_steps
-            and len(applied) == total_steps * 3
-        ):
+        if not (len(started) == len(updated) == total_steps and len(applied) == total_steps * 3):
             raise AssertionError("Per-step event cardinality invariant failed")
         if is_smoke:
             if len(checkpoint_started) != len(checkpoint_saved):
@@ -790,11 +488,18 @@ class Harness:
                 ):
                     raise AssertionError("Checkpoint saved before all worker acks")
                 next_start = by_operation_start.get(operation + 1)
-                if next_start and saved_event["runtime_event_seq"] >= next_start["runtime_event_seq"]:
+                if (
+                    next_start
+                    and saved_event["runtime_event_seq"] >= next_start["runtime_event_seq"]
+                ):
                     raise AssertionError("Next Step opened before prior checkpoint commit")
             else:
                 next_start = by_operation_start.get(operation + 1)
-                if next_start and min(item["runtime_event_seq"] for item in ack_events) >= next_start["runtime_event_seq"]:
+                if (
+                    next_start
+                    and min(item["runtime_event_seq"] for item in ack_events)
+                    >= next_start["runtime_event_seq"]
+                ):
                     raise AssertionError("Next Step opened before current step ACKs")
 
         all_checkpoints = self.request(
@@ -917,21 +622,9 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    harness = Harness(_parser().parse_args())
-    error: BaseException | None = None
-    try:
-        result = harness.run()
-        harness.log(
-            f"PASS steps={result['steps']} final_model_version={result['final_model_version']} "
-            f"duration_seconds={result['duration_seconds']}"
-        )
-    except BaseException as exc:
-        error = exc
-        harness.log(f"FAIL {type(exc).__name__}: {exc}")
-    finally:
-        harness.finish(error)
-    if error is not None:
-        raise error
+    from e2e_agents import main as agent_main
+
+    agent_main()
 
 
 if __name__ == "__main__":

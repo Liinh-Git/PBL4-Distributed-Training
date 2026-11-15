@@ -1210,6 +1210,7 @@ class RuntimeGateway:
                 now=occurred_at,
                 failure_code=failure_code or "ATTEMPT_TERMINATED",
                 failure_message=failure_message or f"Attempt transitioned to {effective_state}",
+                completed=effective_state == "COMPLETED",
             )
         return updated
 

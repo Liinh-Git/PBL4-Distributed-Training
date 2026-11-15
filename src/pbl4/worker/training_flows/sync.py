@@ -21,11 +21,14 @@ def on_parameters(worker, client, transfer):
         if pending is None:
             loop.initialize_parameters(target_version, bundle)
             worker._local_version = target_version
-            client.send_ready(
-                model_version=target_version,
-                dataset_build_id=shard_key.dataset_build_id,
-                shard_id=shard_key.shard_id,
-            )
+            with worker._send_lock:
+                if worker._completed.is_set():
+                    return
+                client.send_ready(
+                    model_version=target_version,
+                    dataset_build_id=shard_key.dataset_build_id,
+                    shard_id=shard_key.shard_id,
+                )
             worker._mark_ready(client)
             worker._busy.clear()
             return
@@ -33,11 +36,14 @@ def on_parameters(worker, client, transfer):
         worker._local_version = target_version
         if loop.consume_parameter_applied() != eligibility:
             raise ValueError("Parameter application eligibility changed")
-        client.send_parameter_applied(
-            operation_id=eligibility.operation_id,
-            source_step_id=eligibility.step_id,
-            model_version=eligibility.model_version,
-        )
+        with worker._send_lock:
+            if worker._completed.is_set():
+                return
+            client.send_parameter_applied(
+                operation_id=eligibility.operation_id,
+                source_step_id=eligibility.step_id,
+                model_version=eligibility.model_version,
+            )
         with worker._lock:
             worker._pending = None
             worker._last_operation = eligibility.operation_id
@@ -53,7 +59,11 @@ def on_parameters(worker, client, transfer):
         worker._lost(client)
         client.disconnect()
     except Exception:
-        if client is not worker._client or worker._connection_lost.is_set():
+        if (
+            client is not worker._client
+            or worker._connection_lost.is_set()
+            or worker._completed.is_set()
+        ):
             return
         logger.exception("Canonical parameter application failed")
         worker._failed.set()

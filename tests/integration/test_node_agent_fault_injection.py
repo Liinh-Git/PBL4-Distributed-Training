@@ -118,7 +118,6 @@ class TestFaultInvariant1AgentRestart(unittest.TestCase):
             manifest=self.manifest,
             registry=self.registry,
             worker_admission_secret=self.secret,
-            require_worker_admission=True,
         )
         self.server.start()
         self.host, self.port = self.server.bound_address or ("127.0.0.1", 0)
@@ -276,7 +275,6 @@ class TestFaultInvariant2BackendRestart(unittest.TestCase):
             manifest=self.manifest,
             registry=self.registry,
             worker_admission_secret="backend-restart-secret-key-32ch!",
-            require_worker_admission=True,
         )
         self.server.start()
         self.host, self.port = self.server.bound_address or ("127.0.0.1", 0)
@@ -516,7 +514,6 @@ class TestFaultInvariant4WorkerAdmission(unittest.TestCase):
             manifest=self.manifest,
             registry=self.registry,
             worker_admission_secret=self.secret,
-            require_worker_admission=True,
         )
         self.server.start()
         self.host, self.port = self.server.bound_address or ("127.0.0.1", 0)
@@ -783,6 +780,7 @@ class TestParameterServerLivenessDuplicateFix(unittest.TestCase):
             expected_workers=1,
             manifest=self.manifest,
             registry=self.registry,
+            worker_admission_secret="liveness-secret",
         )
         self.server.start()
         self.host, self.port = self.server.bound_address or ("127.0.0.1", 0)
@@ -793,7 +791,16 @@ class TestParameterServerLivenessDuplicateFix(unittest.TestCase):
     def test_heartbeat_frame_invokes_registry_heartbeat_exactly_once(self) -> None:
         s = socket.create_connection((self.host, self.port), timeout=5.0)
         try:
-            hello = Hello.from_dict(_base_hello_dict())
+            hello_data = _base_hello_dict()
+            hello_data.update(
+                attempt_id="att-liveness",
+                allocation_id="alloc-liveness",
+                node_id="node-liveness",
+                worker_join_token=issue_worker_join_token(
+                    "liveness-secret", "att-liveness", "alloc-liveness", "node-liveness"
+                ),
+            )
+            hello = Hello.from_dict(hello_data)
             frame = build_control_frame(hello)
             frame.write_to(s, send_all)
 
