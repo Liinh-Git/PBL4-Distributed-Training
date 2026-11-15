@@ -103,6 +103,8 @@ class _Connection:
     allocation_id: str | None = None
     offered: tuple[int, int, bool] | None = None
     initialization_version: int | None = None
+    hello_ack_sent: bool = False
+    dataset_assignment_sent: bool = False
 
 
 class ParameterServer:
@@ -160,6 +162,7 @@ class ParameterServer:
         self._admission_open = admission_open or (lambda: True)
         self._join_bindings: dict[str, tuple[str, str, str, int]] = {}
         self._dataset_assignments: dict[int, DatasetAssignment] = {}
+        self._expected_shard_ready: dict[int, dict] = {}
         self._initial_parameters = None
         self._server = TcpServer(host, port, self._serve_connection)
         self._lock = threading.Lock()
@@ -439,9 +442,8 @@ class ParameterServer:
             )
             self._send_control(connection, ack)
             with self._lock:
-                assignment = self._dataset_assignments.get(connection.worker_id)
-            if assignment is not None:
-                self._send_control(connection, assignment)
+                connection.hello_ack_sent = True
+            self._send_dataset_assignment_once(connection)
             try:
                 self._read_bound(connection)
             except ContributionRejected as exc:
@@ -549,6 +551,19 @@ class ParameterServer:
             if frame.header.message_type == MESSAGE_TYPE_SHARD_READY:
                 assert message is not None
                 with self._lock:
+                    assignment = self._dataset_assignments.get(connection.worker_id)
+                    expected = self._expected_shard_ready.get(connection.worker_id, {})
+                    if assignment is not None:
+                        expected = {
+                            **expected,
+                            "dataset_build_id": assignment.dataset_build_id,
+                            "dataset_manifest_hash": assignment.dataset_manifest_hash,
+                            "shard_id": assignment.shard_id,
+                        }
+                        if any(message.values.get(key) != value for key, value in expected.items()):
+                            raise ValueError(
+                                "SHARD_READY does not match the pinned session assignment"
+                            )
                     connection.shard_id = int(message.shard_id)
                     meta = self._session_metadata.get(connection.worker_id)
                     if meta is not None and meta.get("session_id") == connection.session_id:
@@ -774,10 +789,31 @@ class ParameterServer:
         )
         connection.sender.send_frame(connection.sock, frame)
 
-    def send_dataset_assignment(self, worker_id: int, assignment: DatasetAssignment) -> None:
+    def send_dataset_assignment(
+        self, worker_id: int, assignment: DatasetAssignment, *, expected_ready: dict | None = None
+    ) -> None:
         with self._lock:
+            previous = self._dataset_assignments.get(worker_id)
+            if previous is not None and previous.to_dict() != assignment.to_dict():
+                raise ValueError("Dataset assignment is immutable for the attempt's Worker slot")
             self._dataset_assignments[worker_id] = assignment
-        self._send_control(self._connection(worker_id), assignment)
+            if expected_ready is not None:
+                self._expected_shard_ready[worker_id] = dict(expected_ready)
+        self._send_dataset_assignment_once(self._connection(worker_id))
+
+    def _send_dataset_assignment_once(self, connection: _Connection) -> None:
+        # Registration and the Runtime provisioning thread can both observe the
+        # same pending assignment. Claim it once per TCP session, after HELLO_ACK.
+        with self._lock:
+            assignment = self._dataset_assignments.get(connection.worker_id)
+            if (
+                assignment is None
+                or not connection.hello_ack_sent
+                or connection.dataset_assignment_sent
+            ):
+                return
+            connection.dataset_assignment_sent = True
+        self._send_control(connection, assignment)
 
     def send_error(
         self,

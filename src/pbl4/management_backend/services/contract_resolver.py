@@ -33,7 +33,7 @@ class ContractResolutionError(Exception):
         self.errors = errors or [msg]
 
 
-def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
+def resolve(conn: psycopg.Connection, requested_contract: dict, *, expected_workers: int) -> dict:
     """Resolve a requested_contract into an immutable resolved_contract.
 
     Validates the dataset build is READY and reads its manifest metadata.
@@ -101,7 +101,8 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
         errors.append("training_seed is required.")
     elif isinstance(training_seed, bool) or not isinstance(training_seed, int):
         errors.append("training_seed must be an integer (boolean values are rejected).")
-    expected_workers = 3
+    if type(expected_workers) is not int or not 1 <= expected_workers <= 5:
+        raise ContractResolutionError("expected_workers must be an integer from 1 to 5.")
     workload_policy = requested_contract.get("workload_policy", "equal")
     if workload_policy not in {"equal", "dbs"}:
         errors.append(f"Unsupported workload_policy '{workload_policy}'. Must be 'equal' or 'dbs'.")
@@ -131,23 +132,13 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
         errors.append("Sync cannot contain async_training settings.")
         k = expected_workers
     elif workload_policy == "equal":
-        k = wups if wups is not None else expected_workers
-        if k < expected_workers:
-            errors.append(
-                f"work_units_per_step ({k}) must be >= expected_workers "
-                f"({expected_workers}) for equal policy."
-            )
+        k = max(wups or expected_workers, expected_workers)
     elif workload_policy == "dbs":
         if wups is None:
             errors.append("work_units_per_step is required when workload_policy is 'dbs'.")
             k = expected_workers + 1
         else:
-            k = wups
-            if k <= expected_workers:
-                errors.append(
-                    f"work_units_per_step ({k}) must be strictly greater than "
-                    f"expected_workers ({expected_workers}) for dbs policy."
-                )
+            k = max(wups, expected_workers + 1)
     else:
         k = expected_workers
 
@@ -187,6 +178,37 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
 
     if errors or build is None or model_meta is None:
         raise ContractResolutionError("Contract resolution failed", errors)
+
+    shard_count = build.get("shard_count")
+    if type(shard_count) is not int or shard_count <= 0:
+        raise ContractResolutionError("Dataset build must have a positive shard_count.")
+    snapshot = build.get("manifest_snapshot_jsonb")
+    if isinstance(snapshot, str):
+        try:
+            snapshot = json.loads(snapshot)
+        except (ValueError, TypeError) as exc:
+            raise ContractResolutionError("Malformed Dataset manifest snapshot.") from exc
+    shards = snapshot.get("shards") if isinstance(snapshot, dict) else None
+    if (
+        not isinstance(shards, list)
+        or len(shards) != shard_count
+        or not all(
+            isinstance(shard, dict)
+            and type(shard.get("batch_count")) is int
+            and shard["batch_count"] > 0
+            and type(shard.get("sample_count")) is int
+            and shard["sample_count"] > 0
+            for shard in shards
+        )
+    ):
+        raise ContractResolutionError("READY Dataset build lacks verified Work Unit metadata.")
+    complete_units = sum(
+        min(shard["batch_count"], shard["sample_count"] // build["batch_size"]) for shard in shards
+    )
+    if complete_units < (k if not asynchronous else async_settings["units_per_contribution"]):
+        raise ContractResolutionError(
+            "Dataset has insufficient Work Units for one complete training operation."
+        )
 
     raw_input_shape = build.get("input_shape_json")
     if raw_input_shape is not None and raw_input_shape != "":
@@ -282,7 +304,7 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
             "dtype": build.get("dtype", "float32"),
             "num_classes": build.get("num_classes", model_meta.get("num_classes", 10)),
             "batch_size": build["batch_size"],
-            "shard_count": 3,
+            "shard_count": shard_count,
             "preprocessing": resolved_preprocessing,
         },
         "model": {
@@ -301,7 +323,7 @@ def resolve(conn: psycopg.Connection, requested_contract: dict) -> dict:
         },
         "synchronization": {
             "training_strategy": training_strategy,
-            "expected_workers": 3,
+            "expected_workers": expected_workers,
         },
         "update_policy": {
             "type": "plain_sgd_without_momentum",

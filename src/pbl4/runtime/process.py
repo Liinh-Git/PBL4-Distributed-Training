@@ -469,9 +469,10 @@ class _AttemptRunner:
                 root_manifest_path=root_manifest_path,
             )
             self._dataset = dataset
-            if dataset.shard_count != expected_workers:
-                raise ValueError("Pinned Dataset Manifest shard count differs from membership")
+            if dataset.shard_count != dataset_contract.get("shard_count", dataset.shard_count):
+                raise ValueError("Pinned Dataset Manifest shard count differs from contract")
             shard_manifests = self._fetch_shard_manifests(dataset)
+            shard_ids = sorted(int(manifest["shard_id"]) for manifest in shard_manifests)
 
             self._wait_for(
                 lambda: server.wait_for_workers(expected_workers, 0.0),
@@ -480,22 +481,34 @@ class _AttemptRunner:
             )
             self._set_state("PROVISIONING")
             for worker_id in server.worker_ids():
+                shard_id = shard_ids[worker_id % len(shard_ids)]
+                shard_manifest = next(
+                    item for item in shard_manifests if item["shard_id"] == shard_id
+                )
+                shard_reference = next(
+                    item for item in dataset.value["shards"] if item["shard_id"] == shard_id
+                )
                 server.send_dataset_assignment(
                     worker_id,
                     DatasetAssignment.from_dict(
                         {
                             "dataset_build_id": dataset.dataset_build_id,
                             "dataset_manifest_hash": dataset.dataset_manifest_hash,
-                            "shard_id": worker_id,
+                            "shard_id": shard_id,
                             "artifact_base_url": artifact_base_url,
                             "root_manifest_path": root_manifest_path,
-                            "expected_shard_count": expected_workers,
+                            "expected_shard_count": dataset.shard_count,
                             "profile": dataset_contract.get(
                                 "profile", "CNN_IMAGE_CLASSIFICATION_V1"
                             ),
                             "cache_scope": "all_shards",
                         }
                     ),
+                    expected_ready={
+                        "shard_manifest_hash": shard_reference["shard_manifest_sha256"],
+                        "verified_batch_count": shard_manifest["batch_count"],
+                        "verified_sample_count": shard_manifest["sample_count"],
+                    },
                 )
             self._wait_for(
                 lambda: (

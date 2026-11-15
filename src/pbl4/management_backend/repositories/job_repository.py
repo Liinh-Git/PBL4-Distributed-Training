@@ -67,10 +67,13 @@ def create_job(
     return _row_to_dict(row)
 
 
-def get_job(conn: psycopg.Connection, job_id: str) -> dict | None:
+def get_job(conn: psycopg.Connection, job_id: str, *, for_update: bool = False) -> dict | None:
     """Fetch a job by job_id. Returns None if not found."""
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("SELECT * FROM jobs WHERE job_id = %s", (job_id,))
+        cur.execute(
+            "SELECT * FROM jobs WHERE job_id = %s" + (" FOR UPDATE" if for_update else ""),
+            (job_id,),
+        )
         row = cur.fetchone()
     return _row_to_dict(row) if row else None
 

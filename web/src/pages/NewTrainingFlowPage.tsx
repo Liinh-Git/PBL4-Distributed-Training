@@ -1,3 +1,4 @@
+import { WorkerNodeSelection, selectionError } from '../components/common/WorkerNodeSelection';
 import { TrainingStrategySettings } from '../components/training/TrainingStrategySettings';
 import { defaultAsyncSettings, trainingStrategyFields } from '../api/trainingStrategy';
 import React, { useState, useEffect, useRef } from 'react';
@@ -232,12 +233,14 @@ export const NewTrainingFlowPage: React.FC = () => {
   const handleProceedToReview = async () => {
     try {
       setFormError(null);
+      const nodeError = selectionError({ mode: nodeSelectionMode, nodeIds: selectedNodeIds });
+      if (nodeError) { setFormError(nodeError); return; }
       if (!selectedModel || !supportedModels.some(m => m.model_id === selectedModel)) {
         setFormError('Vui lòng chọn một mô hình được hỗ trợ từ danh mục.');
         return;
       }
       if (trainingStrategy === 'strict_bsp' && workloadPolicy === 'dbs' && (!Number.isInteger(existingWups) || (existingWups ?? 0) <= 0)) {
-        setFormError('Nhập số nguyên dương các đơn vị công việc mỗi bước cho DBS. Giá trị phải lớn hơn số lượng worker dự kiến.');
+        setFormError('Enter a positive integer K for DBS; K will be raised to at least N + 1 if needed.');
         return;
       }
       if (!Number.isInteger(everyNEpochs) || everyNEpochs <= 0) {
@@ -288,7 +291,7 @@ export const NewTrainingFlowPage: React.FC = () => {
       }
 
       // API 17.0: Validate Job contract with backend
-      const valRes = await jobsService.validateJob(currentDraft.job_id);
+      const valRes = await jobsService.validateJob(currentDraft.job_id, undefined, nodeSelectionMode === 'manual' ? { node_ids: selectedNodeIds } : undefined);
       setValidationResult(valRes.data);
 
       setStep(4);
@@ -310,12 +313,10 @@ export const NewTrainingFlowPage: React.FC = () => {
     try {
       setActionLoading('start');
       setFormError(null);
-      if (selectedNodeIds.length && selectedNodeIds.length !== selectedBuild?.shard_count) {
-        setFormError(`Chọn chính xác ${selectedBuild?.shard_count} Node trực tuyến, hoặc chọn Tự động phân bổ.`);
-        return;
-      }
+      const nodeError = selectionError({ mode: nodeSelectionMode, nodeIds: selectedNodeIds });
+      if (nodeError) { setFormError(nodeError); return; }
       await attemptsService.assertNoActiveAttempt();
-      const startRes = await jobsService.startJob(targetId, selectedNodeIds.length ? { node_ids: selectedNodeIds } : undefined);
+      const startRes = await jobsService.startJob(targetId, nodeSelectionMode === 'manual' ? { node_ids: selectedNodeIds } : undefined);
       const attemptId = startRes.data.attempt_id;
       navigate(`/live?attempt_id=${encodeURIComponent(attemptId)}`);
     } catch (err: any) {
@@ -332,9 +333,6 @@ export const NewTrainingFlowPage: React.FC = () => {
   const hasValidationWarnings = (validationResult?.warnings?.length ?? 0) > 0;
   const preview = validationResult?.resolved_preview;
 
-  const onlineNodes = nodes.filter(n => n.state === 'ONLINE');
-  const offlineNodes = nodes.filter(n => n.state !== 'ONLINE');
-  const requiredNodes = selectedBuild?.shard_count ?? 3;
 
   return (
     <div className="space-y-6 w-full pb-12 font-sans select-none">
@@ -867,203 +865,15 @@ export const NewTrainingFlowPage: React.FC = () => {
                 className="w-full px-3 py-1.5 bg-[#171719] border border-white/[0.07] rounded text-xs text-[#f3f3f4] focus:border-blue-500 focus:outline-hidden"
               />
               <p className="text-[11px] text-[#73737c] mt-1">
-                {workloadPolicy === 'dbs' ? 'K phải lớn hơn số lượng worker dự kiến.' : 'K phải bằng hoặc lớn hơn số lượng worker dự kiến. Để trống để sử dụng số lượng worker.'}
+                {workloadPolicy === 'dbs' ? 'K is automatically raised to at least N + 1 for DBS.' : 'K defaults to N and is automatically raised to N when needed.'}
               </p>
             </div>
           </div>
           )}
 
-          {/* Node Allocation Section */}
-          <div className="p-4 bg-[#121214] border border-white/[0.07] rounded space-y-3">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div>
-                <span className="text-xs font-semibold text-[#f3f3f4]">
-                  Phân bổ Node worker
-                </span>
-                <p className="text-[11px] text-[#73737c] mt-0.5">
-                  Chỉ định các máy thực thi cho {requiredNodes} phân vùng dữ liệu của phiên huấn luyện.
-                </p>
-              </div>
-              <div className="flex items-center gap-1.5 text-xs">
-                <span className="text-[11px] text-[#73737c]">
-                  Khả dụng:
-                </span>
-                <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-400">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                  {onlineNodes.length} Online
-                </span>
-                {offlineNodes.length > 0 && (
-                  <span className="inline-flex items-center gap-1 text-[11px] text-[#73737c]">
-                    · {offlineNodes.length} Offline
-                  </span>
-                )}
-              </div>
-            </div>
-
-            {/* Mode Selector Tabs/Pills */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => {
-                  setNodeSelectionMode('auto');
-                  setSelectedNodeIds([]);
-                }}
-                className={`p-3 rounded border text-left transition-all ${
-                  nodeSelectionMode === 'auto'
-                    ? 'bg-[#171719] border-blue-500/70 shadow-xs'
-                    : 'bg-[#141416] border-white/[0.07] hover:border-white/[0.15]'
-                }`}
-              >
-                <div className="flex items-center gap-2">
-                  <span
-                    className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center ${
-                      nodeSelectionMode === 'auto' ? 'border-blue-500 bg-blue-600' : 'border-white/20'
-                    }`}
-                  >
-                    {nodeSelectionMode === 'auto' && <span className="w-1.5 h-1.5 rounded-full bg-white" />}
-                  </span>
-                  <span className="text-xs font-semibold text-[#f3f3f4]">
-                    Tự động phân bổ (Khuyên dùng)
-                  </span>
-                </div>
-                <p className="text-[11px] text-[#73737c] mt-1.5 leading-relaxed">
-                  Coordinator tự động chọn {requiredNodes} node trực tuyến tối ưu khi khởi chạy.
-                </p>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setNodeSelectionMode('manual');
-                }}
-                className={`p-3 rounded border text-left transition-all ${
-                  nodeSelectionMode === 'manual'
-                    ? 'bg-[#171719] border-blue-500/70 shadow-xs'
-                    : 'bg-[#141416] border-white/[0.07] hover:border-white/[0.15]'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center ${
-                        nodeSelectionMode === 'manual' ? 'border-blue-500 bg-blue-600' : 'border-white/20'
-                      }`}
-                    >
-                      {nodeSelectionMode === 'manual' && <span className="w-1.5 h-1.5 rounded-full bg-white" />}
-                    </span>
-                    <span className="text-xs font-semibold text-[#f3f3f4]">
-                      Chỉ định node thủ công
-                    </span>
-                  </div>
-                  <span
-                    className={`text-[11px] font-mono px-1.5 py-0.5 rounded ${
-                      selectedNodeIds.length === requiredNodes
-                        ? 'bg-emerald-500/10 text-emerald-400'
-                        : 'bg-white/[0.05] text-[#a1a1a8]'
-                    }`}
-                  >
-                    {selectedNodeIds.length}/{requiredNodes}
-                  </span>
-                </div>
-                <p className="text-[11px] text-[#73737c] mt-1.5 leading-relaxed">
-                  Tự chọn chính xác danh sách các node thực thi theo ý bạn.
-                </p>
-              </button>
-            </div>
-
-            {/* Manual Node Selection List */}
-            {nodeSelectionMode === 'manual' && (
-              <div className="space-y-2 pt-2 border-t border-white/[0.06]">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-[#a1a1a8]">
-                    Chọn {requiredNodes} node trực tuyến ({selectedNodeIds.length} đã chọn):
-                  </span>
-                  {selectedNodeIds.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => setSelectedNodeIds([])}
-                      className="text-[11px] text-[#73737c] hover:text-[#f3f3f4] transition-colors"
-                    >
-                      Bỏ chọn tất cả
-                    </button>
-                  )}
-                </div>
-
-                {nodes.length === 0 ? (
-                  <p className="text-xs text-[#73737c] py-2">Chưa có node nào được kết nối</p>
-                ) : (
-                  <div className="max-h-56 overflow-y-auto space-y-1 pr-1">
-                    {/* ONLINE NODES */}
-                    {onlineNodes.map(node => {
-                      const isChecked = selectedNodeIds.includes(node.node_id);
-                      return (
-                        <label
-                          key={node.node_id}
-                          className={`flex items-center justify-between px-3 py-2 rounded border cursor-pointer transition-colors ${
-                            isChecked
-                              ? 'bg-[#171719] border-blue-500/50'
-                              : 'bg-[#141416] border-white/[0.05] hover:border-white/[0.1]'
-                          }`}
-                        >
-                          <div className="flex items-center gap-2.5 min-w-0">
-                            <input
-                              type="checkbox"
-                              checked={isChecked}
-                              onChange={e =>
-                                setSelectedNodeIds(ids =>
-                                  e.target.checked
-                                    ? [...ids, node.node_id]
-                                    : ids.filter(id => id !== node.node_id)
-                                )
-                              }
-                              className="rounded border-white/20 bg-transparent text-blue-600 focus:ring-0"
-                            />
-                            <div className="truncate">
-                              <span className="text-xs font-medium text-[#f3f3f4]">
-                                {node.display_name}
-                              </span>
-                              <span className="text-[11px] text-[#52525b] font-mono ml-2">
-                                #{node.node_id.slice(-8)}
-                              </span>
-                            </div>
-                          </div>
-                          <span className="inline-flex items-center gap-1 text-[11px] text-emerald-400 shrink-0">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                            Online
-                          </span>
-                        </label>
-                      );
-                    })}
-
-                    {/* OFFLINE NODES: Collapsible */}
-                    {offlineNodes.length > 0 && (
-                      <details className="group/offline pt-1">
-                        <summary className="cursor-pointer text-[11px] text-[#73737c] hover:text-[#a1a1a8] py-1 list-none flex items-center gap-1.5 select-none">
-                          <ChevronDown className="w-3 h-3 transition-transform group-open/offline:rotate-180" />
-                          <span>Node ngoại tuyến ({offlineNodes.length})</span>
-                        </summary>
-                        <div className="space-y-1 pt-1 opacity-60">
-                          {offlineNodes.map(node => (
-                            <div
-                              key={node.node_id}
-                              className="flex items-center justify-between px-3 py-1.5 rounded border border-white/[0.03] bg-[#121214] text-xs text-[#73737c]"
-                            >
-                              <div className="flex items-center gap-2.5 truncate">
-                                <input type="checkbox" disabled className="rounded border-white/10 opacity-30 cursor-not-allowed" />
-                                <span className="truncate">{node.display_name}</span>
-                                <span className="text-[10px] text-[#52525b] font-mono">#{node.node_id.slice(-8)}</span>
-                              </div>
-                              <span className="text-[10px] text-[#73737c] shrink-0">Offline</span>
-                            </div>
-                          ))}
-                        </div>
-                      </details>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
+          <WorkerNodeSelection value={{ mode: nodeSelectionMode, nodeIds: selectedNodeIds }}
+            onChange={value => { setNodeSelectionMode(value.mode); setSelectedNodeIds(value.nodeIds); setValidationResult(null); }}
+            disabled={validating} />
 
           {/* Navigation */}
           <div className="flex items-center justify-between pt-2">
@@ -1179,6 +989,10 @@ export const NewTrainingFlowPage: React.FC = () => {
               </div>
             </div>
 
+            <div className="px-4 py-2 text-xs text-[#a1a1a8]">
+              Dataset shards: {preview?.dataset?.shard_count ?? selectedBuild?.shard_count ?? 'Unknown'}
+              {validationResult?.warnings.map(warning => <p key={warning}>{warning}</p>)}
+            </div>
             {/* Distributed Training Section */}
             <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
@@ -1188,7 +1002,7 @@ export const NewTrainingFlowPage: React.FC = () => {
                 </div>
               </div>
               <div className="text-xs text-[#a1a1a8] sm:text-right">
-                {preview?.synchronization?.expected_workers || 3} Worker dự kiến
+                {preview?.synchronization?.expected_workers ?? 'Unresolved'} Worker dự kiến
                 {preview?.workload?.work_units_per_step ? ` · ${preview.workload.work_units_per_step} đơn vị công việc/bước` : ''} · DTP v{preview?.protocols?.dtp_version ?? 1} / MCP v{preview?.protocols?.mcp_version ?? 1}
               </div>
             </div>
@@ -1206,7 +1020,7 @@ export const NewTrainingFlowPage: React.FC = () => {
               <div className="text-xs text-[#a1a1a8] sm:text-right">
                 {selectedNodeIds.length > 0
                   ? selectedNodeIds.map(id => nodes.find(n => n.node_id === id)?.display_name || id.slice(-8)).join(', ')
-                  : `Coordinator tự động phân bổ ${requiredNodes} node trực tuyến`}
+                  : `Backend randomly selects up to 3 ONLINE, idle Nodes`}
               </div>
             </div>
 

@@ -89,10 +89,14 @@ def list_nodes(
     conn: psycopg.Connection,
     *,
     state: str | None = None,
-    limit: int = 50,
+    limit: int | None = 50,
+    for_update: bool = False,
 ) -> list[dict]:
     """List nodes with optional state filtering."""
-    query = "SELECT * FROM nodes"
+    query = """SELECT nodes.*, EXISTS (
+        SELECT 1 FROM worker_allocations a WHERE a.node_id = nodes.node_id
+        AND a.actual_state IN ('REQUESTED', 'DISPATCHED', 'STARTED')
+    ) AS has_active_allocation FROM nodes"""
     params: list[Any] = []
 
     if state:
@@ -101,8 +105,12 @@ def list_nodes(
         query += " WHERE state = %s"
         params.append(state)
 
-    query += " ORDER BY enrolled_at DESC LIMIT %s"
-    params.append(limit)
+    query += " ORDER BY enrolled_at DESC, node_id ASC"
+    if limit is not None:
+        query += " LIMIT %s"
+        params.append(limit)
+    if for_update:
+        query += " FOR UPDATE"
 
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, params)

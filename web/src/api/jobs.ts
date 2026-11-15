@@ -98,11 +98,12 @@ export class JobsService {
    */
   async validateJob(
     jobId: string,
-    options?: RequestOptions
+    options?: RequestOptions,
+    selection?: Pick<JobStartRequest, 'node_ids'>,
   ): Promise<ApiResponse<JobValidateResponseData>> {
-    return this.client.post<ApiResponse<JobValidateResponseData>, undefined>(
+    return this.client.post<ApiResponse<JobValidateResponseData>, Pick<JobStartRequest, 'node_ids'> | undefined>(
       `/api/v1/jobs/${encodeURIComponent(jobId)}/validate`,
-      undefined,
+      selection,
       options
     );
   }
