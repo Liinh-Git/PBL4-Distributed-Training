@@ -20,7 +20,7 @@ import { EditJobModal } from '../components/common/EditJobModal';
 import { ResumeCheckpointModal } from '../components/common/ResumeCheckpointModal';
 import { EmptyState } from '../components/common/EmptyState';
 import { JobRunSummary, formatExecutionMode, formatRunTime } from '../components/training/JobRunSummary';
-import { formatDateOnly } from '../utils/date';
+import { formatDateOnly, formatStrategy } from '../utils/date';
 import { jobsService, attemptsService, datasetsService, datasetBuildsService } from '../api';
 import { isActiveAttempt } from '../api/attempts';
 import { JobDetailData, AttemptListItemData } from '../types/api';
@@ -49,14 +49,6 @@ const formatCheckpointPolicy = (
   return policy.type
     .replace(/_/g, ' ')
     .replace(/\b\w/g, c => c.toUpperCase());
-};
-
-const formatStrategy = (strategy?: string | null): string => {
-  if (!strategy) return 'Đồng bộ chặt';
-  const s = strategy.toLowerCase();
-  if (s.includes('bsp') || s.includes('strict')) return 'Đồng bộ chặt';
-  if (s === 'dbs') return 'Lập lịch thích ứng (DBS)';
-  return 'Đồng bộ chặt';
 };
 
 export const JobDetailPage: React.FC = () => {

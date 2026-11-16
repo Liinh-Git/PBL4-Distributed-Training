@@ -299,7 +299,7 @@ export interface Job {
   datasetBuildId: string;
   datasetName: string;
   modelId: string;
-  strategy: 'strict_bsp';
+  strategy: 'strict_bsp' | 'async_sgd';
   attemptsCount: number;
   latestAttemptId: string;
   latestAttemptState: AttemptState;

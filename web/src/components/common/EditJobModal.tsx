@@ -1,5 +1,6 @@
 import { defaultAsyncSettings, trainingStrategyFields } from '../../api/trainingStrategy';
 import { TrainingStrategySettings } from '../training/TrainingStrategySettings';
+import { formatStrategy } from '../../utils/date';
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -540,7 +541,11 @@ export const EditJobModal: React.FC<EditJobModalProps> = ({
                 </div>
                 <div className="p-2 rounded bg-[#171719] border border-white/[0.05]">
                   <span className="text-[#73737c] block">Strategy</span>
-                  <span className="text-[#f3f3f4] font-medium">{job.training_strategy || 'Strict BSP'}</span>
+                  <span className="text-[#f3f3f4] font-medium">
+                    {formatStrategy('requested_contract' in job
+                      ? job.requested_contract.training_strategy
+                      : job.training_strategy)}
+                  </span>
                 </div>
                 <div className="p-2 rounded bg-[#171719] border border-white/[0.05]">
                   <span className="text-[#73737c] block">Workload</span>

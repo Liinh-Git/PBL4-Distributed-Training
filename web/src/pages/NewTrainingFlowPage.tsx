@@ -1,5 +1,6 @@
 import { TrainingStrategySettings } from '../components/training/TrainingStrategySettings';
 import { defaultAsyncSettings, trainingStrategyFields } from '../api/trainingStrategy';
+import { formatStrategy } from '../utils/date';
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, useSearchParams, useParams, Link } from 'react-router-dom';
 import {
@@ -767,7 +768,7 @@ export const NewTrainingFlowPage: React.FC = () => {
               <span className="text-xs font-semibold text-[#f3f3f4]">
                 Chiến lược phân tán
               </span>
-              <span className="text-[11px] text-[#73737c]">{trainingStrategy === "async_sgd" ? "Async-SGD" : "Strict BSP"}</span>
+              <span className="text-[11px] text-[#73737c]">{formatStrategy(trainingStrategy)}</span>
             </div>
 
             <TrainingStrategySettings strategy={trainingStrategy} settings={asyncSettings}
@@ -1184,12 +1185,14 @@ export const NewTrainingFlowPage: React.FC = () => {
               <div>
                 <div className="text-xs text-[#73737c]">Chiến lược phân tán & Tải công việc</div>
                 <div className="text-sm font-medium text-[#f3f3f4] mt-0.5">
-                  Strict BSP · Phân bổ {workloadPolicy === 'dbs' ? 'DBS Adaptive' : 'Equal'}
+                  {formatStrategy(trainingStrategy)}
+                  {trainingStrategy === 'strict_bsp' && <> · Phân bổ {workloadPolicy === 'dbs' ? 'DBS Adaptive' : 'Equal'}</>}
                 </div>
               </div>
               <div className="text-xs text-[#a1a1a8] sm:text-right">
                 {preview?.synchronization?.expected_workers || 3} Worker dự kiến
-                {preview?.workload?.work_units_per_step ? ` · ${preview.workload.work_units_per_step} đơn vị công việc/bước` : ''} · DTP v{preview?.protocols?.dtp_version ?? 1} / MCP v{preview?.protocols?.mcp_version ?? 1}
+                {trainingStrategy === 'async_sgd' && <> · {asyncSettings.units_per_contribution} đơn vị công việc/lượt</>}
+                {trainingStrategy === 'strict_bsp' && preview?.workload?.work_units_per_step ? ` · ${preview.workload.work_units_per_step} đơn vị công việc/bước` : ''} · DTP v{preview?.protocols?.dtp_version ?? 1} / MCP v{preview?.protocols?.mcp_version ?? 1}
               </div>
             </div>
 
