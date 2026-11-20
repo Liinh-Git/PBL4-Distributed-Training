@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Drawer } from '../common/Drawer';
 import { Job } from '../../types';
+import { formatStrategy } from '../../utils/date';
 import { Copy, Check, FileCode, ChevronDown, ChevronRight, Sliders, Database, Cpu, Activity, ShieldCheck, Save, Server } from 'lucide-react';
 
 interface RawContractDrawerProps {
@@ -166,7 +167,7 @@ export const RawContractDrawer: React.FC<RawContractDrawerProps> = ({
               </div>
               <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
                 <div className="text-[#73737c]">Synchronization Strategy</div>
-                <div className="text-[#f3f3f4] font-medium">Strict BSP</div>
+                <div className="text-[#f3f3f4] font-medium">{formatStrategy(job.strategy)}</div>
 
                 <div className="text-[#73737c]">Expected Workers</div>
                 <div className="text-[#f3f3f4]">{resolved?.synchronization?.expectedWorkers || 3} worker nodes</div>
