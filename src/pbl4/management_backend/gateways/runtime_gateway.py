@@ -187,6 +187,14 @@ class RuntimeGateway:
             snapshot = self._port.request_state()
             if snapshot and snapshot.get("active_attempt_id") == attempt_id:
                 self.handle_state_snapshot(snapshot)
+                if (
+                    not cursor.gap_fenced
+                    and cursor.authoritative_snapshot_seq is not None
+                    and cursor.authoritative_snapshot_seq >= seq
+                ):
+                    # Reconcile current state without skipping telemetry still queued
+                    # behind this event, even when the snapshot is much newer.
+                    cursor.highest_contiguous_seq = seq
             return
 
         if seq == expected:
@@ -605,7 +613,9 @@ class RuntimeGateway:
                 if isinstance(metadata, str):
                     metadata = json.loads(metadata)
                 self._restore_event_cursor(attempt_id, conn)
-                event_cursor = snap_seq if not self._redis_events else cursor.highest_contiguous_seq
+                event_cursor = cursor.highest_contiguous_seq
+                if not self._redis_events and event_cursor is None and not cursor.gap_fenced:
+                    event_cursor = snap_seq
                 for key in (
                     "training_strategy",
                     "epoch",
@@ -750,10 +760,12 @@ class RuntimeGateway:
         if snap_seq is not None:
             cursor.authoritative_snapshot_seq = snap_seq
             # A live snapshot can be newer than telemetry still buffered at the
-            # Runtime. Only establish a baseline or recover an actual event gap;
-            # routine polling must not skip unprojected Step/checkpoint history.
-            if not self._redis_events and (
-                cursor.gap_fenced or cursor.highest_contiguous_seq is None
+            # Runtime. Only establish an initial baseline here; gap recovery in
+            # record_event_seq advances only through the encountered gap event.
+            if (
+                not self._redis_events
+                and cursor.highest_contiguous_seq is None
+                and not cursor.gap_fenced
             ):
                 cursor.highest_contiguous_seq = max(cursor.highest_contiguous_seq or 0, snap_seq)
             cursor.max_seen_seq = max(cursor.max_seen_seq, snap_seq)
