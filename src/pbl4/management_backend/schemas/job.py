@@ -305,12 +305,24 @@ class JobCloneRequest(StrictWriteModel):
     display_name: str | None = None
 
 
-class JobStartRequest(StrictWriteModel):
+class WorkerSelectionRequest(StrictWriteModel):
+    node_ids: list[str] | None = Field(default=None, min_length=1, max_length=5)
+
+    @field_validator("node_ids")
+    @classmethod
+    def distinct_nodes(cls, value):
+        if value is not None and (
+            len(set(value)) != len(value) or any(not item.strip() for item in value)
+        ):
+            raise ValueError("Node IDs must be nonempty and distinct.")
+        return value
+
+
+class JobStartRequest(WorkerSelectionRequest):
     note: str | None = None
-    node_ids: list[str] | None = Field(default=None, min_length=1)
 
 
-class JobResumeRequest(StrictWriteModel):
+class JobResumeRequest(WorkerSelectionRequest):
     checkpoint_id: str
 
 

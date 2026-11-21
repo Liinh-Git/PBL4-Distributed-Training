@@ -46,6 +46,7 @@ from pbl4.management_backend.services.dataset_service import (
     encode_cursor as encode_cursor,
 )
 from pbl4.management_backend.services.job_service import JobValidationError
+from pbl4.management_backend.services.worker_selection import select_workers
 
 logger = logging.getLogger(__name__)
 
@@ -328,22 +329,12 @@ def _preflight_job_and_select_placements(
             f"resolved_contract['synchronization']: {expected_workers!r}"
         )
 
-    online_nodes = node_repository.list_nodes(
-        conn, state=node_repository.NODE_STATE_ONLINE, limit=1000
-    )
-    active_allocs = allocation_repository.list_active(conn)
-    if node_ids is not None:
-        if len(node_ids) != expected_workers or len(set(node_ids)) != len(node_ids):
-            raise JobValidationError(f"Select exactly {expected_workers} distinct Nodes.")
-        selected = set(node_ids)
-        online_nodes = [n for n in online_nodes if n["node_id"] in selected]
-        if {n["node_id"] for n in online_nodes} != selected:
-            raise JobValidationError("Selected Nodes must all exist and be ONLINE.")
-    return ClusterScheduler.select_placements(
-        expected_workers=expected_workers,
-        nodes=online_nodes,
-        active_allocations=active_allocs,
-    )
+    try:
+        return select_workers(
+            conn, expected_workers=expected_workers, node_ids=node_ids, for_update=True
+        )
+    except ValueError as exc:
+        raise JobValidationError(str(exc)) from exc
 
 
 def start_job(
@@ -359,12 +350,10 @@ def start_job(
     Returns (attempt_row, command_row).
     Raises AttemptConflictError if another attempt is already active (V1 constraint).
     """
-    job = job_repository.get_job(conn, job_id)
+    job = job_repository.get_job(conn, job_id, for_update=True)
     if job is None:
         raise JobNotReadyError(f"Job '{job_id}' not found.")
-    if job["state"] == "DRAFT":
-        job = job_service.freeze_job(conn, job_id)
-    elif job["state"] != "READY":
+    if job["state"] not in {"DRAFT", "READY"}:
         raise JobNotReadyError(
             f"Job '{job_id}' is in state '{job['state']}'; must be DRAFT or READY to start."
         )
@@ -380,7 +369,15 @@ def start_job(
     if isinstance(res, str):
         res = json.loads(res)
 
-    placements = _preflight_job_and_select_placements(conn, job, res, node_ids=node_ids)
+    if job["state"] == "DRAFT":
+        try:
+            placements = select_workers(conn, node_ids=node_ids, for_update=True)
+        except ValueError as exc:
+            raise JobValidationError(str(exc)) from exc
+        job = job_service.freeze_job(conn, job_id, expected_workers=len(placements))
+        res = job["resolved_contract"]
+    else:
+        placements = _preflight_job_and_select_placements(conn, job, res, node_ids=node_ids)
 
     attempt_id = _new_attempt_id()
     command_id = _new_command_id()
@@ -432,9 +429,11 @@ def start_job(
     return attempt_row, cmd_row
 
 
-def retry_job(conn: psycopg.Connection, job_id: str) -> tuple[dict, dict]:
+def retry_job(
+    conn: psycopg.Connection, job_id: str, *, node_ids: list[str] | None = None
+) -> tuple[dict, dict]:
     """Retry a job from the start (RETRY_FROM_START)."""
-    job = job_repository.get_job(conn, job_id)
+    job = job_repository.get_job(conn, job_id, for_update=True)
     if job is None:
         raise JobNotReadyError(f"Job '{job_id}' not found.")
     if job["state"] != "READY":
@@ -450,7 +449,7 @@ def retry_job(conn: psycopg.Connection, job_id: str) -> tuple[dict, dict]:
     if isinstance(res, str):
         res = json.loads(res)
 
-    placements = _preflight_job_and_select_placements(conn, job, res)
+    placements = _preflight_job_and_select_placements(conn, job, res, node_ids=node_ids)
 
     attempt_id = _new_attempt_id()
     command_id = _new_command_id()
@@ -501,9 +500,11 @@ def retry_job(conn: psycopg.Connection, job_id: str) -> tuple[dict, dict]:
     return attempt_row, cmd_row
 
 
-def resume_job(conn: psycopg.Connection, job_id: str, checkpoint_id: str) -> tuple[dict, dict]:
+def resume_job(
+    conn: psycopg.Connection, job_id: str, checkpoint_id: str, *, node_ids: list[str] | None = None
+) -> tuple[dict, dict]:
     """Resume a job from a specific checkpoint (RESUME)."""
-    job = job_repository.get_job(conn, job_id)
+    job = job_repository.get_job(conn, job_id, for_update=True)
     if job is None:
         raise JobNotReadyError(f"Job '{job_id}' not found.")
     if job["state"] != "READY":
@@ -556,7 +557,7 @@ def resume_job(conn: psycopg.Connection, job_id: str, checkpoint_id: str) -> tup
             f"Active attempt '{active['attempt_id']}' is running. Abort before resuming."
         )
 
-    placements = _preflight_job_and_select_placements(conn, job, res)
+    placements = _preflight_job_and_select_placements(conn, job, res, node_ids=node_ids)
 
     attempt_id = _new_attempt_id()
     command_id = _new_command_id()
@@ -1248,22 +1249,14 @@ def execute_start_job(
             attempt_id = str(cached_record["resource_id"])
             cmd_row = command_repository.get_command(conn, command_id)
             attempt_row = attempt_repository.get_attempt(conn, attempt_id)
-            if (
-                cmd_row
-                and attempt_row
-                and attempt_row.get("state") not in attempt_repository.TERMINAL_ATTEMPT_STATES
-            ):
-                dispatch_payload = _extract_command_payload(cmd_row)
-            else:
-                attempt_row, cmd_row = start_job(
-                    conn,
-                    job_id,
-                    note=note,
-                    **({"node_ids": node_ids} if node_ids is not None else {}),
+            if not cmd_row or not attempt_row:
+                raise AttemptStateError(
+                    "Persisted idempotent attempt or command is unavailable; "
+                    "refusing to select new Nodes."
                 )
-                dispatch_payload = _extract_command_payload(cmd_row)
-                command_id = str(cmd_row["command_id"])
-                attempt_id = str(attempt_row["attempt_id"])
+            if attempt_row.get("state") in attempt_repository.TERMINAL_ATTEMPT_STATES:
+                return attempt_row, cmd_row
+            dispatch_payload = _extract_command_payload(cmd_row)
         else:
             attempt_row, cmd_row = start_job(
                 conn, job_id, note=note, **({"node_ids": node_ids} if node_ids is not None else {})
@@ -1389,13 +1382,17 @@ def execute_retry_job(
     job_id: str,
     *,
     idempotency_key: str | None = None,
+    node_ids: list[str] | None = None,
 ) -> tuple[dict, dict]:
     """Execute RETRY_FROM_START following the canonical 2-phase pattern."""
     effective_key = _require_idempotency_key(idempotency_key)
     request_hash = idempotency.compute_request_hash(
         operation="RETRY_ATTEMPT",
         path=f"/api/v1/jobs/{job_id}/retry",
-        body_obj={"job_id": job_id},
+        body_obj={
+            "job_id": job_id,
+            **({"node_ids": sorted(node_ids)} if node_ids is not None else {}),
+        },
     )
 
     with db_module.transaction() as conn:
@@ -1427,19 +1424,18 @@ def execute_retry_job(
             attempt_id = str(cached_record["resource_id"])
             cmd_row = command_repository.get_command(conn, command_id)
             attempt_row = attempt_repository.get_attempt(conn, attempt_id)
-            if (
-                cmd_row
-                and attempt_row
-                and attempt_row.get("state") not in attempt_repository.TERMINAL_ATTEMPT_STATES
-            ):
-                dispatch_payload = _extract_command_payload(cmd_row)
-            else:
-                attempt_row, cmd_row = retry_job(conn, job_id)
-                dispatch_payload = _extract_command_payload(cmd_row)
-                command_id = str(cmd_row["command_id"])
-                attempt_id = str(attempt_row["attempt_id"])
+            if not cmd_row or not attempt_row:
+                raise AttemptStateError(
+                    "Persisted idempotent attempt or command is unavailable; "
+                    "refusing to select new Nodes."
+                )
+            if attempt_row.get("state") in attempt_repository.TERMINAL_ATTEMPT_STATES:
+                return attempt_row, cmd_row
+            dispatch_payload = _extract_command_payload(cmd_row)
         else:
-            attempt_row, cmd_row = retry_job(conn, job_id)
+            attempt_row, cmd_row = retry_job(
+                conn, job_id, **({"node_ids": node_ids} if node_ids is not None else {})
+            )
             dispatch_payload = _extract_command_payload(cmd_row)
             command_id = str(cmd_row["command_id"])
             attempt_id = str(attempt_row["attempt_id"])
@@ -1562,13 +1558,18 @@ def execute_resume_job(
     checkpoint_id: str,
     *,
     idempotency_key: str | None = None,
+    node_ids: list[str] | None = None,
 ) -> tuple[dict, dict]:
     """Execute RESUME attempt following the canonical 2-phase pattern."""
     effective_key = _require_idempotency_key(idempotency_key)
     request_hash = idempotency.compute_request_hash(
         operation="RESUME_ATTEMPT",
         path=f"/api/v1/jobs/{job_id}/resume",
-        body_obj={"job_id": job_id, "checkpoint_id": checkpoint_id},
+        body_obj={
+            "job_id": job_id,
+            "checkpoint_id": checkpoint_id,
+            **({"node_ids": sorted(node_ids)} if node_ids is not None else {}),
+        },
     )
 
     with db_module.transaction() as conn:
@@ -1600,19 +1601,21 @@ def execute_resume_job(
             attempt_id = str(cached_record["resource_id"])
             cmd_row = command_repository.get_command(conn, command_id)
             attempt_row = attempt_repository.get_attempt(conn, attempt_id)
-            if (
-                cmd_row
-                and attempt_row
-                and attempt_row.get("state") not in attempt_repository.TERMINAL_ATTEMPT_STATES
-            ):
-                dispatch_payload = _extract_command_payload(cmd_row)
-            else:
-                attempt_row, cmd_row = resume_job(conn, job_id, checkpoint_id)
-                dispatch_payload = _extract_command_payload(cmd_row)
-                command_id = str(cmd_row["command_id"])
-                attempt_id = str(attempt_row["attempt_id"])
+            if not cmd_row or not attempt_row:
+                raise AttemptStateError(
+                    "Persisted idempotent attempt or command is unavailable; "
+                    "refusing to select new Nodes."
+                )
+            if attempt_row.get("state") in attempt_repository.TERMINAL_ATTEMPT_STATES:
+                return attempt_row, cmd_row
+            dispatch_payload = _extract_command_payload(cmd_row)
         else:
-            attempt_row, cmd_row = resume_job(conn, job_id, checkpoint_id)
+            attempt_row, cmd_row = resume_job(
+                conn,
+                job_id,
+                checkpoint_id,
+                **({"node_ids": node_ids} if node_ids is not None else {}),
+            )
             dispatch_payload = _extract_command_payload(cmd_row)
             command_id = str(cmd_row["command_id"])
             attempt_id = str(attempt_row["attempt_id"])

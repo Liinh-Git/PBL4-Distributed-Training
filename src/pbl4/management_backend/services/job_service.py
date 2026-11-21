@@ -140,10 +140,14 @@ def _validate_contract(requested_contract: dict) -> list[str]:
     return errors
 
 
-def _resolve_contract(conn: psycopg.Connection, requested_contract: dict) -> dict:
+def _resolve_contract(
+    conn: psycopg.Connection, requested_contract: dict, *, expected_workers: int
+) -> dict:
     """Delegate to contract_resolver.resolve for canonical resolution logic."""
     try:
-        return contract_resolver.resolve(conn, requested_contract)
+        return contract_resolver.resolve(
+            conn, requested_contract, expected_workers=expected_workers
+        )
     except contract_resolver.ContractResolutionError as e:
         raise JobValidationError(str(e), e.errors) from e
 
@@ -329,7 +333,9 @@ def update_job(
     return row
 
 
-def validate_job(conn: psycopg.Connection, job_id: str) -> dict:
+def validate_job(
+    conn: psycopg.Connection, job_id: str, *, node_ids: list[str] | None = None
+) -> dict:
     """Validate the job contract against current catalog. Does NOT transition state."""
     current = job_repository.get_job(conn, job_id)
     if current is None:
@@ -367,9 +373,36 @@ def validate_job(conn: psycopg.Connection, job_id: str) -> dict:
 
     if not errors:
         try:
-            resolved_preview = _resolve_contract(conn, rc)
+            from pbl4.management_backend.services.cluster_scheduler import (
+                NodeCapacityUnavailableError,
+            )
+            from pbl4.management_backend.services.worker_selection import select_workers
+
+            # Validate independently of live capacity, without exposing a fictitious N.
+            _resolve_contract(conn, rc, expected_workers=1)
+            try:
+                placements = select_workers(conn, node_ids=node_ids)
+            except NodeCapacityUnavailableError as exc:
+                if node_ids is not None:
+                    errors.append(str(exc))
+                else:
+                    warnings.append(f"Worker count unresolved: {exc}")
+            else:
+                resolved_preview = _resolve_contract(conn, rc, expected_workers=len(placements))
+                effective_k = resolved_preview["workload"]["work_units_per_step"]
+                requested_k = rc.get("work_units_per_step")
+                if requested_k is not None and effective_k > requested_k:
+                    warnings.append(
+                        f"work_units_per_step increased from {requested_k} to {effective_k} "
+                        f"for {len(placements)} Workers."
+                    )
+                warnings.append(
+                    "Placement preview does not reserve Nodes; capacity is checked again at start."
+                )
         except JobValidationError as e:
             errors.extend(e.errors)
+        except ValueError as e:
+            errors.append(str(e))
 
     return {
         "requested_contract": rc,
@@ -379,7 +412,7 @@ def validate_job(conn: psycopg.Connection, job_id: str) -> dict:
     }
 
 
-def freeze_job(conn: psycopg.Connection, job_id: str) -> dict:
+def freeze_job(conn: psycopg.Connection, job_id: str, *, expected_workers: int) -> dict:
     """Validate + freeze a DRAFT job to READY state.
 
     Atomically sets resolved_contract, contract_hash, and frozen_at + state=READY.
@@ -403,7 +436,7 @@ def freeze_job(conn: psycopg.Connection, job_id: str) -> dict:
     if errors:
         raise JobValidationError("Contract validation failed before freeze", errors)
 
-    resolved = _resolve_contract(conn, rc)
+    resolved = _resolve_contract(conn, rc, expected_workers=expected_workers)
     contract_hash = canonical_json_hash(resolved)
     now = datetime.now(UTC)
 
@@ -419,7 +452,14 @@ def freeze_job(conn: psycopg.Connection, job_id: str) -> dict:
             f"Job '{job_id}' could not be frozen (race condition or not DRAFT).",
             current_state=current["state"],
         )
-    logger.info("Job frozen: %s (hash=%s)", job_id, contract_hash[:8])
+    logger.info(
+        "Job frozen: %s (hash=%s workers=%s workload=%s work_units_per_step=%s)",
+        job_id,
+        contract_hash[:8],
+        expected_workers,
+        resolved["workload"]["policy"],
+        resolved["workload"]["work_units_per_step"],
+    )
     return row
 
 

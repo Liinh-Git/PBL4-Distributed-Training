@@ -36,6 +36,7 @@ from pbl4.management_backend.schemas.job import (
     JobValidateResponse,
     LatestAttemptSummary,
     StartAttemptResponse,
+    WorkerSelectionRequest,
 )
 from pbl4.management_backend.services import attempt_service, idempotency, job_service
 
@@ -250,9 +251,13 @@ def patch_job(job_id: str, body: JobPatchRequest):
     response_model=ItemResponse[JobValidateResponse],
     summary="Validate job contract without freezing",
 )
-def validate_job(job_id: str):
+def validate_job(job_id: str, body: WorkerSelectionRequest | None = None):
     with db.get_connection() as conn:
-        result = job_service.validate_job(conn, job_id)
+        result = job_service.validate_job(
+            conn,
+            job_id,
+            **({"node_ids": body.node_ids} if body and body.node_ids is not None else {}),
+        )
         return ItemResponse(data=JobValidateResponse(**result))
 
 
@@ -306,6 +311,7 @@ def start_job(
 )
 def retry_job(
     job_id: str,
+    body: JobStartRequest | None = None,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ):
     if not idempotency_key:
@@ -317,7 +323,10 @@ def retry_job(
             },
         )
     attempt_row, cmd_row = attempt_service.execute_retry_job(
-        db, job_id, idempotency_key=idempotency_key
+        db,
+        job_id,
+        idempotency_key=idempotency_key,
+        **({"node_ids": body.node_ids} if body and body.node_ids is not None else {}),
     )
 
     return ItemResponse(
@@ -354,7 +363,11 @@ def resume_job(
             },
         )
     attempt_row, cmd_row = attempt_service.execute_resume_job(
-        db, job_id, body.checkpoint_id, idempotency_key=idempotency_key
+        db,
+        job_id,
+        body.checkpoint_id,
+        idempotency_key=idempotency_key,
+        **({"node_ids": body.node_ids} if body.node_ids is not None else {}),
     )
 
     return ItemResponse(

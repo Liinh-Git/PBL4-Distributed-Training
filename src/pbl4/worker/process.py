@@ -275,7 +275,9 @@ class WorkerProcess:
         client = client or self._client
         if assignment.profile != "CNN_IMAGE_CLASSIFICATION_V1":
             raise ValueError("Unsupported Dataset Build profile")
-        if int(assignment.expected_shard_count) != int(self._client.expected_workers or -1):
+        if assignment.cache_scope != "all_shards" and int(assignment.expected_shard_count) != int(
+            self._client.expected_workers or -1
+        ):
             raise ValueError("Dataset shard count does not match resolved membership")
         key = ShardCacheKey(
             str(assignment.dataset_build_id),
@@ -294,6 +296,8 @@ class WorkerProcess:
             **downloader_kwargs,
         )
         result = downloader.provision(key)
+        if result.shard.root_manifest.get("shard_count") != assignment.expected_shard_count:
+            raise ValueError("Dataset shard count does not match pinned assignment")
         provisioned = {key.shard_id: result}
         dataset_cache: DatasetCache | None = None
         if assignment.cache_scope == "all_shards":

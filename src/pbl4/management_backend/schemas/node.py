@@ -37,6 +37,7 @@ class NodeItem(BaseModel):
     platform: str | None = None
     enrolled_at: datetime
     last_seen_at: datetime | None = None
+    has_active_allocation: bool = False
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> NodeItem:
@@ -48,6 +49,7 @@ class NodeItem(BaseModel):
             platform=row.get("platform"),
             enrolled_at=row["enrolled_at"],
             last_seen_at=row.get("last_seen_at"),
+            has_active_allocation=bool(row.get("has_active_allocation", False)),
         )
 
 
