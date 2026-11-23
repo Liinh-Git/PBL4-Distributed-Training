@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 def on_parameters(worker, client, transfer):
     try:
-        if worker._stop.is_set() or client is not worker._client:
+        if (worker._stop.is_set() or worker._completed.is_set()) or client is not worker._client:
             return
         loop = worker._loop
         version = int(transfer.metadata["model_version_out"])
@@ -23,11 +23,16 @@ def on_parameters(worker, client, transfer):
         loop.apply_async_parameters(version, bundle_from_bytes(transfer.data, worker._adapter))
         worker._local_version = version
         operation = transfer.identity.operation_id
-        client.send_parameter_applied(
-            operation_id=operation, source_step_id=None, model_version=version
-        )
+        with worker._send_lock:
+            if worker._completed.is_set():
+                return
+            client.send_parameter_applied(
+                operation_id=operation, source_step_id=None, model_version=version
+            )
         worker._mark_ready(client)
-        if worker._stop.is_set() or worker._connection_lost.is_set():
+        if (
+            worker._stop.is_set() or worker._completed.is_set()
+        ) or worker._connection_lost.is_set():
             return
         units = tuple(WorkUnitRef.from_dict(u) for u in transfer.metadata["work_units"])
         if not units:
@@ -52,28 +57,35 @@ def on_parameters(worker, client, transfer):
         if (
             client is not worker._client
             or worker._connection_lost.is_set()
-            or worker._stop.is_set()
+            or (worker._stop.is_set() or worker._completed.is_set())
         ):
             return
-        client.send_gradient(
-            flatten_bundle(computed.bundle),
-            operation_id=operation,
-            model_version=version,
-            shard_id=units[0].shard_id,
-            batch_id=units[0].batch_id,
-            batch_ordinal=operation,
-            sample_count=computed.sample_count,
-            loss=computed.loss,
-            compute_ms=max(0.001, (time.perf_counter() - started) * 1000),
-            correct_count=computed.correct_count,
-        )
+        with worker._send_lock:
+            if worker._completed.is_set():
+                return
+            client.send_gradient(
+                flatten_bundle(computed.bundle),
+                operation_id=operation,
+                model_version=version,
+                shard_id=units[0].shard_id,
+                batch_id=units[0].batch_id,
+                batch_ordinal=operation,
+                sample_count=computed.sample_count,
+                loss=computed.loss,
+                compute_ms=max(0.001, (time.perf_counter() - started) * 1000),
+                correct_count=computed.correct_count,
+            )
         with worker._lock:
             worker._last_operation = operation
     except TransportError:
         worker._lost(client)
         client.disconnect()
     except Exception:
-        if client is worker._client and not worker._connection_lost.is_set():
+        if (
+            client is worker._client
+            and not worker._connection_lost.is_set()
+            and not worker._completed.is_set()
+        ):
             logger.exception("Async computation or parameter application failed")
             worker._failed.set()
             worker._stop.set()

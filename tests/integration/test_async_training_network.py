@@ -14,6 +14,7 @@ from torch.nn import functional
 from pbl4.adapter.pytorch_adapter import PyTorchAdapter
 from pbl4.common.async_training import resolve_async_training
 from pbl4.common.errors import TransportError
+from pbl4.common.worker_admission import issue_worker_join_token
 from pbl4.runtime.event_emitter import EventEmitter
 from pbl4.runtime.process import _AttemptRunner
 from pbl4.worker.config import WorkerConfig
@@ -96,8 +97,7 @@ def test_production_async_train_rejoin_checkpoint_resume(tmp_path, monkeypatch, 
         _manifests={},
         _host="127.0.0.1",
         _dtp_port=0,
-        _worker_admission_secret=None,
-        _require_worker_admission=False,
+        _worker_admission_secret="test-secret",
         _heartbeat_timeout=10,
         _checkpoint_dir=tmp_path / "checkpoints",
         _dataset_manager_url=origin,
@@ -156,11 +156,17 @@ def test_production_async_train_rejoin_checkpoint_resume(tmp_path, monkeypatch, 
 
     monkeypatch.setattr(worker_module.TrainingLoop, "compute", compute)
 
-    def launch_workers(active_runner):
+    def launch_workers(active_runner, attempt_id):
         port = active_runner._server.bound_address[1]
         for index in range(2):
             worker = WorkerProcess(
                 WorkerConfig(
+                    attempt_id=attempt_id,
+                    allocation_id=f"allocation-{index}",
+                    node_id=f"node-{index}",
+                    worker_join_token=issue_worker_join_token(
+                        "test-secret", attempt_id, f"allocation-{index}", f"node-{index}"
+                    ),
                     runtime_port=port,
                     cache_dir=str(tmp_path / f"cache-{index}"),
                     node_label=f"node-{index}",
@@ -178,7 +184,7 @@ def test_production_async_train_rejoin_checkpoint_resume(tmp_path, monkeypatch, 
     try:
         runner.start()
         wait_until(lambda: runner._server is not None and runner._server.bound_address is not None)
-        launch_workers(runner)
+        launch_workers(runner, "attempt")
         recovery_point = None
         if case == "normal":
             wait_until(
@@ -235,9 +241,12 @@ def test_production_async_train_rejoin_checkpoint_resume(tmp_path, monkeypatch, 
         assert latest.snapshot.async_progress is not None
         assert runner._coordinator._checkpoints.verify(latest) == latest.snapshot
         if recovery_point is not None:
+            for worker in workers:
+                wait_until(worker._completed.is_set)
+                worker._stop.set()
             for task in tasks:
                 task.join(2)
-            assert all(outcomes)
+            assert outcomes == [True, True]
             source = recovery_point
             runner = _AttemptRunner(
                 process=process,
@@ -260,7 +269,7 @@ def test_production_async_train_rejoin_checkpoint_resume(tmp_path, monkeypatch, 
             wait_until(
                 lambda: runner._server is not None and runner._server.bound_address is not None
             )
-            launch_workers(runner)
+            launch_workers(runner, "attempt-resume")
             runner.join(12)
             assert runner.wait_closed(1)
             assert runner.snapshot("test")["attempt_state"] == "COMPLETED", runner._failure
@@ -293,7 +302,6 @@ def test_async_managed_worker_crash_respawn_rejoins_and_completes(tmp_path, monk
     import uuid
 
     import pbl4.worker.process as worker_module
-    from pbl4.common.worker_admission import issue_worker_join_token
 
     torch.set_num_threads(1)
 
@@ -465,6 +473,8 @@ def test_async_managed_worker_crash_respawn_rejoins_and_completes(tmp_path, monk
         state = runner.snapshot("test")
         assert state["attempt_state"] == "COMPLETED", runner._failure
         assert state["strategy_state"]["processed_units"] == 16
+        wait_until(respawned._completed.is_set)
+        respawned._stop.set()
         respawn_task.join(2)
         assert respawn_outcomes == [True]
     finally:

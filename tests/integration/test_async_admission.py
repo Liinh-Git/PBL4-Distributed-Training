@@ -38,7 +38,7 @@ def test_expired_known_credential_rejoins_but_replay_cannot_evict_session(monkey
         registry=registry,
         training_strategy="async_sgd",
         worker_admission_secret="secret",
-        require_worker_admission=True,
+
         admission_open=lambda: now[0] < 2000,
     )
     server.start()

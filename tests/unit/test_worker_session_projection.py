@@ -75,7 +75,7 @@ def test_worker_disconnect_retains_session_in_snapshot() -> None:
         manifest=dummy_manifest(),
         registry=registry,
         worker_admission_secret=secret,
-        require_worker_admission=True,
+
     )
 
     s_sock, c_sock = socket.socketpair()
@@ -146,7 +146,7 @@ def test_worker_fatal_error_retains_failed_state_and_failure_code() -> None:
         manifest=dummy_manifest(),
         registry=registry,
         worker_admission_secret=secret,
-        require_worker_admission=True,
+
     )
 
     s_sock, c_sock = socket.socketpair()
@@ -211,7 +211,7 @@ def test_server_stop_preserves_terminal_worker_snapshots() -> None:
         manifest=dummy_manifest(),
         registry=registry,
         worker_admission_secret=secret,
-        require_worker_admission=True,
+
     )
 
     s_sock, c_sock = socket.socketpair()

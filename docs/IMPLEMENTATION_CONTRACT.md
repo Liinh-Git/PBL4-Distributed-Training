@@ -49,7 +49,25 @@ exactly N distinct, ONLINE, available Nodes. Omission preserves deterministic
 automatic placement. Node selection is execution data outside the frozen
 training contract; idempotency includes the selected set. Managed
 `START_WORKER.model_id` is explicit and missing/unsupported values are rejected.
-The unmanaged legacy Worker path retains its documented ResNet default.
+All Workers must be launched by Node Agent with complete managed identity and an
+explicit model ID. Runtime rejects unmanaged HELLO before registration; the
+`--allow-unmanaged-workers` option is removed.
+
+For successful completion, DTP `STOP/ATTEMPT_COMPLETED` is a training-completion
+notification. Worker stops outbound training traffic and reconnect attempts, closes
+DTP and keeps its OS process alive until Node Agent terminates it. A Worker that
+finishes a local assignment early remains available for further assignments; local
+exhaustion does not imply Attempt completion. FAILED/ABORTED handling is unchanged.
+
+Backend persists `desired_state=STOPPED` for dispatched allocations when projecting
+COMPLETED, without marking an offline Agent's live allocation FAILED. Maintenance
+reads committed stop intents and retries STOP_WORKER for connected Agents until a
+terminal WORKER_STATUS arrives. COMMAND_ACK alone does not mark an allocation ENDED.
+This cleanup does not gate Runtime completion or training progress.
+
+Use `scripts/e2e_agents.py` (including workload-recovery scenarios) for process
+acceptance; the former direct-Worker DBS harness is removed. The e2e_local CLI
+redirects to the Agent harness.
 
 > **IMPORTANT NOTICE:**  
 > This is a repository-local implementation projection.  

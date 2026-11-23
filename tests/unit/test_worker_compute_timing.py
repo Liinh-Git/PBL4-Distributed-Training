@@ -67,12 +67,18 @@ def provisioned_worker(tmp_path: Path):
     opener = MockOpener(responses)
 
     config = WorkerConfig(
+        attempt_id="unit-attempt",
+        allocation_id="unit-allocation",
+        node_id="unit-node",
+        worker_join_token="unit-token",
         node_label="node-1",
         runtime_host="127.0.0.1",
         runtime_port=9000,
         cache_dir=str(tmp_path / "cache"),
     )
-    worker = WorkerProcess(config, initialization_seed=42, opener=opener)
+    worker = WorkerProcess(
+        config, initialization_seed=42, model_id="resnet18_groupnorm", opener=opener
+    )
 
     mock_client = MagicMock()
     mock_client.expected_workers = 2

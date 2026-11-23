@@ -46,12 +46,6 @@ def main() -> None:
     manifests.add_argument("--parameter-manifest")
     manifests.add_argument("--manifest-dir", help="Directory of <model_id>.json manifests")
     parser.add_argument("--heartbeat-timeout", type=float, default=120.0)
-    parser.add_argument(
-        "--allow-unmanaged-workers",
-        action="store_true",
-        default=False,
-        help="Allow unmanaged workers without join tokens (for local testing/dev only).",
-    )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
     if args.port is None or args.management_port is None:
@@ -63,11 +57,9 @@ def main() -> None:
 
     load_dotenv(dotenv_path=Path(".env"))
     worker_admission_secret = os.getenv("PBL4_WORKER_ADMISSION_SECRET")
-    require_worker_admission = not args.allow_unmanaged_workers
-    if require_worker_admission and not worker_admission_secret:
+    if not worker_admission_secret:
         parser.error(
-            "PBL4_WORKER_ADMISSION_SECRET environment variable is required unless "
-            "--allow-unmanaged-workers is explicitly enabled"
+            "PBL4_WORKER_ADMISSION_SECRET environment variable is required"
         )
 
     from pbl4.runtime.process import RuntimeProcess, load_parameter_manifest
@@ -97,7 +89,6 @@ def main() -> None:
         parameter_manifests=catalog,
         heartbeat_timeout_seconds=args.heartbeat_timeout,
         worker_admission_secret=worker_admission_secret,
-        require_worker_admission=require_worker_admission,
         redis_url=os.getenv("REDIS_URL") or None,
         redis_event_stream=os.getenv("REDIS_EVENT_STREAM") or "pbl4:runtime-events",
     )

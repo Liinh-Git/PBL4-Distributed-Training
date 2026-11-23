@@ -543,6 +543,8 @@ class AllocationService:
 
         timed_out_ids: list[str] = []
         for alloc in active_allocations:
+            if alloc.get("desired_state") == allocation_repository.DESIRED_STATE_STOPPED:
+                continue
             if alloc.get("actual_state") != allocation_repository.ACTUAL_STATE_DISPATCHED:
                 continue
 
@@ -579,6 +581,7 @@ class AllocationService:
         now: datetime | None = None,
         failure_code: str = "ATTEMPT_TERMINATED",
         failure_message: str = "Attempt reached terminal state",
+        completed: bool = False,
     ) -> None:
         """Ensure all active worker allocations for an attempt are stopped or marked terminal."""
         from pbl4.management_backend.gateways.node_control_gateway import get_node_control_gateway
@@ -606,6 +609,11 @@ class AllocationService:
                         alloc_id,
                         failure_code=failure_code,
                         failure_message=failure_message,
+                    )
+                elif completed:
+                    # Persist stop intent only; maintenance sends after this transaction commits.
+                    allocation_repository.update_desired_state(
+                        conn, alloc_id, allocation_repository.DESIRED_STATE_STOPPED
                     )
                 elif is_connected:
                     AllocationService.stop_allocation(
