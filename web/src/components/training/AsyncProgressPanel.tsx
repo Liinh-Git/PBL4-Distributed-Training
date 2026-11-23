@@ -3,9 +3,10 @@ import { asyncProgressPercent } from '../../utils/asyncMetrics';
 
 const format = (value?: number | null) => value == null ? '—' : value.toLocaleString('vi-VN');
 
-export function AsyncProgressPanel({ progress, workers, totalEpochs, expectedWorkers, attemptState, showWorkers = true }: {
+export function AsyncProgressPanel({ progress, workers, workersKnown = true, totalEpochs, expectedWorkers, attemptState, showWorkers = true }: {
   progress?: StrategyStateStrictBSPData | null;
   workers: WorkerSessionItemData[];
+  workersKnown?: boolean;
   totalEpochs?: number | null;
   expectedWorkers?: number | null;
   attemptState?: string;
@@ -14,7 +15,7 @@ export function AsyncProgressPanel({ progress, workers, totalEpochs, expectedWor
   const percent = asyncProgressPercent(progress);
   const completedEpochs = progress?.completed_epochs;
   const terminal = ['COMPLETED', 'FAILED', 'ABORTED'].includes(attemptState ?? '');
-  const activeWorkers = progress?.active_workers ?? workers.filter(worker => worker.state === 'READY' && !worker.disconnected_at).length;
+  const activeWorkers = workersKnown ? workers.filter(worker => worker.state === 'READY' && !worker.disconnected_at).length : null;
   return (
     <section aria-label="Tiến độ Async-SGD" className="bg-[#121214] border border-white/[0.07] rounded p-4 sm:p-5 space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-2">

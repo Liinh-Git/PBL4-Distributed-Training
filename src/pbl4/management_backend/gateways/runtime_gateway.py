@@ -241,7 +241,10 @@ class RuntimeGateway:
                 except Exception as proj_err:
                     logger.warning("Failed to project event %s: %s", seq, proj_err)
                     conn.rollback()
-                    if self._redis_events:
+                    if self._redis_events or payload["event_type"] in {
+                        "worker.disconnected",
+                        "worker.reconnected",
+                    }:
                         raise
                     return
                 cursor.highest_contiguous_seq = seq
@@ -922,9 +925,10 @@ class RuntimeGateway:
 
     @staticmethod
     def _needs_event_snapshot(payload: dict[str, Any]) -> bool:
-        return payload["event_type"] == "attempt.state_changed" and payload["details"].get(
-            "state"
-        ) in {"RUNNING", "COMPLETED", "FAILED", "ABORTED"}
+        return payload["event_type"] in {"worker.disconnected", "worker.reconnected"} or (
+            payload["event_type"] == "attempt.state_changed"
+            and payload["details"].get("state") in {"RUNNING", "COMPLETED", "FAILED", "ABORTED"}
+        )
 
     def _broadcast_projected_event(self, payload: dict[str, Any]) -> None:
         from pbl4.management_backend.services import event_ingest
@@ -1073,7 +1077,11 @@ class RuntimeGateway:
             ):
                 with db.get_connection() as conn:
                     self.record_event_seq(attempt_id, seq, conn, current_payload=payload)
-            if (ingest_result.inserted or self._redis_events) and (
+            if (
+                ingest_result.inserted
+                or self._redis_events
+                or (is_contiguous and event_type in {"worker.disconnected", "worker.reconnected"})
+            ) and (
                 (
                     event_type == "attempt.state_changed"
                     and event_payload.get("state") in {"RUNNING", "COMPLETED", "FAILED", "ABORTED"}
@@ -1096,7 +1104,7 @@ class RuntimeGateway:
             raise
         except Exception as exc:
             logger.exception("Failed to ingest runtime event: %s", exc)
-            if self._redis_events:
+            if self._redis_events or event_type in {"worker.disconnected", "worker.reconnected"}:
                 raise
 
     def _ingest_stream_event(self, payload: dict[str, Any]) -> None:
