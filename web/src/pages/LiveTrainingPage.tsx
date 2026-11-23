@@ -1310,7 +1310,7 @@ export const LiveTrainingPage: React.FC<LiveTrainingPageProps> = ({
                                               confirmLabel="Abort Run"
                                               isDestructive={true}
                                               onConfirm={handleConfirmAbort}
-                                              onCancel={() => setIsAbortModalOpen(false)}
+                                              onClose={() => setIsAbortModalOpen(false)}
                                             />
 
                                             {/* Drawers */ }
