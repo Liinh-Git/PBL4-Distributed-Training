@@ -1,3 +1,4 @@
+import { selectionError } from '../../components/common/WorkerNodeSelection';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -13,6 +14,7 @@ function evaluate(expression: string, env: Record<string, any>) {
   const js = ts.transpileModule(`return (${expression});`, {
     fileName: 'modal.tsx', compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React },
   }).outputText;
+  env = { selectionError, selection: { mode: 'auto', nodeIds: [] }, nodeSelectionMode: 'auto', frozenCount: 3, ...env };
   return new Function(...Object.keys(env), js)(...Object.values(env));
 }
 

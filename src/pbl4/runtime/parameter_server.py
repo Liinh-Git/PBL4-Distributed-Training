@@ -546,17 +546,18 @@ class ParameterServer:
                 with self._lock:
                     assignment = self._dataset_assignments.get(connection.worker_id)
                     expected = self._expected_shard_ready.get(connection.worker_id, {})
-                    if assignment is not None:
-                        expected = {
-                            **expected,
-                            "dataset_build_id": assignment.dataset_build_id,
-                            "dataset_manifest_hash": assignment.dataset_manifest_hash,
-                            "shard_id": assignment.shard_id,
-                        }
-                        if any(message.values.get(key) != value for key, value in expected.items()):
-                            raise ValueError(
-                                "SHARD_READY does not match the pinned session assignment"
-                            )
+                    if assignment is None or not connection.dataset_assignment_sent:
+                        raise ProtocolError("SHARD_READY received before dataset assignment")
+                    expected = {
+                        **expected,
+                        "dataset_build_id": assignment.dataset_build_id,
+                        "dataset_manifest_hash": assignment.dataset_manifest_hash,
+                        "shard_id": assignment.shard_id,
+                    }
+                    if any(message.values.get(key) != value for key, value in expected.items()):
+                        raise ValueError(
+                            "SHARD_READY does not match the pinned session assignment"
+                        )
                     connection.shard_id = int(message.shard_id)
                     meta = self._session_metadata.get(connection.worker_id)
                     if meta is not None and meta.get("session_id") == connection.session_id:

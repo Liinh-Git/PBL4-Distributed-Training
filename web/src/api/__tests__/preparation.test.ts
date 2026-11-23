@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import ts from 'typescript';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { mergeWorkerSessions } from '../../utils/workerSessions';
 import { getPreparationStatus } from '../../utils/preparation';
 import { PreparationStatus } from '../../components/live/PreparationStatus';
 
@@ -65,7 +66,7 @@ test('pre-training snapshots with the same event cursor update workers immediate
   const handler = callback('handleMessage', {
     isMountedRef: { current: true }, wsRef: { current: ws }, ws, WebSocket: { OPEN: 1 }, attemptId: 'attempt',
     lastSeqRef: { current: 0 }, snapshotRevisionRef: revision,
-    setWorkers: (value: any) => { current = value; }, setSnapshot: () => {}, setAttempt: () => {},
+    mergeWorkerSessions, setWorkers: (update: any) => { current = update(current ?? []); }, setSnapshot: () => {}, setAttempt: () => {},
     setIsStale: () => {}, updateSeq: (seq: number) => assert.equal(seq, 0), triggerCoalescedRefresh: () => {},
   });
   for (const state of ['PROVISIONING', 'SHARD_READY']) {

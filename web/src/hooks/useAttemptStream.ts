@@ -142,12 +142,14 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
         ]);
         if (signal?.aborted || !isMountedRef.current || currentAttemptRef.current !== attemptId) return;
 
+        let hasFreshMembership = false;
         if (snapRes.status === 'fulfilled' && requestedAtSnapshot === snapshotRevisionRef.current) {
           const snap = snapRes.value.data;
           setIsStale(snap.stale ?? false);
           if (snap.runtime_event_seq != null && snap.runtime_event_seq >= lastSeqRef.current) {
             setSnapshot(previous => ({ ...snap, workers: mergeWorkerSessions(previous?.workers ?? [], snap.workers ?? [], !snap.stale) }));
             if (Array.isArray(snap.workers)) {
+              hasFreshMembership = !snap.stale;
               setWorkers(previous => mergeWorkerSessions(previous, snap.workers, !snap.stale));
             }
             setAttempt(prev => {
@@ -165,7 +167,7 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
           setIsStale(true);
         }
 
-        if (workersRes.status === 'fulfilled' && requestedAtSnapshot === snapshotRevisionRef.current) {
+        if (!hasFreshMembership && workersRes.status === 'fulfilled' && requestedAtSnapshot === snapshotRevisionRef.current) {
           setWorkers(previous => mergeWorkerSessions(previous, workersRes.value.data || []));
         }
 
@@ -286,7 +288,9 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
         }
       }
 
-      if (workersRes.status === 'fulfilled') {
+      if (snapRes.status === 'fulfilled' && !snapRes.value.data.stale && Array.isArray(snapRes.value.data.workers)) {
+        setWorkers(snapRes.value.data.workers);
+      } else if (workersRes.status === 'fulfilled') {
         setWorkers(workersRes.value.data || []);
       } else if (snapRes.status === 'fulfilled' && Array.isArray(snapRes.value.data.workers)) {
         setWorkers(snapRes.value.data.workers);

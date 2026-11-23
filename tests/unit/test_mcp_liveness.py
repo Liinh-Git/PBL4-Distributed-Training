@@ -66,7 +66,7 @@ def test_old_dispatch_and_dataset_response_do_not_reach_new_connection():
         assert port.is_connected
         release.set()
         port._dispatch_executor.submit(lambda: None).result(1)
-        assert seen == ["DISCONNECTED"]
+        assert seen == ["RUNTIME_EVENT", "DISCONNECTED"]
     finally:
         release.set()
         port.disconnect()

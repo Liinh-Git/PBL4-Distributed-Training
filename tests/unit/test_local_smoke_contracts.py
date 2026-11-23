@@ -90,6 +90,7 @@ def test_resume_rejects_nested_dataset_mismatch_before_allocation():
     }
     ckpt = {
         "state": "COMPLETE",
+        "artifact_retired": False,
         "contract_hash": "hash",
         "dataset_build_id": "wrong",
         "created_by_attempt_id": "old",
@@ -121,6 +122,7 @@ def test_model_rejects_incompatible_dataset(model_id, monkeypatch):
         "dataset_manifest_hash": "a" * 64,
         "batch_size": 16,
         "shard_count": 3,
+        "manifest_snapshot_jsonb": {"shards": [{"batch_count": 8, "sample_count": 1024}] * 3},
         "input_shape_json": [1, 28, 28],
         "num_classes": 10,
         "dtype": "float32",
@@ -138,5 +140,5 @@ def test_model_rejects_incompatible_dataset(model_id, monkeypatch):
                 "epochs": 1,
                 "learning_rate": 0.01,
                 "training_seed": 42,
-            },
+            }, expected_workers=3,
         )

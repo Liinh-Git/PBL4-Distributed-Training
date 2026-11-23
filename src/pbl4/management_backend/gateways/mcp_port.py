@@ -581,16 +581,17 @@ class RealMcpClientPort(McpClientPort):
         # Keep semantic delivery in TCP receive order. Reader/correlation and
         # dataset resolution stay independent so handlers may request state.
         def deliver() -> None:
-            with self._state_lock:
-                if client is not None and self._client is not client:
-                    return
             self._delivery_context.client = client
             try:
                 handler(envelope.message_type, envelope.payload.to_dict())
             finally:
                 self._delivery_context.client = None
 
-        self._dispatch_executor.submit(deliver)
+        # Queue before DISCONNECTED. A queued event still belongs in history;
+        # requests made by its handler remain bound to the original socket.
+        with self._state_lock:
+            if client is None or self._client is client:
+                self._dispatch_executor.submit(deliver)
 
     def _serve_dataset_resolution(self, request: McpEnvelope, client: TcpClient) -> None:
         try:

@@ -26,6 +26,8 @@ from pbl4.management_backend.repositories import (
     job_repository,
 )
 from pbl4.management_backend.services import contract_resolver
+from pbl4.management_backend.services.cluster_scheduler import NodeCapacityUnavailableError
+from pbl4.management_backend.services.worker_selection import select_workers
 from pbl4.management_backend.services.dataset_service import (
     InvalidCursorError as InvalidCursorError,
 )
@@ -357,11 +359,17 @@ def validate_job(
         frozen_resolved = current.get("resolved_contract")
         if isinstance(frozen_resolved, str):
             frozen_resolved = json.loads(frozen_resolved)
+        errors = []
+        if node_ids is not None:
+            try:
+                select_workers(conn, expected_workers=frozen_resolved["synchronization"]["expected_workers"], node_ids=node_ids)
+            except (ValueError, NodeCapacityUnavailableError) as exc:
+                errors.append(str(exc))
         return {
             "requested_contract": rc,
             "resolved_preview": frozen_resolved,
             "warnings": ["Job is already frozen (READY); returning frozen contract."],
-            "errors": [],
+            "errors": errors,
         }
 
     if "checkpoint" not in rc or rc.get("checkpoint") is None:
@@ -373,11 +381,6 @@ def validate_job(
 
     if not errors:
         try:
-            from pbl4.management_backend.services.cluster_scheduler import (
-                NodeCapacityUnavailableError,
-            )
-            from pbl4.management_backend.services.worker_selection import select_workers
-
             # Validate independently of live capacity, without exposing a fictitious N.
             _resolve_contract(conn, rc, expected_workers=1)
             try:
