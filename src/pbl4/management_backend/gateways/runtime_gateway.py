@@ -140,6 +140,7 @@ class RuntimeGateway:
         bounded memory queue overflowed and dropped events. Reconcile immediately
         from Authoritative Snapshot rather than waiting for missing events.
         """
+        from pbl4.management_backend.repositories import event_repository
         from pbl4.management_backend.websocket import hub
 
         cursor = self.get_cursor(attempt_id)
@@ -185,68 +186,84 @@ class RuntimeGateway:
                 },
             )
             snapshot = self._port.request_state()
-            if snapshot and snapshot.get("active_attempt_id") == attempt_id:
-                self.handle_state_snapshot(snapshot)
-                if (
-                    not cursor.gap_fenced
-                    and cursor.authoritative_snapshot_seq is not None
-                    and cursor.authoritative_snapshot_seq >= seq
-                ):
-                    # Reconcile current state without skipping telemetry still queued
-                    # behind this event, even when the snapshot is much newer.
-                    cursor.highest_contiguous_seq = seq
+            if not snapshot or snapshot.get("active_attempt_id") != attempt_id:
+                return
+            self.handle_state_snapshot(snapshot)
+            if cursor.gap_fenced or (cursor.authoritative_snapshot_seq or 0) < seq:
+                return
+            if self._redis_events:
+                cursor.highest_contiguous_seq = seq
+                return
+
+            # The snapshot covers missing sequences, but contains no checkpoint history.
+            # Replay only received rows, including any whose previous projection failed.
+            after = expected - 1
+            while after < seq:
+                rows = event_repository.list_events_after_seq(conn, attempt_id, after)
+                if not rows:
+                    return
+                for row in rows:
+                    after = row["runtime_event_seq"]
+                    if after > seq or not self._commit_received_event(
+                        conn, cursor, self._stored_event(row)
+                    ):
+                        return
             return
 
         if seq == expected:
-            payload = current_payload
-            if payload is None:
-                from pbl4.management_backend.repositories import event_repository
-
-                next_ev = event_repository.get_event_by_seq(conn, attempt_id, seq)
-                if next_ev is not None:
-                    details = next_ev.get("payload_jsonb")
-                    if isinstance(details, str):
-                        try:
-                            details = json.loads(details)
-                        except Exception:
-                            details = {}
-                    elif details is None:
-                        details = {}
-
-                    occurred_at_val = next_ev.get("occurred_at")
-                    occurred_at_str = (
-                        occurred_at_val.isoformat()
-                        if isinstance(occurred_at_val, datetime)
-                        else str(occurred_at_val or datetime.now(UTC).isoformat())
-                    )
-
-                    payload = {
-                        "attempt_id": attempt_id,
-                        "runtime_event_seq": seq,
-                        "event_type": next_ev.get("event_type"),
-                        "severity": next_ev.get("severity", "INFO"),
-                        "occurred_at": occurred_at_str,
-                        "source_component": next_ev.get("source_component", "Runtime"),
-                        "details": details,
-                    }
-
-            if payload is not None:
-                try:
-                    self._project_runtime_event(conn, payload)
-                    if self._redis_events:
-                        from pbl4.management_backend.repositories import attempt_repository
-
-                        attempt_repository.record_event_projection_cursor(conn, attempt_id, seq)
-                    conn.commit()
-                except Exception as proj_err:
-                    logger.warning("Failed to project event %s: %s", seq, proj_err)
-                    conn.rollback()
-                    if self._redis_events:
-                        raise
+            if current_payload is None:
+                row = event_repository.get_event_by_seq(conn, attempt_id, seq)
+                if row is None:
                     return
-                cursor.highest_contiguous_seq = seq
-                cursor.gap_fenced = False
-                self._broadcast_projected_event(payload)
+                current_payload = self._stored_event(row)
+            self._commit_received_event(conn, cursor, current_payload)
+
+    @staticmethod
+    def _stored_event(row: dict[str, Any]) -> dict[str, Any]:
+        details = row["payload_jsonb"]
+        return {
+            "attempt_id": row["attempt_id"],
+            "runtime_event_seq": row["runtime_event_seq"],
+            "event_type": row["event_type"],
+            "severity": row["severity"],
+            "occurred_at": row["occurred_at"].isoformat(),
+            "source_component": row["source_component"],
+            "details": json.loads(details) if isinstance(details, str) else details,
+        }
+
+    def _project_received_event(
+        self, conn: Any, cursor: AttemptRuntimeCursor, payload: dict[str, Any]
+    ) -> None:
+        # Preserve the snapshot's attempt state while projecting historical steps and checkpoints.
+        if (
+            not self._redis_events
+            and payload["event_type"] == "attempt.state_changed"
+            and payload["runtime_event_seq"] <= (cursor.authoritative_snapshot_seq or 0)
+        ):
+            return
+        self._project_runtime_event(conn, payload)
+
+    def _commit_received_event(
+        self, conn: Any, cursor: AttemptRuntimeCursor, payload: dict[str, Any]
+    ) -> bool:
+        seq = payload["runtime_event_seq"]
+        try:
+            self._project_received_event(conn, cursor, payload)
+            if self._redis_events:
+                from pbl4.management_backend.repositories import attempt_repository
+
+                attempt_repository.record_event_projection_cursor(conn, payload["attempt_id"], seq)
+            conn.commit()
+        except Exception as exc:
+            logger.warning("Failed to project event %s: %s", seq, exc)
+            conn.rollback()
+            if self._redis_events:
+                raise
+            return False
+        cursor.highest_contiguous_seq = seq
+        cursor.gap_fenced = False
+        self._broadcast_projected_event(payload)
+        return True
 
     def _empty_snapshot(self) -> dict[str, Any]:
         return {
@@ -889,7 +906,7 @@ class RuntimeGateway:
                         )
                         cursor.max_seen_seq = max(cursor.max_seen_seq, seq)
                         if seq == expected:
-                            self._project_runtime_event(conn, payload)
+                            self._project_received_event(conn, cursor, payload)
                             cursor.highest_contiguous_seq = seq
                             changed[attempt_id] = seq
                             projected.append(payload)
@@ -916,7 +933,8 @@ class RuntimeGateway:
                 # durable cursors before any retry instead of repeating mutations.
                 for attempt_id in staged:
                     cursor = self.get_cursor(attempt_id)
-                    cursor.highest_contiguous_seq = None
+                    if self._redis_events:
+                        cursor.highest_contiguous_seq = None
                     cursor.stale = True
                 raise
 
@@ -1035,7 +1053,7 @@ class RuntimeGateway:
                 )
 
         # Preflight: check sequence continuity BEFORE mutating projection
-        is_contiguous = True
+        needs_projection = True
         if attempt_id is not None and seq is not None:
             cursor = self.get_cursor(attempt_id)
             expected = (
@@ -1047,8 +1065,7 @@ class RuntimeGateway:
                     else 1
                 )
             )
-            if seq != expected:
-                is_contiguous = False
+            needs_projection = seq >= expected
 
         try:
             from pbl4.management_backend import db
@@ -1069,7 +1086,7 @@ class RuntimeGateway:
                     payload=event_payload,
                 )
             if attempt_id is not None and (
-                self._redis_events or ingest_result.inserted or is_contiguous
+                self._redis_events or ingest_result.inserted or needs_projection
             ):
                 with db.get_connection() as conn:
                     self.record_event_seq(attempt_id, seq, conn, current_payload=payload)
