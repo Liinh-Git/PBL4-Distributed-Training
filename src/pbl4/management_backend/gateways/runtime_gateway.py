@@ -257,7 +257,10 @@ class RuntimeGateway:
         except Exception as exc:
             logger.warning("Failed to project event %s: %s", seq, exc)
             conn.rollback()
-            if self._redis_events or payload["event_type"] in {"worker.disconnected", "worker.reconnected"}:
+            if self._redis_events or payload["event_type"] in {
+                "worker.disconnected",
+                "worker.reconnected",
+            }:
                 raise
             return False
         cursor.highest_contiguous_seq = seq
@@ -1086,21 +1089,12 @@ class RuntimeGateway:
                     source_component=source_component,
                     payload=event_payload,
                 )
-            if attempt_id is not None and (
-                self._redis_events or ingest_result.inserted or needs_projection
-            ):
+            if attempt_id is not None and (ingest_result.inserted or needs_projection):
                 with db.get_connection() as conn:
                     self.record_event_seq(attempt_id, seq, conn, current_payload=payload)
-            if (
-                ingest_result.inserted
-                or self._redis_events
-                or (needs_projection and event_type in {"worker.disconnected", "worker.reconnected"})
-            ) and (
-                (
-                    event_type == "attempt.state_changed"
-                    and event_payload.get("state") in {"RUNNING", "COMPLETED", "FAILED", "ABORTED"}
-                )
-                or event_type in {"worker.reconnected", "worker.disconnected"}
+            membership_event = event_type in {"worker.disconnected", "worker.reconnected"}
+            if self._needs_event_snapshot(payload) and (
+                ingest_result.inserted or (membership_event and needs_projection)
             ):
                 # Session rows come from authoritative snapshots. Establish them
                 # before model.updated references their IDs, without relying on
@@ -1109,11 +1103,6 @@ class RuntimeGateway:
                 snapshot = self._port.request_state()
                 if snapshot and snapshot.get("active_attempt_id") == attempt_id:
                     self.handle_state_snapshot(snapshot)
-            if self._redis_events and self.get_cursor(attempt_id).gap_fenced:
-                snapshot = self._port.request_state()
-                if not snapshot or snapshot.get("active_attempt_id") != attempt_id:
-                    raise RuntimeUnavailableError("Event gap requires an authoritative snapshot")
-                self.handle_state_snapshot(snapshot)
         except event_ingest.ConflictingEventPayloadError:
             raise
         except Exception as exc:

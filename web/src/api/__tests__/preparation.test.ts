@@ -100,6 +100,25 @@ test('slow REST at cursor zero cannot replace newer WebSocket preparation data',
   await request;
 });
 
+test('refresh uses fresh snapshot membership when REST still contains a departed worker', async () => {
+  const departed = { worker_id: 0, session_id: 'old', state: 'READY' };
+  let rows = [departed];
+  const refresh = callback('refreshSnapshot', {
+    attemptId: 'attempt', refreshInFlightRef: { current: null }, lastSeqRef: { current: 10 },
+    snapshotRevisionRef: { current: 1 }, lifecycleRef: { current: null }, stepsRef: { current: [] },
+    isMountedRef: { current: true }, currentAttemptRef: { current: 'attempt' },
+    historyReads: { invalidate: () => {} }, mergeWorkerSessions,
+    attemptsService: { getSnapshot: async () => ({ data: { runtime_event_seq: 10, stale: false, workers: [] } }) },
+    workersService: { listWorkers: async () => ({ data: [departed] }) },
+    stepsService: { listStepUpdates: async () => ({ data: [] }) },
+    setWorkers: (update: any) => { rows = update(rows); },
+    setStepsError: () => {}, setNextStepsCursor: () => {}, setSteps: () => {},
+    setSnapshot: () => {}, setAttempt: () => {}, setIsStale: () => {},
+  });
+  await refresh();
+  assert.deepEqual(rows, []);
+});
+
 test('training events update barrier, timing and worker metrics without REST requests', async () => {
   const ws = { readyState: 1, close: () => assert.fail('valid event must not close socket') };
   const cursor = { current: 0 };

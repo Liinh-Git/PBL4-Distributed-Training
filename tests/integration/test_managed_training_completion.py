@@ -32,8 +32,10 @@ def wait_until(predicate, timeout=30):
         time.sleep(0.02)
 
 
-@pytest.mark.parametrize("strategy", ["strict_bsp", "async_sgd"])
-def test_managed_workers_wait_for_agent_after_training(tmp_path, strategy, monkeypatch):
+@pytest.mark.parametrize(("strategy", "shard_count"), [("strict_bsp", 1), ("async_sgd", 3)])
+def test_managed_workers_wait_for_agent_after_training(
+    tmp_path, strategy, shard_count, monkeypatch
+):
     monkeypatch.setenv("OMP_NUM_THREADS", "1")
     manifest = PyTorchAdapter(
         build_model("small_cnn", initialization_seed=42, device="cpu"),
@@ -41,7 +43,7 @@ def test_managed_workers_wait_for_agent_after_training(tmp_path, strategy, monke
         local_gradient_reduction="mean",
     ).manifest
     data = create_synthetic_dataset_artifacts(
-        tmp_path / "artifacts" / "build", dataset_build_id="build"
+        tmp_path / "artifacts" / "build", dataset_build_id="build", shard_count=shard_count
     )
 
     class QuietHandler(SimpleHTTPRequestHandler):
@@ -59,6 +61,7 @@ def test_managed_workers_wait_for_agent_after_training(tmp_path, strategy, monke
             "dataset_build_id": "build",
             "dataset_manifest_hash": data.dataset_manifest_hash,
             "batch_size": 2,
+            "shard_count": shard_count,
         },
         "model": {
             "model_id": "small_cnn",

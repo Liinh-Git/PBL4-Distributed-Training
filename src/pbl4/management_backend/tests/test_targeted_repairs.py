@@ -205,7 +205,9 @@ def test_event_ingest_exact_duplicate_is_idempotent():
             "pbl4.management_backend.repositories.event_repository.get_event_by_seq",
             return_value=existing_row,
         ),
-        patch("pbl4.management_backend.repositories.event_repository.insert_event") as mock_insert,
+        patch(
+            "pbl4.management_backend.repositories.event_repository.insert_event", return_value=None
+        ) as mock_insert,
     ):
         res = event_ingest.ingest_runtime_event(
             mock_conn,
@@ -219,7 +221,7 @@ def test_event_ingest_exact_duplicate_is_idempotent():
         )
         assert res.inserted is False
         assert res.row == existing_row
-        mock_insert.assert_not_called()
+        mock_insert.assert_called_once()
 
 
 def test_event_ingest_different_occurred_at_raises_conflict():
@@ -246,6 +248,9 @@ def test_event_ingest_different_occurred_at_raises_conflict():
         patch(
             "pbl4.management_backend.repositories.event_repository.get_event_by_seq",
             return_value=existing_row,
+        ),
+        patch(
+            "pbl4.management_backend.repositories.event_repository.insert_event", return_value=None
         ),
         pytest.raises(event_ingest.ConflictingEventPayloadError),
     ):
@@ -280,9 +285,14 @@ def test_event_ingest_different_immutable_field_raises_conflict():
         "payload_jsonb": payload,
     }
 
-    with patch(
-        "pbl4.management_backend.repositories.event_repository.get_event_by_seq",
-        return_value=existing_row,
+    with (
+        patch(
+            "pbl4.management_backend.repositories.event_repository.insert_event", return_value=None
+        ),
+        patch(
+            "pbl4.management_backend.repositories.event_repository.get_event_by_seq",
+            return_value=existing_row,
+        ),
     ):
         # Different severity
         with pytest.raises(event_ingest.ConflictingEventPayloadError):

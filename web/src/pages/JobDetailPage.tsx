@@ -257,9 +257,7 @@ export const JobDetailPage: React.FC = () => {
       setActionLoading('launch');
       await attemptsService.assertNoActiveAttempt();
       const selectedNodes = selection.mode === 'manual' ? { node_ids: selection.nodeIds } : undefined;
-      const res = attempts.length > 0
-        ? await jobsService.retryJob(job.job_id, selectedNodes)
-        : await jobsService.startJob(job.job_id, selectedNodes);
+      const res = await jobsService.startJob(job.job_id, selectedNodes);
       navigate(`/live?attempt_id=${encodeURIComponent(res.data.attempt_id)}`);
     } catch (err: any) {
       alert(`Failed to launch training run: ${err?.message || 'Unknown error'}`);

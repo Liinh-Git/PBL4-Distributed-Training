@@ -61,6 +61,7 @@ def test_contract_resolver_preserves_all_preprocessing_fields():
         "custom_transform_pipeline": ["random_horizontal_flip", "color_jitter"],
     }
     mock_build = {
+        "manifest_snapshot_jsonb": {"shards": [{"batch_count": 2, "sample_count": 256}] * 3},
         "dataset_build_id": "custom-build-1",
         "dataset_id": "ds-custom",
         "state": "READY",
@@ -92,7 +93,7 @@ def test_contract_resolver_preserves_all_preprocessing_fields():
             return_value="image_classification",
         ),
     ):
-        resolved = resolve(conn, req)
+        resolved = resolve(conn, req, expected_workers=3)
 
     # 1. Ensure all fields from custom_preprocessing are intact
     assert resolved["dataset"]["preprocessing"] == custom_preprocessing
@@ -110,6 +111,7 @@ def test_contract_resolver_does_not_invent_normalization_when_missing():
     """Verify resolve() does NOT inject CIFAR-10 mean/std when normalization is absent."""
     conn = MagicMock()
     mock_build = {
+        "manifest_snapshot_jsonb": {"shards": [{"batch_count": 2, "sample_count": 256}] * 3},
         "dataset_build_id": "mnist-build-1",
         "dataset_id": "ds-mnist",
         "state": "READY",
@@ -144,7 +146,7 @@ def test_contract_resolver_does_not_invent_normalization_when_missing():
             return_value="image_classification",
         ),
     ):
-        resolved = resolve(conn, req)
+        resolved = resolve(conn, req, expected_workers=3)
 
     # Preprocessing must NOT contain fake CIFAR-10 normalization
     assert "normalization" not in resolved["dataset"]["preprocessing"]
@@ -169,10 +171,11 @@ def test_contract_resolver_fallback_to_manifest_snapshot():
         "num_classes": 10,
         "preprocessing_json": {},
         "manifest_snapshot_jsonb": {
+            "shards": [{"batch_count": 2, "sample_count": 256}] * 3,
             "preprocessing": {
                 "auto_augmented": True,
                 "pad": 4,
-            }
+            },
         },
     }
 
@@ -195,7 +198,7 @@ def test_contract_resolver_fallback_to_manifest_snapshot():
             return_value="image_classification",
         ),
     ):
-        resolved = resolve(conn, req)
+        resolved = resolve(conn, req, expected_workers=3)
 
     assert resolved["dataset"]["preprocessing"] == {
         "auto_augmented": True,
@@ -250,7 +253,12 @@ def test_api_validate_job_preserves_custom_preprocessing(app_client):
                 "expected_workers": 3,
             },
             "update_policy": {"type": "plain_sgd_without_momentum"},
-            "checkpoint_policy": {"type": "periodic", "policy_version": 1, "schema_version": 1, "every_n_epochs": 5},
+            "checkpoint_policy": {
+                "type": "periodic",
+                "policy_version": 1,
+                "schema_version": 1,
+                "every_n_epochs": 5,
+            },
             "protocols": {"dtp_version": 1, "mcp_version": 1},
         },
         "warnings": [],
@@ -279,6 +287,7 @@ def test_contract_resolver_malformed_input_shape_json_raises():
     """Verify resolve() raises ContractResolutionError when input_shape_json is malformed JSON."""
     conn = MagicMock()
     mock_build = {
+        "manifest_snapshot_jsonb": {"shards": [{"batch_count": 2, "sample_count": 256}] * 3},
         "dataset_build_id": "bad-shape-build",
         "dataset_id": "ds-bad-shape",
         "state": "READY",
@@ -310,13 +319,14 @@ def test_contract_resolver_malformed_input_shape_json_raises():
         ),
         pytest.raises(ContractResolutionError, match="Malformed input_shape_json"),
     ):
-        resolve(conn, req)
+        resolve(conn, req, expected_workers=3)
 
 
 def test_contract_resolver_non_list_input_shape_json_raises():
     """Verify resolve() raises ContractResolutionError when input_shape_json is not a list."""
     conn = MagicMock()
     mock_build = {
+        "manifest_snapshot_jsonb": {"shards": [{"batch_count": 2, "sample_count": 256}] * 3},
         "dataset_build_id": "bad-shape-build-2",
         "dataset_id": "ds-bad-shape",
         "state": "READY",
@@ -348,13 +358,14 @@ def test_contract_resolver_non_list_input_shape_json_raises():
         ),
         pytest.raises(ContractResolutionError, match="must decode to a list"),
     ):
-        resolve(conn, req)
+        resolve(conn, req, expected_workers=3)
 
 
 def test_contract_resolver_malformed_preprocessing_json_raises():
     """Verify resolve() raises ContractResolutionError when preprocessing_json is malformed JSON."""
     conn = MagicMock()
     mock_build = {
+        "manifest_snapshot_jsonb": {"shards": [{"batch_count": 2, "sample_count": 256}] * 3},
         "dataset_build_id": "bad-preproc-build",
         "dataset_id": "ds-bad-preproc",
         "state": "READY",
@@ -386,13 +397,14 @@ def test_contract_resolver_malformed_preprocessing_json_raises():
         ),
         pytest.raises(ContractResolutionError, match="Malformed preprocessing_json"),
     ):
-        resolve(conn, req)
+        resolve(conn, req, expected_workers=3)
 
 
 def test_contract_resolver_non_dict_preprocessing_json_raises():
     """Verify resolve() raises ContractResolutionError when preprocessing_json is not a dict."""
     conn = MagicMock()
     mock_build = {
+        "manifest_snapshot_jsonb": {"shards": [{"batch_count": 2, "sample_count": 256}] * 3},
         "dataset_build_id": "bad-preproc-build-2",
         "dataset_id": "ds-bad-preproc",
         "state": "READY",
@@ -424,4 +436,4 @@ def test_contract_resolver_non_dict_preprocessing_json_raises():
         ),
         pytest.raises(ContractResolutionError, match="must decode to an object/dict"),
     ):
-        resolve(conn, req)
+        resolve(conn, req, expected_workers=3)

@@ -75,12 +75,7 @@ class WorkerProcess:
         self._last_step: int | None = None
         self._epoch = 0
         self._next_batch_ordinal = 0
-        if self._config.allocation_id:
-            self._client_instance_id = str(
-                uuid.uuid5(uuid.NAMESPACE_OID, self._config.allocation_id)
-            )
-        else:
-            self._client_instance_id = str(uuid.uuid4())
+        self._client_instance_id = str(uuid.uuid5(uuid.NAMESPACE_OID, config.allocation_id))
         self._connection_lost = threading.Event()
         self._jobs = Queue(maxsize=2)
         self._asynchronous = False

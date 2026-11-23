@@ -62,6 +62,7 @@ def test_canonical_json_hashing_determinism():
 def test_contract_resolver_success():
     conn = MagicMock()
     mock_build = {
+        "manifest_snapshot_jsonb": {"shards": [{"batch_count": 2, "sample_count": 256}] * 3},
         "dataset_build_id": "cifar10-v1-build",
         "dataset_id": "ds-cifar10",
         "state": "READY",
@@ -89,7 +90,7 @@ def test_contract_resolver_success():
             "training_seed": 42,
         }
 
-        resolved = resolve(conn, req)
+        resolved = resolve(conn, req, expected_workers=3)
         assert resolved["model"]["model_id"] == "resnet18_groupnorm"
         assert resolved["synchronization"]["training_strategy"] == "strict_bsp"
         assert resolved["synchronization"]["expected_workers"] == 3
@@ -102,6 +103,7 @@ def test_contract_resolver_success():
 def test_contract_resolver_rejections():
     conn = MagicMock()
     mock_build = {
+        "manifest_snapshot_jsonb": {"shards": [{"batch_count": 2, "sample_count": 256}] * 3},
         "dataset_build_id": "cifar10-v1-build",
         "dataset_id": "ds-cifar10",
         "state": "READY",
@@ -130,6 +132,7 @@ def test_contract_resolver_rejections():
                     "training_strategy": "strict_bsp",
                     "epochs": 5,
                 },
+                expected_workers=3,
             )
         assert any("Unsupported model_id" in err for err in exc_info.value.errors)
 
@@ -143,6 +146,7 @@ def test_contract_resolver_rejections():
                     "training_strategy": "asynchronous_parameter_server",
                     "epochs": 5,
                 },
+                expected_workers=3,
             )
         assert any("Unsupported training_strategy" in err for err in exc_info.value.errors)
 
@@ -219,6 +223,7 @@ def test_worker_session_item_schema_strictness():
 def test_contract_resolver_checkpoint_cadence_options():
     conn = MagicMock()
     mock_build = {
+        "manifest_snapshot_jsonb": {"shards": [{"batch_count": 2, "sample_count": 256}] * 3},
         "dataset_build_id": "cifar10-v1-build",
         "dataset_id": "ds-cifar10",
         "state": "READY",
@@ -247,15 +252,15 @@ def test_contract_resolver_checkpoint_cadence_options():
         }
 
         # 1. Default N=5 when omitted
-        res_default = resolve(conn, base_req)
+        res_default = resolve(conn, base_req, expected_workers=3)
         assert res_default["checkpoint_policy"]["every_n_epochs"] == 5
 
         # 2. Explicit N=1
-        res_1 = resolve(conn, {**base_req, "checkpoint": {"every_n_epochs": 1}})
+        res_1 = resolve(conn, {**base_req, "checkpoint": {"every_n_epochs": 1}}, expected_workers=3)
         assert res_1["checkpoint_policy"]["every_n_epochs"] == 1
 
         # 3. Explicit N=7
-        res_7 = resolve(conn, {**base_req, "checkpoint": {"every_n_epochs": 7}})
+        res_7 = resolve(conn, {**base_req, "checkpoint": {"every_n_epochs": 7}}, expected_workers=3)
         assert res_7["checkpoint_policy"]["every_n_epochs"] == 7
 
         # 4. Changing N changes contract hash
@@ -270,6 +275,7 @@ def test_contract_resolver_checkpoint_cadence_options():
 def test_contract_resolver_checkpoint_strict_validation():
     conn = MagicMock()
     mock_build = {
+        "manifest_snapshot_jsonb": {"shards": [{"batch_count": 2, "sample_count": 256}] * 3},
         "dataset_build_id": "cifar10-v1-build",
         "dataset_id": "ds-cifar10",
         "state": "READY",
@@ -309,11 +315,15 @@ def test_contract_resolver_checkpoint_strict_validation():
 
         for invalid_cp in invalid_cases:
             with pytest.raises(ContractResolutionError):
-                resolve(conn, {**base_req, "checkpoint": invalid_cp})
+                resolve(conn, {**base_req, "checkpoint": invalid_cp}, expected_workers=3)
 
         # Reject legacy policy key
         with pytest.raises(ContractResolutionError):
-            resolve(conn, {**base_req, "checkpoint_policy": "after_each_model_update_blocking"})
+            resolve(
+                conn,
+                {**base_req, "checkpoint_policy": "after_each_model_update_blocking"},
+                expected_workers=3,
+            )
 
 
 def test_job_service_checkpoint_preservation_and_legacy_rejection():
@@ -335,7 +345,9 @@ def test_job_service_checkpoint_preservation_and_legacy_rejection():
             "checkpoint": {"every_n_epochs": 5},
         },
     }
-    with patch("pbl4.management_backend.repositories.job_repository.create_job", return_value=mock_row):
+    with patch(
+        "pbl4.management_backend.repositories.job_repository.create_job", return_value=mock_row
+    ):
         created = job_service.create_job(
             conn,
             display_name="Test Job",
@@ -354,7 +366,9 @@ def test_job_service_checkpoint_preservation_and_legacy_rejection():
     # 2. update_job preserves N when patching unrelated field
     with (
         patch("pbl4.management_backend.repositories.job_repository.get_job", return_value=mock_row),
-        patch("pbl4.management_backend.repositories.job_repository.update_job", return_value=mock_row) as mock_up,
+        patch(
+            "pbl4.management_backend.repositories.job_repository.update_job", return_value=mock_row
+        ) as mock_up,
     ):
         job_service.update_job(
             conn,
@@ -366,7 +380,9 @@ def test_job_service_checkpoint_preservation_and_legacy_rejection():
         assert called_rc["checkpoint"]["every_n_epochs"] == 5
 
     # 3. update_job rejects checkpoint: None
-    with patch("pbl4.management_backend.repositories.job_repository.get_job", return_value=mock_row):
+    with patch(
+        "pbl4.management_backend.repositories.job_repository.get_job", return_value=mock_row
+    ):
         with pytest.raises(job_service.JobValidationError):
             job_service.update_job(
                 conn,
@@ -388,7 +404,8 @@ def test_job_service_checkpoint_preservation_and_legacy_rejection():
             "training_strategy": "strict_bsp",
         },
     }
-    with patch("pbl4.management_backend.repositories.job_repository.get_job", return_value=legacy_mock_row):
+    with patch(
+        "pbl4.management_backend.repositories.job_repository.get_job", return_value=legacy_mock_row
+    ):
         with pytest.raises(job_service.JobValidationError):
             job_service.clone_job(conn, "job_legacy")
-

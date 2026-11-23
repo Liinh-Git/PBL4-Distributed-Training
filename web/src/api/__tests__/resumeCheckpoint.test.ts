@@ -122,8 +122,8 @@ test('empty checkpoint picker explains Launch Run and disables confirmation', ()
   }
   visit(source);
   const html = renderToStaticMarkup(evaluate(markup, {
-    React, X: () => null, RotateCcw: () => null, dialogRef: { current: null },
-    close: () => {}, submitting: false, error: null, loading: false, checkpoints: [],
+    React, WorkerNodeSelection: () => null, setSelection: () => {}, X: () => null, RotateCcw: () => null, dialogRef: { current: null },
+    close: () => {}, contractError: null, submitting: false, error: null, loading: false, checkpoints: [],
     nextCursor: null, canResume: true, selectedCheckpoint: undefined, handleResume: () => {},
   }));
   assert.match(html, /No complete checkpoints/);

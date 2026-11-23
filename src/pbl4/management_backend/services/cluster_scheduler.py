@@ -123,9 +123,6 @@ class ClusterScheduler:
             if state == "ONLINE" and node_id not in busy_node_ids:
                 candidates.append(node)
 
-        # Stable population ordering makes injected RNGs reproducible in tests.
-        candidates.sort(key=lambda n: str(n.get("node_id", "")))
-
         if node_ids is not None:
             if not 1 <= len(node_ids) <= MANUAL_WORKER_LIMIT or len(set(node_ids)) != len(node_ids):
                 raise ValueError("Select 1 to 5 distinct Nodes.")

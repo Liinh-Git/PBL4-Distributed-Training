@@ -140,5 +140,6 @@ def test_model_rejects_incompatible_dataset(model_id, monkeypatch):
                 "epochs": 1,
                 "learning_rate": 0.01,
                 "training_seed": 42,
-            }, expected_workers=3,
+            },
+            expected_workers=3,
         )

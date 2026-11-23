@@ -64,7 +64,7 @@ function handlerEnv(overrides: Record<string, any> = {}) {
     jobsService: { startJob: async () => ({ data: attempt('CREATED') }), retryJob: async () => ({ data: attempt('CREATED') }) },
     attemptsService: { assertNoActiveAttempt: async () => {}, getActiveAttempt: async () => null },
     navigate: (url: string) => navigations.push(url), alert: (message: string) => errors.push(message),
-    setFormError: (message: string) => { if (message) errors.push(message); },
+    setLaunchError: () => {}, setFormError: (message: string) => { if (message) errors.push(message); },
     setActionLoading: () => {}, setActiveAttempt: () => {}, loadJobData: async () => {}, fetchJobs: async () => {},
     navigations, errors, ...overrides,
   };

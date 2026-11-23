@@ -35,14 +35,21 @@ def client():
 # ─── System Endpoints ─────────────────────────────────────────────────────────
 
 
-def test_health_ok(client):
+@pytest.mark.parametrize(("degraded", "expected"), [(False, "healthy"), (True, "degraded")])
+def test_health_ok(client, monkeypatch, degraded, expected):
+    from types import SimpleNamespace
+
+    from pbl4.management_backend.api import system
+
+    gateway = SimpleNamespace(connected=True, event_consumer=SimpleNamespace(degraded=degraded))
+    monkeypatch.setattr(system, "get_gateway", lambda: gateway)
     r = client.get("/api/v1/health")
     assert r.status_code == 200
     res = r.json()
     assert "data" in res and "meta" in res
     assert res["meta"]["request_id"].startswith("req_")
     data = res["data"]
-    assert data["backend"] == "healthy"
+    assert data["backend"] == expected
     assert "postgres" in data
     assert "runtime_mcp" in data
     assert "dataset_manager" in data

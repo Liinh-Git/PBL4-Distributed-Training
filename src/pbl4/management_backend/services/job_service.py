@@ -27,7 +27,6 @@ from pbl4.management_backend.repositories import (
 )
 from pbl4.management_backend.services import contract_resolver
 from pbl4.management_backend.services.cluster_scheduler import NodeCapacityUnavailableError
-from pbl4.management_backend.services.worker_selection import select_workers
 from pbl4.management_backend.services.dataset_service import (
     InvalidCursorError as InvalidCursorError,
 )
@@ -37,6 +36,7 @@ from pbl4.management_backend.services.dataset_service import (
 from pbl4.management_backend.services.dataset_service import (
     encode_cursor as encode_cursor,
 )
+from pbl4.management_backend.services.worker_selection import select_workers
 
 logger = logging.getLogger(__name__)
 
@@ -126,18 +126,24 @@ def _validate_contract(requested_contract: dict) -> list[str]:
             if not raw_cp:
                 errors.append("checkpoint group cannot be empty.")
             elif "every_n_epochs" not in raw_cp:
-                errors.append("checkpoint.every_n_epochs is required when checkpoint group is provided.")
+                errors.append(
+                    "checkpoint.every_n_epochs is required when checkpoint group is provided."
+                )
             else:
                 n_val = raw_cp["every_n_epochs"]
                 if isinstance(n_val, bool) or not isinstance(n_val, int) or n_val <= 0:
-                    errors.append("checkpoint.every_n_epochs must be an integer > 0 (boolean/float values are rejected).")
+                    errors.append(
+                        "checkpoint.every_n_epochs must be an integer > 0 (boolean/float values are rejected)."
+                    )
                 elif len(raw_cp) > 1:
                     errors.append("checkpoint group contains unknown fields.")
         else:
             errors.append("checkpoint must be an object.")
 
     if "checkpoint_policy" in requested_contract:
-        errors.append("checkpoint_policy in requested_contract is unsupported. Use 'checkpoint' with 'every_n_epochs'.")
+        errors.append(
+            "checkpoint_policy in requested_contract is unsupported. Use 'checkpoint' with 'every_n_epochs'."
+        )
 
     return errors
 
@@ -283,7 +289,9 @@ def update_job(
         old_policy = rc.get("workload_policy", "equal")
         new_policy = requested_contract.get("workload_policy", old_policy)
         if "checkpoint" in requested_contract and requested_contract["checkpoint"] is None:
-            raise JobValidationError("Contract validation failed", ["checkpoint group cannot be null."])
+            raise JobValidationError(
+                "Contract validation failed", ["checkpoint group cannot be null."]
+            )
 
         merged_rc = {**rc, **requested_contract}
         old_strategy = rc.get("training_strategy", "strict_bsp")
@@ -362,7 +370,11 @@ def validate_job(
         errors = []
         if node_ids is not None:
             try:
-                select_workers(conn, expected_workers=frozen_resolved["synchronization"]["expected_workers"], node_ids=node_ids)
+                select_workers(
+                    conn,
+                    expected_workers=frozen_resolved["synchronization"]["expected_workers"],
+                    node_ids=node_ids,
+                )
             except (ValueError, NodeCapacityUnavailableError) as exc:
                 errors.append(str(exc))
         return {
