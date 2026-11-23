@@ -1,5 +1,10 @@
 # Tra cứu API đang triển khai
 
+Worker selection: see [WORKER_SELECTION_CONTRACT.md](WORKER_SELECTION_CONTRACT.md)
+for automatic/manual Node selection, frozen membership and the optional `node_ids`
+body on validate, start, retry and resume. Node list items include the derived
+`has_active_allocation` field so clients can distinguish ONLINE Nodes that are busy.
+
 Tài liệu này chỉ dẫn đến implementation hiện tại, không thay thế đặc tả canonical
 trong [source registry](../.agents/SOURCE_REGISTRY.md).
 

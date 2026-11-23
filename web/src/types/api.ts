@@ -545,10 +545,12 @@ export interface NodeItemData {
   display_name: string;
   state: 'ONLINE' | 'OFFLINE' | 'REVOKED';
   last_seen_at?: string | null;
+  has_active_allocation?: boolean;
 }
 
 export interface JobResumeRequest {
   checkpoint_id: string;
+  node_ids?: string[];
 }
 
 export interface StartAttemptResponseData {

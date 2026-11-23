@@ -1,5 +1,14 @@
 # Implementation Contract — PBL4 Distributed Training
 
+User-approved flexible Worker selection (2026-11-14): first start selects up to
+three idle ONLINE Nodes automatically, or one to five explicitly supplied Nodes.
+One Node runs one Worker. N and effective workload K are frozen with the Job;
+retry/resume preserve both and require manual Nodes when N exceeds three.
+Dataset shard count is independent of N through verified all-shard caching and
+global Work Unit assignments. See [WORKER_SELECTION_CONTRACT.md](WORKER_SELECTION_CONTRACT.md)
+for selection, API, transaction, provisioning and compatibility details. This is
+the approved session decision; synchronization of canonical Drive owners is pending.
+
 User-approved Sync + Async + Rejoin scope (2026-11-04): preserve StrictBSP
 with equal/DBS, its fail-stop/resume behavior and checkpoint V1. Add opt-in
 `async_sgd` with independent Worker dispatch, bounded staleness, no epoch barrier,
