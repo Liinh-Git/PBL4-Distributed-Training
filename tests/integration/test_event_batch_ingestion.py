@@ -28,7 +28,7 @@ def event_database(monkeypatch):
     if not url:
         pytest.skip("PostgreSQL test connection is not configured")
     with psycopg.connect(url, autocommit=True, connect_timeout=3) as conn:
-        for table in ("attempts", "events", "steps", "worker_steps"):
+        for table in ("attempts", "events", "steps", "worker_steps", "checkpoints"):
             conn.execute(
                 sql.SQL(
                     "CREATE TEMP TABLE {} (LIKE public.{} INCLUDING CONSTRAINTS INCLUDING INDEXES)"
@@ -55,7 +55,11 @@ def event_database(monkeypatch):
             stats.commits += 1
 
         monkeypatch.setattr(db, "transaction", transaction)
-        monkeypatch.setattr(event_ingest, "broadcast_runtime_event", MagicMock())
+        monkeypatch.setattr(
+            event_ingest,
+            "broadcast_runtime_event",
+            MagicMock(wraps=event_ingest.broadcast_runtime_event),
+        )
         yield conn, stats
 
 
@@ -190,3 +194,148 @@ def test_postgres_100_metrics_keep_every_sample_in_one_commit(event_database):
     assert rows == [(p["runtime_event_seq"], p["details"]) for p in payloads]
     assert stats.commits == 1
     assert event_ingest.broadcast_runtime_event.call_count == 100
+
+
+@pytest.mark.parametrize("first_snapshot", [200, None, 99, 101, "projection_error", "commit_error"])
+def test_mcp_gap_projects_checkpoint_history_after_commit(
+    event_database, monkeypatch, first_snapshot
+):
+    from pbl4.management_backend.tests.test_runtime_gateway import _valid_snapshot_dict
+    from pbl4.management_backend.websocket import hub
+
+    conn, _ = event_database
+    port = FakeMcpClientPort(initially_connected=True)
+    gateway = RuntimeGateway(port, redis_events=False)
+    cursor = gateway.get_cursor("event-test")
+    cursor.highest_contiguous_seq = 100
+    snapshot = _valid_snapshot_dict(
+        active_attempt_id="event-test",
+        active_job_id="event-job",
+        last_runtime_event_seq=200,
+        latest_checkpoint_id="newer",
+    )
+    template = step_events()[0]
+    common = dict(
+        checkpoint_id="ckpt-102",
+        source_operation_id=1,
+        source_step_id=None,
+        model_version=1,
+        recovery_cursor={"epoch": 1, "next_batch_ordinal": 0},
+        is_final=False,
+    )
+    started = dict(
+        template,
+        runtime_event_seq=102,
+        event_type="checkpoint.started",
+        details=dict(
+            common,
+            contract_hash="a" * 64,
+            dataset_build_id="build",
+            dataset_manifest_hash="b" * 64,
+            parameter_manifest_hash="c" * 64,
+            checkpoint_policy="periodic",
+            checkpoint_policy_version=1,
+            created_at=template["occurred_at"],
+        ),
+    )
+    saved = dict(
+        template,
+        runtime_event_seq=103,
+        event_type="checkpoint.saved",
+        details=dict(
+            common,
+            model_path="model.bin",
+            metadata_path="checkpoint.json",
+            model_sha256="d" * 64,
+            metadata_sha256="e" * 64,
+            artifact_size_bytes=64,
+            checkpoint_completed_at=template["occurred_at"],
+            committed_at=template["occurred_at"],
+        ),
+    )
+
+    @contextmanager
+    def projection_connection():
+        conn.autocommit = False
+        try:
+            yield conn
+        finally:
+            conn.rollback()
+            conn.autocommit = True
+
+    frames = []
+
+    def capture(_attempt, frame):
+        if frame["kind"] == "EVENT":
+            frames.append(
+                (
+                    frame["runtime_event_seq"],
+                    frame["payload"]["event_type"],
+                    conn.info.transaction_status,
+                )
+            )
+
+    monkeypatch.setattr(db, "get_connection", projection_connection)
+    monkeypatch.setattr(hub, "broadcast_sync", capture)
+    fail_projection = first_snapshot in ("projection_error", "commit_error")
+    if fail_projection:
+        # A deferred constraint fails at COMMIT; an immediate one fails during INSERT.
+        timing = "DEFERRABLE INITIALLY DEFERRED" if first_snapshot == "commit_error" else ""
+        conn.execute(f"CREATE TEMP TABLE failure_probe (value int UNIQUE {timing})")
+        conn.execute("""
+            CREATE FUNCTION pg_temp.fail_checkpoint() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN INSERT INTO pg_temp.failure_probe VALUES (1), (1); RETURN NEW; END $$
+        """)
+        conn.execute("""
+            CREATE TRIGGER fail_projection AFTER INSERT ON pg_temp.checkpoints
+            FOR EACH ROW EXECUTE FUNCTION pg_temp.fail_checkpoint()
+        """)
+    port.snapshot_to_return = (
+        snapshot
+        if fail_projection
+        else (dict(snapshot, last_runtime_event_seq=first_snapshot) if first_snapshot else None)
+    )
+    gateway.handle_runtime_event(started)
+    if first_snapshot != 200:
+        assert cursor.highest_contiguous_seq == 100
+        assert frames == []
+        assert conn.execute("SELECT state FROM pg_temp.checkpoints").fetchall() == []
+        assert conn.execute("SELECT runtime_event_seq FROM pg_temp.events").fetchall() == [(102,)]
+        port.snapshot_to_return = snapshot
+        if fail_projection:
+            conn.execute("DROP TRIGGER fail_projection ON pg_temp.checkpoints")
+        else:
+            gateway.handle_runtime_event(started)
+
+    if not fail_projection:
+        assert conn.execute("SELECT state FROM pg_temp.checkpoints").fetchall() == [("WRITING",)]
+        assert cursor.highest_contiguous_seq == 102
+    # Even without redelivery of 102, processing 103 retries the stored checkpoint start.
+    gateway.handle_runtime_event(saved)
+    gateway.handle_runtime_event(started)
+    assert conn.execute("SELECT state FROM pg_temp.checkpoints").fetchall() == [("COMPLETE",)]
+    before = conn.execute("SELECT state, started_at FROM pg_temp.attempts").fetchone()
+    port.snapshot_to_return = None
+    gateway.handle_runtime_event(
+        dict(
+            template,
+            runtime_event_seq=104,
+            event_type="attempt.state_changed",
+            details={"state": "RUNNING"},
+        )
+    )
+    assert conn.execute("SELECT state, started_at FROM pg_temp.attempts").fetchone() == before
+    queued = [
+        dict(template, runtime_event_seq=seq, event_type="metric.sample", details={"loss": 0.1})
+        for seq in range(105, 201)
+    ]
+    assert gateway.handle_runtime_events(queued) == len(queued)
+    expected = list(range(102, 201))
+    assert [seq for seq, _, _ in frames] == expected
+    assert [kind for _, kind, _ in frames[:2]] == ["checkpoint.started", "checkpoint.saved"]
+    assert all(status == psycopg.pq.TransactionStatus.IDLE for _, _, status in frames)
+    assert conn.execute("SELECT runtime_event_seq FROM pg_temp.events ORDER BY 1").fetchall() == [
+        (seq,) for seq in expected
+    ]
+    assert gateway.get_cursor("event-test").highest_contiguous_seq == 200
+    assert gateway.get_snapshot("event-test")["latest_checkpoint_id"] == "newer"

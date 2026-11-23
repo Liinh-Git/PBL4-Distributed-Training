@@ -27,7 +27,15 @@ def test_runtime_event_cursors_are_scoped_per_attempt() -> None:
 
     def event_for_attempt(_conn: Any, attempt_id: str, seq: int) -> dict[str, Any] | None:
         if (attempt_id, seq) == ("attempt-b", 1):
-            return {"event_type": "attempt.state_changed", "payload_jsonb": {"state": "RUNNING"}}
+            return {
+                "attempt_id": attempt_id,
+                "runtime_event_seq": seq,
+                "occurred_at": datetime.now(UTC),
+                "source_component": "runtime",
+                "severity": "INFO",
+                "event_type": "attempt.state_changed",
+                "payload_jsonb": {"state": "RUNNING"},
+            }
         return None
 
     with (
@@ -879,7 +887,16 @@ def test_missing_event_arrival_drains_gap_and_reconciles_db_projection() -> None
     )
     port.snapshot_to_return = snapshot_payload
 
+    stored = {
+        **event_105_payload,
+        "occurred_at": datetime.fromisoformat(event_105_payload["occurred_at"]),
+        "payload_jsonb": event_105_payload["details"],
+    }
     with (
+        patch(
+            "pbl4.management_backend.repositories.event_repository.list_events_after_seq",
+            return_value=[stored],
+        ),
         patch("pbl4.management_backend.db.transaction", fake_transaction),
         patch("pbl4.management_backend.db.get_connection", fake_get_connection),
         patch(
@@ -1006,54 +1023,9 @@ def test_authoritative_snapshot_reconciles_gap_and_unfences_projection() -> None
     ):
         gateway.handle_state_snapshot(snapshot_payload)
 
-    # Invariants:
-    # 1. Authoritative snapshot advances highest_contiguous_seq to 105 and un-fences gap
-    cursor = gateway.get_cursor("attempt-gap-snap")
-    assert cursor.highest_contiguous_seq == 105
+    # A snapshot advances current state, not the cursor for committed history.
+    assert cursor.highest_contiguous_seq == 100
     assert cursor.authoritative_snapshot_seq == 105
-    assert cursor.gap_fenced is False
-
-    # 2. Subsequent event 106 arrives and is recognized as contiguous
-    event_106 = {
-        "attempt_id": "attempt-gap-snap",
-        "job_id": "job-1",
-        "runtime_event_seq": 106,
-        "event_type": "attempt.state_changed",
-        "event_schema_version": 1,
-        "severity": "INFO",
-        "occurred_at": datetime.now(UTC).isoformat(),
-        "source_component": "runtime",
-        "details": {"state": "COMPLETED"},
-    }
-
-    projected: list[dict[str, Any]] = []
-    with (
-        patch("pbl4.management_backend.db.transaction", fake_transaction),
-        patch("pbl4.management_backend.db.get_connection", fake_transaction),
-        patch(
-            "pbl4.management_backend.services.event_ingest.ingest_runtime_event",
-            return_value=RuntimeEventIngestResult(row={"id": 106}, inserted=True),
-        ),
-        patch(
-            "pbl4.management_backend.repositories.event_repository.get_event_by_seq",
-            return_value={
-                "event_type": event_106["event_type"],
-                "occurred_at": datetime.fromisoformat(event_106["occurred_at"]),
-                "payload_jsonb": event_106["details"],
-            },
-        ),
-        patch.object(
-            gateway,
-            "_project_runtime_event",
-            side_effect=lambda _c, p: projected.append(p),
-        ),
-        patch("pbl4.management_backend.websocket.hub.broadcast_sync"),
-    ):
-        gateway.handle_runtime_event(event_106)
-
-    assert len(projected) == 1
-    assert projected[0]["runtime_event_seq"] == 106
-    assert cursor.highest_contiguous_seq == 106
     assert cursor.gap_fenced is False
 
 
