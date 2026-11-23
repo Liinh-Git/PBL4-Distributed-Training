@@ -338,7 +338,9 @@ def test_waiting_resume_observes_retirement_after_lock_is_released(database, mon
     with database() as conn:
         populate(conn)
         conn.execute("UPDATE jobs SET state = 'READY', frozen_at = now()")
-    monkeypatch.setattr(attempt_service, "_preflight_job_and_select_placements", lambda *_: [])
+    monkeypatch.setattr(
+        attempt_service, "_preflight_job_and_select_placements", lambda *_, node_ids=None: []
+    )
     errors = []
     label = "checkpoint_race_" + uuid4().hex
 

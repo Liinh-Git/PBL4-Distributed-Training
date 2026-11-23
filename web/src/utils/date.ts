@@ -30,9 +30,11 @@ export function formatDateOnly(isoString?: string | null): string {
 }
 
 export function formatStrategy(strategy?: string | null): string {
-  if (!strategy) return 'Đồng bộ chặt';
-  const s = strategy.toLowerCase();
-  if (s.includes('bsp') || s.includes('strict')) return 'Đồng bộ chặt';
+  const code = strategy?.trim();
+  if (!code) return 'Chưa xác định';
+  const s = code.toLowerCase();
+  if (s === 'async_sgd') return 'Async-SGD';
+  if (s === 'strict_bsp') return 'Đồng bộ chặt';
   if (s === 'dbs') return 'Lập lịch thích ứng (DBS)';
-  return 'Đồng bộ chặt';
+  return code;
 }

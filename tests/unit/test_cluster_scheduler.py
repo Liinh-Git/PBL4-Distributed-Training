@@ -27,10 +27,9 @@ class TestClusterScheduler(unittest.TestCase):
         ]
         placements = select_placements(expected_workers=3, nodes=nodes)
         self.assertEqual(len(placements), 3)
-        self.assertEqual(
-            [p.node_id for p in placements],
-            ["node-01", "node-02", "node-03"],
-        )
+        selected = {p.node_id for p in placements}
+        self.assertEqual(len(selected), 3)
+        self.assertTrue(selected <= {node["node_id"] for node in nodes})
 
     def test_offline_nodes_excluded(self) -> None:
         nodes = [
@@ -87,7 +86,9 @@ class TestClusterScheduler(unittest.TestCase):
             {"node_id": "node-alpha", "state": "ONLINE", "capabilities": {}},
             {"node_id": "node-beta", "state": "ONLINE", "capabilities": {}},
         ]
-        placements = select_placements(expected_workers=2, nodes=nodes)
+        placements = select_placements(
+            expected_workers=2, nodes=nodes, node_ids=["node-beta", "node-alpha"]
+        )
         self.assertEqual(
             [p.node_id for p in placements],
             ["node-alpha", "node-beta"],

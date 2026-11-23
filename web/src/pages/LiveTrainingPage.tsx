@@ -879,7 +879,7 @@ export const LiveTrainingPage: React.FC<LiveTrainingPageProps> = ({
 
                 {/* UNIFIED CLUSTER WORKLOAD & WORKER SYNCHRONIZATION PANEL */}
                 {attempt.training_strategy === 'async_sgd'
-                  ? <AsyncProgressPanel progress={asyncProgress} workers={workers} totalEpochs={totalEpochs}
+                  ? <AsyncProgressPanel progress={asyncProgress} workers={workers} workersKnown={workers.length > 0 || Array.isArray(snapshot?.workers)} totalEpochs={totalEpochs}
                       expectedWorkers={expectedWorkersCount} attemptState={attempt.state} />
                   : (
                 <div className="bg-[#121214] border border-white/[0.07] rounded p-4 space-y-4">
@@ -1243,7 +1243,7 @@ export const LiveTrainingPage: React.FC<LiveTrainingPageProps> = ({
                                               activeTab === 'metrics' && (
                                                 <div className="space-y-4">
                                                   {attempt.training_strategy === 'async_sgd' ? <>
-                                                    <AsyncProgressPanel progress={asyncProgress} workers={workers} totalEpochs={totalEpochs}
+                                                    <AsyncProgressPanel progress={asyncProgress} workers={workers} workersKnown={workers.length > 0 || Array.isArray(snapshot?.workers)} totalEpochs={totalEpochs}
                                                       expectedWorkers={expectedWorkersCount} attemptState={attempt.state} showWorkers={false} />
                                                     <AsyncMetricsDashboard events={events} attemptId={attempt.attempt_id} isStale={stream.isStale} epochMetrics={epochMetrics}
                                                       stalenessThreshold={jobDetail?.resolved_contract?.async_training?.staleness_threshold
@@ -1310,7 +1310,7 @@ export const LiveTrainingPage: React.FC<LiveTrainingPageProps> = ({
                                               confirmLabel="Abort Run"
                                               isDestructive={true}
                                               onConfirm={handleConfirmAbort}
-                                              onCancel={() => setIsAbortModalOpen(false)}
+                                              onClose={() => setIsAbortModalOpen(false)}
                                             />
 
                                             {/* Drawers */ }

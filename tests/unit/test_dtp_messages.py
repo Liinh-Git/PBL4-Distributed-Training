@@ -858,6 +858,16 @@ class RuntimeSeamTest(unittest.TestCase):
             )
             server._connections[0] = conn
 
+            # A registered session must receive its assignment before acknowledging the shard.
+            premature = build_control_frame(
+                ShardReady.from_dict(payloads()[3][1]), session_id=10, worker_id=0
+            )
+            premature.write_to(client_sock, lambda s, b: s.sendall(b))
+            with self.assertRaisesRegex(ProtocolError, "before dataset assignment"):
+                server._read_bound(conn)
+            self.assertEqual(registry.snapshot()[0].state, SessionState.PROVISIONING)
+            conn.last_seen = initial_time
+
             # Test server query method
             self.assertEqual(server.last_seen(0), initial_time)
             with self.assertRaises(ValueError):
@@ -870,6 +880,9 @@ class RuntimeSeamTest(unittest.TestCase):
 
             read_thread = threading.Thread(target=run_reader, daemon=True)
             read_thread.start()
+
+            conn.hello_ack_sent = True
+            server.send_dataset_assignment(0, DatasetAssignment.from_dict(payloads()[2][1]))
 
             # Send SHARD_READY frame -> triggers _read_bound -> updates last_seen & heartbeat
             ready_msg = ShardReady.from_dict(payloads()[3][1])

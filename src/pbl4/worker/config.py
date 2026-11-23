@@ -35,12 +35,11 @@ class WorkerConfig:
             self.node_id,
             self.worker_join_token,
         )
-        is_any_managed = any(f is not None for f in managed_fields)
         is_all_managed = all(isinstance(f, str) and f for f in managed_fields)
-        if is_any_managed and not is_all_managed:
+        if not is_all_managed:
             raise ValueError(
                 "Managed worker identity fields (attempt_id, allocation_id, node_id, "
-                "worker_join_token) must be all-or-none"
+                "worker_join_token) must all be provided by Node Agent"
             )
 
     @property

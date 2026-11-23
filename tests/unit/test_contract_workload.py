@@ -108,6 +108,7 @@ def test_contract_resolver_equal_policy_default_k():
         "dataset_manifest_hash": "abc123hash",
         "batch_size": 128,
         "shard_count": 3,
+        "manifest_snapshot_jsonb": {"shards": [{"batch_count": 8, "sample_count": 1024}] * 3},
         "metadata_jsonb": {"total_samples": 50000},
     }
     with (
@@ -129,7 +130,7 @@ def test_contract_resolver_equal_policy_default_k():
             "training_seed": 42,
             "workload_policy": "equal",
         }
-        resolved = resolve(conn, req)
+        resolved = resolve(conn, req, expected_workers=3)
         assert resolved["workload"]["policy"] == "equal"
         assert resolved["workload"]["work_units_per_step"] == 3
 
@@ -143,6 +144,7 @@ def test_contract_resolver_equal_policy_custom_k():
         "dataset_manifest_hash": "abc123hash",
         "batch_size": 128,
         "shard_count": 3,
+        "manifest_snapshot_jsonb": {"shards": [{"batch_count": 8, "sample_count": 1024}] * 3},
     }
     with (
         patch(
@@ -164,14 +166,11 @@ def test_contract_resolver_equal_policy_custom_k():
             "workload_policy": "equal",
             "work_units_per_step": 6,
         }
-        resolved = resolve(conn, req)
+        resolved = resolve(conn, req, expected_workers=3)
         assert resolved["workload"]["work_units_per_step"] == 6
 
-        # K < expected_workers fails
-        req_invalid = dict(req, work_units_per_step=2)
-        with pytest.raises(ContractResolutionError) as exc_info:
-            resolve(conn, req_invalid)
-        assert any("must be >= expected_workers" in err for err in exc_info.value.errors)
+        adjusted = resolve(conn, dict(req, work_units_per_step=2), expected_workers=3)
+        assert adjusted["workload"]["work_units_per_step"] == 3
 
 
 def test_contract_resolver_dbs_policy_requires_k_greater_than_expected_workers():
@@ -183,6 +182,7 @@ def test_contract_resolver_dbs_policy_requires_k_greater_than_expected_workers()
         "dataset_manifest_hash": "abc123hash",
         "batch_size": 128,
         "shard_count": 3,
+        "manifest_snapshot_jsonb": {"shards": [{"batch_count": 8, "sample_count": 1024}] * 3},
     }
     with (
         patch(
@@ -206,24 +206,24 @@ def test_contract_resolver_dbs_policy_requires_k_greater_than_expected_workers()
                     "training_seed": 42,
                     "workload_policy": "dbs",
                 },
+                expected_workers=3,
             )
         assert any("work_units_per_step is required" in err for err in exc_info.value.errors)
 
-        # K == expected_workers (3) fails for DBS
-        with pytest.raises(ContractResolutionError) as exc_info:
-            resolve(
-                conn,
-                {
-                    "dataset_build_id": "cifar10-v1-build",
-                    "model_id": "resnet18_groupnorm",
-                    "epochs": 10,
-                    "learning_rate": 0.01,
-                    "training_seed": 42,
-                    "workload_policy": "dbs",
-                    "work_units_per_step": 3,
-                },
-            )
-        assert any("strictly greater than expected_workers" in err for err in exc_info.value.errors)
+        adjusted = resolve(
+            conn,
+            {
+                "dataset_build_id": "cifar10-v1-build",
+                "model_id": "resnet18_groupnorm",
+                "epochs": 10,
+                "learning_rate": 0.01,
+                "training_seed": 42,
+                "workload_policy": "dbs",
+                "work_units_per_step": 3,
+            },
+            expected_workers=3,
+        )
+        assert adjusted["workload"]["work_units_per_step"] == 4
 
         # K > expected_workers succeeds
         resolved = resolve(
@@ -237,6 +237,7 @@ def test_contract_resolver_dbs_policy_requires_k_greater_than_expected_workers()
                 "workload_policy": "dbs",
                 "work_units_per_step": 12,
             },
+            expected_workers=3,
         )
         assert resolved["workload"]["policy"] == "dbs"
         assert resolved["workload"]["work_units_per_step"] == 12
@@ -267,23 +268,64 @@ def test_job_create_validate_freeze_workload_contract(policy, k, expected_k):
         "dataset_manifest_hash": "abc123hash",
         "batch_size": 128,
         "shard_count": 3,
+        "manifest_snapshot_jsonb": {"shards": [{"batch_count": 8, "sample_count": 1024}] * 3},
     }
     with (
-        patch("pbl4.management_backend.services.job_service.job_repository.create_job", return_value=draft),
-        patch("pbl4.management_backend.services.job_service.job_repository.get_job", return_value=draft),
-        patch("pbl4.management_backend.services.job_service.job_repository.freeze_job", return_value={"state": "READY"}) as freeze,
-        patch("pbl4.management_backend.services.contract_resolver.dataset_build_repository.get_build", return_value=build),
-        patch("pbl4.management_backend.services.contract_resolver._get_task_type", return_value="image_classification"),
+        patch.object(job_service, "select_workers", return_value=["node-a", "node-b", "node-c"]),
+        patch(
+            "pbl4.management_backend.services.job_service.job_repository.create_job",
+            return_value=draft,
+        ),
+        patch(
+            "pbl4.management_backend.services.job_service.job_repository.get_job",
+            return_value=draft,
+        ),
+        patch(
+            "pbl4.management_backend.services.job_service.job_repository.freeze_job",
+            return_value={"state": "READY"},
+        ) as freeze,
+        patch(
+            "pbl4.management_backend.services.contract_resolver.dataset_build_repository.get_build",
+            return_value=build,
+        ),
+        patch(
+            "pbl4.management_backend.services.contract_resolver._get_task_type",
+            return_value="image_classification",
+        ),
     ):
-        assert job_service.create_job(conn, display_name="Workload", description="", requested_contract=requested) == draft
+        assert (
+            job_service.create_job(
+                conn, display_name="Workload", description="", requested_contract=requested
+            )
+            == draft
+        )
         validation = job_service.validate_job(conn, "job-workload")
         assert validation["errors"] == []
         assert validation["resolved_preview"]["workload"]["work_units_per_step"] == expected_k
-        assert job_service.freeze_job(conn, "job-workload")["state"] == "READY"
+        assert job_service.freeze_job(conn, "job-workload", expected_workers=3)["state"] == "READY"
         assert freeze.call_args.kwargs["resolved_contract"]["workload"]["policy"] == policy
 
 
-@pytest.mark.parametrize("k", [None, 3, 0])
+def test_validate_ready_job_checks_selected_nodes_against_frozen_count():
+    from pbl4.management_backend.services import worker_selection
+
+    frozen = {"synchronization": {"expected_workers": 4}}
+    job = {"state": "READY", "resolved_contract": frozen, "requested_contract": {}}
+    nodes = [{"node_id": f"n{i}", "state": "ONLINE"} for i in range(4)]
+    with (
+        patch.object(job_service.job_repository, "get_job", return_value=job),
+        patch.object(worker_selection.node_repository, "list_nodes", return_value=nodes),
+        patch.object(worker_selection.allocation_repository, "list_active", return_value=[]),
+    ):
+        assert job_service.validate_job(MagicMock(), "job", node_ids=["n1"])["errors"]
+        result = job_service.validate_job(
+            MagicMock(), "job", node_ids=[n["node_id"] for n in nodes]
+        )
+        assert result["errors"] == []
+        assert result["resolved_preview"] == frozen
+
+
+@pytest.mark.parametrize("k", [None, 0])
 def test_dbs_invalid_k_cannot_validate_or_freeze(k):
     requested = {
         "dataset_build_id": "cifar10-v1-build",
@@ -298,14 +340,30 @@ def test_dbs_invalid_k_cannot_validate_or_freeze(k):
         requested["work_units_per_step"] = k
     draft = {"job_id": "job-invalid", "state": "DRAFT", "requested_contract": requested}
     with (
-        patch("pbl4.management_backend.services.job_service.job_repository.get_job", return_value=draft),
+        patch(
+            "pbl4.management_backend.services.job_service.job_repository.get_job",
+            return_value=draft,
+        ),
         patch("pbl4.management_backend.services.job_service.job_repository.freeze_job") as freeze,
-        patch("pbl4.management_backend.services.contract_resolver.dataset_build_repository.get_build", return_value={"dataset_build_id": "cifar10-v1-build", "dataset_id": "ds-cifar10", "state": "READY", "dataset_manifest_hash": "abc123hash", "batch_size": 128, "shard_count": 3}),
-        patch("pbl4.management_backend.services.contract_resolver._get_task_type", return_value="image_classification"),
+        patch(
+            "pbl4.management_backend.services.contract_resolver.dataset_build_repository.get_build",
+            return_value={
+                "dataset_build_id": "cifar10-v1-build",
+                "dataset_id": "ds-cifar10",
+                "state": "READY",
+                "dataset_manifest_hash": "abc123hash",
+                "batch_size": 128,
+                "shard_count": 3,
+            },
+        ),
+        patch(
+            "pbl4.management_backend.services.contract_resolver._get_task_type",
+            return_value="image_classification",
+        ),
     ):
         assert job_service.validate_job(MagicMock(), "job-invalid")["errors"]
         with pytest.raises(job_service.JobValidationError):
-            job_service.freeze_job(MagicMock(), "job-invalid")
+            job_service.freeze_job(MagicMock(), "job-invalid", expected_workers=3)
         freeze.assert_not_called()
 
 
@@ -336,20 +394,36 @@ def test_draft_policy_change_does_not_carry_stale_k(old_policy, old_k, patch_con
         return {**draft, "requested_contract": fields["requested_contract"]}
 
     with (
-        patch("pbl4.management_backend.services.job_service.job_repository.get_job", return_value=draft),
-        patch("pbl4.management_backend.services.job_service.job_repository.update_job", side_effect=save),
+        patch(
+            "pbl4.management_backend.services.job_service.job_repository.get_job",
+            return_value=draft,
+        ),
+        patch(
+            "pbl4.management_backend.services.job_service.job_repository.update_job",
+            side_effect=save,
+        ),
     ):
-        updated = job_service.update_job(MagicMock(), "job-switch", requested_contract=patch_contract)
+        updated = job_service.update_job(
+            MagicMock(), "job-switch", requested_contract=patch_contract
+        )
     merged = updated["requested_contract"]
     assert merged["workload_policy"] == patch_contract.get("workload_policy", old_policy)
     assert merged.get("work_units_per_step") == expected_k
 
 
 def test_ready_job_policy_and_k_remain_frozen():
-    ready = {"job_id": "job-frozen", "state": "READY", "requested_contract": {"workload_policy": "dbs", "work_units_per_step": 8}}
-    with patch("pbl4.management_backend.services.job_service.job_repository.get_job", return_value=ready):
+    ready = {
+        "job_id": "job-frozen",
+        "state": "READY",
+        "requested_contract": {"workload_policy": "dbs", "work_units_per_step": 8},
+    }
+    with patch(
+        "pbl4.management_backend.services.job_service.job_repository.get_job", return_value=ready
+    ):
         with pytest.raises(job_service.JobFrozenError):
-            job_service.update_job(MagicMock(), "job-frozen", requested_contract={"workload_policy": "equal"})
+            job_service.update_job(
+                MagicMock(), "job-frozen", requested_contract={"workload_policy": "equal"}
+            )
 
 
 def test_contract_resolver_rejects_non_positive_batch_size():
@@ -361,6 +435,7 @@ def test_contract_resolver_rejects_non_positive_batch_size():
         "dataset_manifest_hash": "abc123hash",
         "batch_size": 0,
         "shard_count": 3,
+        "manifest_snapshot_jsonb": {"shards": [{"batch_count": 8, "sample_count": 1024}] * 3},
     }
     with (
         patch(
@@ -382,6 +457,7 @@ def test_contract_resolver_rejects_non_positive_batch_size():
                     "learning_rate": 0.01,
                     "training_seed": 42,
                 },
+                expected_workers=3,
             )
         assert any(
             "must have a positive integer batch_size" in err for err in exc_info.value.errors
@@ -397,6 +473,7 @@ def test_resolved_contract_v1_pydantic_roundtrip():
         "dataset_manifest_hash": "abc123hash",
         "batch_size": 128,
         "shard_count": 3,
+        "manifest_snapshot_jsonb": {"shards": [{"batch_count": 8, "sample_count": 1024}] * 3},
     }
     with (
         patch(
@@ -419,6 +496,7 @@ def test_resolved_contract_v1_pydantic_roundtrip():
                 "workload_policy": "dbs",
                 "work_units_per_step": 9,
             },
+            expected_workers=3,
         )
         parsed = ResolvedContractV1.model_validate(resolved_dict)
         assert parsed.workload.policy == "dbs"
@@ -445,6 +523,7 @@ def test_async_resolution_and_strict_settings_preserve_sync_shape():
         "dataset_manifest_hash": "a" * 64,
         "batch_size": 2,
         "shard_count": 3,
+        "manifest_snapshot_jsonb": {"shards": [{"batch_count": 8, "sample_count": 1024}] * 3},
     }
     with (
         patch(
@@ -456,11 +535,11 @@ def test_async_resolution_and_strict_settings_preserve_sync_shape():
             return_value="image_classification",
         ),
     ):
-        sync = resolve(MagicMock(), requested)
+        sync = resolve(MagicMock(), requested, expected_workers=3)
         assert "async_training" not in sync
         assert sync["checkpoint_policy"]["schema_version"] == 1
         asynchronous = {**requested, "training_strategy": "async_sgd"}
-        resolved = resolve(MagicMock(), asynchronous)
+        resolved = resolve(MagicMock(), asynchronous, expected_workers=3)
         assert resolved["checkpoint_policy"]["schema_version"] == 2
         parsed_async = ResolvedContractV1.model_validate(resolved).async_training
         assert parsed_async.staleness_threshold == 6
@@ -472,7 +551,7 @@ def test_async_resolution_and_strict_settings_preserve_sync_shape():
             {"async_training": {"staleness_threshold": True}},
         ):
             with pytest.raises(ContractResolutionError):
-                resolve(MagicMock(), {**asynchronous, **bad})
+                resolve(MagicMock(), {**asynchronous, **bad}, expected_workers=3)
         with pytest.raises(ValidationError):
             RequestedContractPatchV1(async_training={"staleness_threshold": True})
 

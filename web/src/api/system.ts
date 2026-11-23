@@ -4,7 +4,7 @@
  * API implementation reference: docs/API.md
  */
 
-import { apiClient, ApiClient } from './client';
+import { apiClient, ApiClient, RequestOptions } from './client';
 import {
   ApiResponse,
   CapabilitiesData,
@@ -23,8 +23,8 @@ export class SystemService {
     return this.client.get<HealthData>('/api/v1/health');
   }
 
-  async getNodes(): Promise<ApiResponse<NodeItemData[]>> {
-    return this.client.get<NodeItemData[]>('/api/v1/nodes?limit=200');
+  async getNodes(options?: RequestOptions): Promise<ApiResponse<NodeItemData[]>> {
+    return this.client.get<NodeItemData[]>('/api/v1/nodes?limit=200', options);
   }
 
   /**

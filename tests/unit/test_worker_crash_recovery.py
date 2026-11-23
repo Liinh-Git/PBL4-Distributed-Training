@@ -16,15 +16,18 @@ from pbl4.worker.process import WorkerProcess
 
 
 def test_worker_config_connect_timeout_defaults_and_validation() -> None:
-    cfg = WorkerConfig(runtime_port=9000)
+    identity = dict(
+        attempt_id="attempt", allocation_id="alloc", node_id="node", worker_join_token="token"
+    )
+    cfg = WorkerConfig(**identity, runtime_port=9000)
     assert cfg.connect_timeout_seconds == 60.0
 
-    custom = WorkerConfig(runtime_port=9000, connect_timeout_seconds=15.0)
+    custom = WorkerConfig(**identity, runtime_port=9000, connect_timeout_seconds=15.0)
     assert custom.connect_timeout_seconds == 15.0
 
     for invalid in (0, -5.0, True):
         with pytest.raises(ValueError):
-            WorkerConfig(runtime_port=9000, connect_timeout_seconds=invalid)  # type: ignore[arg-type]
+            WorkerConfig(**identity, runtime_port=9000, connect_timeout_seconds=invalid)  # type: ignore[arg-type]
 
 
 def test_worker_process_deterministic_instance_id_and_retryability(monkeypatch) -> None:
@@ -51,13 +54,8 @@ def test_worker_process_deterministic_instance_id_and_retryability(monkeypatch) 
     assert w2.client_instance_id == expected_id
     assert w1.retryable_failure is True
 
-    unmanaged_1 = WorkerProcess(
-        WorkerConfig(runtime_port=9000), initialization_seed=42, model_id="small_cnn"
-    )
-    unmanaged_2 = WorkerProcess(
-        WorkerConfig(runtime_port=9000), initialization_seed=42, model_id="small_cnn"
-    )
-    assert unmanaged_1.client_instance_id != unmanaged_2.client_instance_id
+    with pytest.raises(ValueError, match="managed|Managed"):
+        WorkerConfig(runtime_port=9000)
 
     # Fatal Runtime Stop(FAILED) marks failure non-retryable (exit code 2)
     w1._on_message(
@@ -89,15 +87,11 @@ def test_worker_process_deterministic_instance_id_and_retryability(monkeypatch) 
     assert w2.retryable_failure is False
 
     # StrictBSP disconnect marks failure non-retryable; ProtocolError on connect does too
-    w_sync = WorkerProcess(
-        WorkerConfig(runtime_port=9000), initialization_seed=42, model_id="small_cnn"
-    )
+    w_sync = WorkerProcess(managed_cfg, initialization_seed=42, model_id="small_cnn")
     w_sync._on_disconnect()
     assert w_sync.retryable_failure is False
 
-    w_proto = WorkerProcess(
-        WorkerConfig(runtime_port=9000), initialization_seed=42, model_id="small_cnn"
-    )
+    w_proto = WorkerProcess(managed_cfg, initialization_seed=42, model_id="small_cnn")
     monkeypatch.setattr(
         w_proto._client,
         "connect",
@@ -161,6 +155,19 @@ def test_worker_entrypoint_default_timeout_and_exit_codes(monkeypatch) -> None:
     monkeypatch.setenv("PBL4_WORKER_CONNECT_TIMEOUT_SECONDS", "12.0")
     monkeypatch.setattr(
         sys, "argv", ["pbl4-worker", "--runtime-port", "9000", "--initialization-seed", "42"]
+    )
+    monkeypatch.setenv("PBL4_WORKER_JOIN_TOKEN", "test-token")
+    sys.argv.extend(
+        [
+            "--model-id",
+            "small_cnn",
+            "--attempt-id",
+            "att",
+            "--allocation-id",
+            "alloc",
+            "--node-id",
+            "node",
+        ]
     )
     captured: dict[str, object] = {}
 

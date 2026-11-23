@@ -1,3 +1,4 @@
+import { selectionError } from '../../components/common/WorkerNodeSelection';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -25,6 +26,7 @@ function evaluate(text: string, env: Record<string, any>) {
   const js = ts.transpileModule(`return (${text});`, {
     fileName: 'page.tsx', compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React },
   }).outputText;
+  env = { selectionError, selection: { mode: 'auto', nodeIds: [] }, nodeSelectionMode: 'auto', frozenCount: 3, ...env };
   return new Function(...Object.keys(env), js)(...Object.values(env));
 }
 function declaration(page: string, name: string, env: Record<string, any>) {
@@ -62,7 +64,7 @@ function handlerEnv(overrides: Record<string, any> = {}) {
     jobsService: { startJob: async () => ({ data: attempt('CREATED') }), retryJob: async () => ({ data: attempt('CREATED') }) },
     attemptsService: { assertNoActiveAttempt: async () => {}, getActiveAttempt: async () => null },
     navigate: (url: string) => navigations.push(url), alert: (message: string) => errors.push(message),
-    setFormError: (message: string) => { if (message) errors.push(message); },
+    setLaunchError: () => {}, setFormError: (message: string) => { if (message) errors.push(message); },
     setActionLoading: () => {}, setActiveAttempt: () => {}, loadJobData: async () => {}, fetchJobs: async () => {},
     navigations, errors, ...overrides,
   };

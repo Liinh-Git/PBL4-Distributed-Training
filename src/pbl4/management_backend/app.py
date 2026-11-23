@@ -109,8 +109,34 @@ def _run_node_maintenance_once(settings: Any) -> None:
             for allocation_id in timed_out_ids
         }
 
+    # Read committed intents on every cycle, including after Backend/Agent reconnect.
+    from pbl4.management_backend.repositories import allocation_repository
+
+    with db.transaction() as conn:
+        pending_stops = []
+        for allocation in allocation_repository.list_active(conn):
+            if allocation.get("desired_state") != "STOPPED":
+                continue
+            attempt = attempt_repository.get_attempt(conn, str(allocation["attempt_id"]))
+            if attempt is not None and attempt.get("state") == "COMPLETED":
+                pending_stops.append(allocation)
+
     runtime_gateway = get_gateway()
     node_gateway = get_node_control_gateway()
+    for allocation in pending_stops:
+        node_id = str(allocation["node_id"])
+        try:
+            if node_gateway.is_node_connected(node_id):
+                node_gateway.send_stop_worker(
+                    node_id,
+                    command=allocation_service.build_stop_worker_command(
+                        allocation=allocation,
+                        force=True,
+                    ),
+                )
+        except Exception as exc:
+            logger.warning("STOP_WORKER will retry for %s: %s", allocation["allocation_id"], exc)
+
     for attempt_id in sorted(affected_attempts):
         with db.transaction() as conn:
             attempt = attempt_repository.get_attempt(conn, attempt_id)

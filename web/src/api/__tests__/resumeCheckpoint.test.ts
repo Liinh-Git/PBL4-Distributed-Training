@@ -1,3 +1,4 @@
+import { selectionError } from '../../components/common/WorkerNodeSelection';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -13,6 +14,7 @@ function evaluate(expression: string, env: Record<string, any>) {
   const js = ts.transpileModule(`return (${expression});`, {
     fileName: 'modal.tsx', compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React },
   }).outputText;
+  env = { selectionError, selection: { mode: 'auto', nodeIds: [] }, nodeSelectionMode: 'auto', frozenCount: 3, ...env };
   return new Function(...Object.keys(env), js)(...Object.values(env));
 }
 
@@ -120,8 +122,8 @@ test('empty checkpoint picker explains Launch Run and disables confirmation', ()
   }
   visit(source);
   const html = renderToStaticMarkup(evaluate(markup, {
-    React, X: () => null, RotateCcw: () => null, dialogRef: { current: null },
-    close: () => {}, submitting: false, error: null, loading: false, checkpoints: [],
+    React, WorkerNodeSelection: () => null, setSelection: () => {}, X: () => null, RotateCcw: () => null, dialogRef: { current: null },
+    close: () => {}, contractError: null, submitting: false, error: null, loading: false, checkpoints: [],
     nextCursor: null, canResume: true, selectedCheckpoint: undefined, handleResume: () => {},
   }));
   assert.match(html, /No complete checkpoints/);

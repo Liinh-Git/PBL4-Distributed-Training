@@ -48,6 +48,7 @@ from pbl4.protocol.messages import (
     ERROR_CODE_WORKER_ADMISSION_INVALID,
     ERROR_CODE_WORKER_ADMISSION_REQUIRED,
     ERROR_CODE_WORKER_ADMISSION_SCOPE_MISMATCH,
+    DatasetAssignment,
     DtpControlMessage,
     Error,
     Heartbeat,
@@ -77,6 +78,23 @@ def _base_hello_dict() -> dict[str, object]:
         "supported_tensor_encoding": ["fp32_le_v1"],
         "supported_strategy_capabilities": ["strict_bsp"],
     }
+
+
+def assign_test_shard(server, sock, worker_id):
+    assignment = DatasetAssignment.from_dict(
+        {
+            "dataset_build_id": "bld-test",
+            "dataset_manifest_hash": "a" * 64,
+            "shard_id": 0,
+            "expected_shard_count": 1,
+            "profile": "CNN_IMAGE_CLASSIFICATION_V1",
+            "artifact_base_url": "http://localhost",
+            "root_manifest_path": "manifest.json",
+        }
+    )
+    server.send_dataset_assignment(int(worker_id), assignment)
+    frame = DTPFrame.read_from(sock, recv_exact)
+    assert decode_control_message(frame.header.message_type, frame.payload) == assignment
 
 
 def _valid_shard_ready_dict(shard_id: int = 0) -> dict[str, object]:
@@ -118,7 +136,6 @@ class TestFaultInvariant1AgentRestart(unittest.TestCase):
             manifest=self.manifest,
             registry=self.registry,
             worker_admission_secret=self.secret,
-            require_worker_admission=True,
         )
         self.server.start()
         self.host, self.port = self.server.bound_address or ("127.0.0.1", 0)
@@ -276,7 +293,6 @@ class TestFaultInvariant2BackendRestart(unittest.TestCase):
             manifest=self.manifest,
             registry=self.registry,
             worker_admission_secret="backend-restart-secret-key-32ch!",
-            require_worker_admission=True,
         )
         self.server.start()
         self.host, self.port = self.server.bound_address or ("127.0.0.1", 0)
@@ -318,6 +334,7 @@ class TestFaultInvariant2BackendRestart(unittest.TestCase):
             # Step 2: Simulate Backend down — Management control plane is unavailable
             # Meanwhile, Worker continues to transmit DTP frames to Runtime
             ready = ShardReady.from_dict(_valid_shard_ready_dict(shard_id=0))
+            assign_test_shard(self.server, client_sock, ack.worker_id)
             ready_frame = build_control_frame(
                 ready, session_id=int(ack.session_id), worker_id=int(ack.worker_id)
             )
@@ -516,7 +533,6 @@ class TestFaultInvariant4WorkerAdmission(unittest.TestCase):
             manifest=self.manifest,
             registry=self.registry,
             worker_admission_secret=self.secret,
-            require_worker_admission=True,
         )
         self.server.start()
         self.host, self.port = self.server.bound_address or ("127.0.0.1", 0)
@@ -783,6 +799,7 @@ class TestParameterServerLivenessDuplicateFix(unittest.TestCase):
             expected_workers=1,
             manifest=self.manifest,
             registry=self.registry,
+            worker_admission_secret="liveness-secret",
         )
         self.server.start()
         self.host, self.port = self.server.bound_address or ("127.0.0.1", 0)
@@ -793,7 +810,16 @@ class TestParameterServerLivenessDuplicateFix(unittest.TestCase):
     def test_heartbeat_frame_invokes_registry_heartbeat_exactly_once(self) -> None:
         s = socket.create_connection((self.host, self.port), timeout=5.0)
         try:
-            hello = Hello.from_dict(_base_hello_dict())
+            hello_data = _base_hello_dict()
+            hello_data.update(
+                attempt_id="att-liveness",
+                allocation_id="alloc-liveness",
+                node_id="node-liveness",
+                worker_join_token=issue_worker_join_token(
+                    "liveness-secret", "att-liveness", "alloc-liveness", "node-liveness"
+                ),
+            )
+            hello = Hello.from_dict(hello_data)
             frame = build_control_frame(hello)
             frame.write_to(s, send_all)
 
@@ -801,7 +827,7 @@ class TestParameterServerLivenessDuplicateFix(unittest.TestCase):
             self.assertEqual(ack_frame.header.message_type, MESSAGE_TYPE_HELLO_ACK)
             ack = decode_control_message(ack_frame.header.message_type, ack_frame.payload)
 
-            # Send ShardReady
+            assign_test_shard(self.server, s, ack.worker_id)
             ready = ShardReady.from_dict(_valid_shard_ready_dict(shard_id=0))
             frame1 = build_control_frame(
                 ready, session_id=int(ack.session_id), worker_id=int(ack.worker_id)

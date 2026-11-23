@@ -1,14 +1,13 @@
-"""Cluster Scheduler — pure deterministic scheduling of worker placements across cluster nodes.
+"""Cluster Scheduler — management-only random/manual placement across idle ONLINE Nodes.
 
 Reference: NODE_AGENT_IMPLEMENTATION_PLAN.md & NODE_AGENT_DESIGN.md
 
 V1 Algorithm:
 1. Filter candidate nodes with state == 'ONLINE'.
 2. Exclude nodes currently holding an active allocation.
-3. Deterministically sort candidate nodes by node_id ascending.
-4. If len(candidates) < expected_workers:
-   raise NodeCapacityUnavailableError (NODE_CAPACITY_UNAVAILABLE).
-5. Select exactly the first expected_workers candidate nodes.
+3. First start: choose up to AUTO_WORKER_LIMIT randomly, or 1..MANUAL_WORKER_LIMIT manually.
+4. Frozen Job: require exactly expected_workers; above the automatic cap requires manual Nodes.
+5. Sort the selected placements by node_id for stable dispatch order.
 6. For each selected node:
    - device = "cuda:0" if capabilities/telemetry indicates available NVIDIA GPU.
    - device = "cpu" otherwise.
@@ -23,10 +22,14 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+AUTO_WORKER_LIMIT = 3
+MANUAL_WORKER_LIMIT = 5
 
 
 # ─── Scheduler Exceptions ─────────────────────────────────────────────────────
@@ -63,19 +66,20 @@ class WorkerPlacementSpec:
 
 
 class ClusterScheduler:
-    """Pure deterministic scheduler for distributed training worker placement."""
+    """Pure placement selection; allocations persist each randomized choice exactly once."""
 
     @staticmethod
     def select_placements(
         *,
-        expected_workers: int,
+        expected_workers: int | None = None,
         nodes: list[dict[str, Any]],
         active_allocations: list[dict[str, Any]] | set[str] | None = None,
+        node_ids: list[str] | None = None,
     ) -> list[WorkerPlacementSpec]:
-        """Compute deterministic worker placements for a training attempt.
+        """Compute random or explicitly selected placements for a training attempt.
 
         Args:
-            expected_workers: Number of workers required by the frozen synchronization contract.
+            expected_workers: Frozen membership count, or None for a first-start selection.
             nodes: List of node dictionaries containing node_id, state, and capabilities_jsonb.
             active_allocations: Active allocation rows or a set of busy node ids.
 
@@ -86,7 +90,7 @@ class ClusterScheduler:
             NodeCapacityUnavailableError: If available online nodes are fewer than expected_workers.
             ValueError: If expected_workers <= 0.
         """
-        if (
+        if expected_workers is not None and (
             not isinstance(expected_workers, int)
             or isinstance(expected_workers, bool)
             or expected_workers <= 0
@@ -119,8 +123,30 @@ class ClusterScheduler:
             if state == "ONLINE" and node_id not in busy_node_ids:
                 candidates.append(node)
 
-        # 3. Deterministic sort by node_id ascending
-        candidates.sort(key=lambda n: str(n.get("node_id", "")))
+        if node_ids is not None:
+            if not 1 <= len(node_ids) <= MANUAL_WORKER_LIMIT or len(set(node_ids)) != len(node_ids):
+                raise ValueError("Select 1 to 5 distinct Nodes.")
+            if expected_workers is not None and len(node_ids) != expected_workers:
+                raise ValueError(
+                    f"Select exactly {expected_workers} distinct Nodes for this frozen Job."
+                )
+            selected_ids = set(node_ids)
+            candidates = [node for node in candidates if node["node_id"] in selected_ids]
+            if {node["node_id"] for node in candidates} != selected_ids:
+                raise NodeCapacityUnavailableError(
+                    "Selected Nodes must all exist, be ONLINE and have no active allocation."
+                )
+            expected_workers = len(node_ids)
+        else:
+            if expected_workers is not None and expected_workers > AUTO_WORKER_LIMIT:
+                raise ValueError(
+                    f"This Job requires {expected_workers} Workers; select Nodes manually "
+                    f"(automatic limit is {AUTO_WORKER_LIMIT})."
+                )
+            if expected_workers is None:
+                expected_workers = min(AUTO_WORKER_LIMIT, len(candidates))
+            if expected_workers == 0:
+                raise NodeCapacityUnavailableError("No ONLINE, idle worker Nodes are available.")
 
         # 4. Check available capacity
         if len(candidates) < expected_workers:
@@ -131,7 +157,9 @@ class ClusterScheduler:
             )
 
         # 5. Select exactly expected_workers nodes
-        selected_nodes = candidates[:expected_workers]
+        selected_nodes = sorted(
+            random.sample(candidates, expected_workers), key=lambda n: str(n["node_id"])
+        )
 
         # 6. Assign device based on hardware capabilities (cuda:0 vs cpu)
         placements: list[WorkerPlacementSpec] = []

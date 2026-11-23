@@ -1,3 +1,4 @@
+import { WorkerNodeSelection, selectionError, type WorkerSelection } from '../components/common/WorkerNodeSelection';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom';
 import {
@@ -20,7 +21,7 @@ import { EditJobModal } from '../components/common/EditJobModal';
 import { ResumeCheckpointModal } from '../components/common/ResumeCheckpointModal';
 import { EmptyState } from '../components/common/EmptyState';
 import { JobRunSummary, formatExecutionMode, formatRunTime } from '../components/training/JobRunSummary';
-import { formatDateOnly } from '../utils/date';
+import { formatDateOnly, formatStrategy } from '../utils/date';
 import { jobsService, attemptsService, datasetsService, datasetBuildsService } from '../api';
 import { isActiveAttempt } from '../api/attempts';
 import { JobDetailData, AttemptListItemData } from '../types/api';
@@ -51,14 +52,6 @@ const formatCheckpointPolicy = (
     .replace(/\b\w/g, c => c.toUpperCase());
 };
 
-const formatStrategy = (strategy?: string | null): string => {
-  if (!strategy) return 'Đồng bộ chặt';
-  const s = strategy.toLowerCase();
-  if (s.includes('bsp') || s.includes('strict')) return 'Đồng bộ chặt';
-  if (s === 'dbs') return 'Lập lịch thích ứng (DBS)';
-  return 'Đồng bộ chặt';
-};
-
 export const JobDetailPage: React.FC = () => {
   const { jobId } = useParams<{ jobId: string }>();
   const navigate = useNavigate();
@@ -66,7 +59,25 @@ export const JobDetailPage: React.FC = () => {
   const selectedAttemptId = searchParams.get('attempt_id') || searchParams.get('attemptId');
   const { setRawContractModalJob } = useApp();
 
+  const [selection, setSelection] = useState<WorkerSelection>({ mode: 'auto', nodeIds: [] });
+  const [launchError, setLaunchError] = useState<string | null>(null);
+  const [launchPreview, setLaunchPreview] = useState<import('../types/api').JobValidateResponseData | null>(null);
   const [job, setJob] = useState<JobDetailData | null>(null);
+  useEffect(() => {
+    if (!job || job.state === 'ARCHIVED') return;
+    if (job.resolved_contract?.synchronization?.expected_workers > 3) {
+      setSelection(previous => previous.mode === 'auto' ? { mode: 'manual', nodeIds: [] } : previous);
+    }
+  }, [job]);
+  useEffect(() => {
+    if (!job || job.state === 'ARCHIVED') return;
+    const controller = new AbortController();
+    setLaunchPreview(null);
+    jobsService.validateJob(job.job_id, { signal: controller.signal }, selection.mode === 'manual' ? { node_ids: selection.nodeIds } : undefined)
+      .then(response => { if (!controller.signal.aborted) setLaunchPreview(response.data); })
+      .catch(() => { /* Start returns authoritative validation errors. */ });
+    return () => controller.abort();
+  }, [job, selection]);
   const [attempts, setAttempts] = useState<AttemptListItemData[]>([]);
   const [historyNextCursor, setHistoryNextCursor] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -240,9 +251,13 @@ export const JobDetailPage: React.FC = () => {
     if (!job || !canLaunch || launching.current) return;
     launching.current = true;
     try {
+      const nodeError = selectionError(selection, job.resolved_contract?.synchronization?.expected_workers);
+      if (nodeError) { setLaunchError(nodeError); return; }
+      setLaunchError(null);
       setActionLoading('launch');
       await attemptsService.assertNoActiveAttempt();
-      const res = await jobsService.startJob(job.job_id);
+      const selectedNodes = selection.mode === 'manual' ? { node_ids: selection.nodeIds } : undefined;
+      const res = await jobsService.startJob(job.job_id, selectedNodes);
       navigate(`/live?attempt_id=${encodeURIComponent(res.data.attempt_id)}`);
     } catch (err: any) {
       alert(`Failed to launch training run: ${err?.message || 'Unknown error'}`);
@@ -415,6 +430,17 @@ export const JobDetailPage: React.FC = () => {
       </div>
 
       <JobRunSummary attempt={activeAttempt ?? latestAttempt} jobState={job.state} historyAvailable={!loading && !error} jobId={job.job_id} />
+
+      {(job.state === 'READY' || job.state === 'DRAFT') && !hasActiveAttempt && <div className="my-4 space-y-2">
+        <WorkerNodeSelection value={selection} onChange={setSelection}
+          frozenCount={job.resolved_contract?.synchronization?.expected_workers} disabled={actionLoading === 'launch'} />
+        {launchError && <p role="alert" className="text-xs text-rose-300">{launchError}</p>}
+        {launchPreview?.resolved_preview && <p className="text-xs text-[#a1a1a8]">
+          {launchPreview.resolved_preview.synchronization.expected_workers} Workers | K={launchPreview.resolved_preview.workload?.work_units_per_step}
+        </p>}
+        {launchPreview?.warnings.map(warning => <p key={warning} className="text-xs text-amber-300">{warning}</p>)}
+        {launchPreview?.errors.map(message => <p key={message} role="alert" className="text-xs text-rose-300">{message}</p>)}
+      </div>}
 
       {/* Section: Configuration */}
       <div className="space-y-3">

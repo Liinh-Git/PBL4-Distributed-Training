@@ -8,6 +8,7 @@ import { useState, useEffect, useRef, useCallback, useContext } from 'react';
 import { AppContext } from '../context/AppContext';
 import { config } from '../config';
 import { EVENT_WINDOW, mergeRuntimeEvents } from '../utils/runtimeEvents';
+import { applyWorkerDisconnect, mergeWorkerSessions } from '../utils/workerSessions';
 import { loadAttemptBaseline, loadRecentHistory, historyReads, HISTORY_CACHE_MS, isTerminalAttempt } from '../api/attemptHistory';
 import {
   attemptsService,
@@ -141,11 +142,16 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
         ]);
         if (signal?.aborted || !isMountedRef.current || currentAttemptRef.current !== attemptId) return;
 
+        let hasFreshMembership = false;
         if (snapRes.status === 'fulfilled' && requestedAtSnapshot === snapshotRevisionRef.current) {
           const snap = snapRes.value.data;
           setIsStale(snap.stale ?? false);
           if (snap.runtime_event_seq != null && snap.runtime_event_seq >= lastSeqRef.current) {
-            setSnapshot(snap);
+            setSnapshot(previous => ({ ...snap, workers: mergeWorkerSessions(previous?.workers ?? [], snap.workers ?? [], !snap.stale) }));
+            if (Array.isArray(snap.workers)) {
+              hasFreshMembership = !snap.stale;
+              setWorkers(previous => mergeWorkerSessions(previous, snap.workers, !snap.stale));
+            }
             setAttempt(prev => {
               if (!prev) return prev;
               return {
@@ -161,13 +167,8 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
           setIsStale(true);
         }
 
-        if (workersRes.status === 'fulfilled' && requestedAtSnapshot === snapshotRevisionRef.current) {
-          setWorkers(previous => (workersRes.value.data || []).map(worker => {
-            const known = previous.find(item => item.session_id === worker.session_id);
-            return known?.local_model_version == null ? worker : {
-              ...worker, local_model_version: Math.max(worker.local_model_version ?? 0, known.local_model_version),
-            };
-          }));
+        if (!hasFreshMembership && workersRes.status === 'fulfilled' && requestedAtSnapshot === snapshotRevisionRef.current) {
+          setWorkers(previous => mergeWorkerSessions(previous, workersRes.value.data || []));
         }
 
         if (stepsRes.status === 'fulfilled') {
@@ -287,8 +288,12 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
         }
       }
 
-      if (workersRes.status === 'fulfilled') {
+      if (snapRes.status === 'fulfilled' && !snapRes.value.data.stale && Array.isArray(snapRes.value.data.workers)) {
+        setWorkers(snapRes.value.data.workers);
+      } else if (workersRes.status === 'fulfilled') {
         setWorkers(workersRes.value.data || []);
+      } else if (snapRes.status === 'fulfilled' && Array.isArray(snapRes.value.data.workers)) {
+        setWorkers(snapRes.value.data.workers);
       }
 
       if (stepsRes.status === 'fulfilled') {
@@ -375,7 +380,8 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
                   if (snap.stale || snap.runtime_event_seq == null || snap.runtime_event_seq < seq - 1) {
                     throw new Error('Authoritative snapshot unavailable for event gap');
                   }
-                  setSnapshot(snap);
+                  setSnapshot(previous => ({ ...snap, workers: mergeWorkerSessions(previous?.workers ?? [], snap.workers ?? [], true) }));
+                  setWorkers(previous => mergeWorkerSessions(previous, snap.workers ?? [], true));
                   setAttempt(prev => prev ? { ...prev, ...snap } : prev);
                   updateSeq(snap.runtime_event_seq);
                   await refreshSnapshot();
@@ -435,6 +441,9 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
             }
 
             const details = newEventItem.details;
+            if (newEventItem.event_type === 'worker.disconnected') {
+              setWorkers(previous => applyWorkerDisconnect(previous, details.worker_id, details.session_id, newEventItem.occurred_at));
+            }
             const observation: Partial<AttemptSnapshotData> = {
               runtime_event_seq: seq, observed_at: newEventItem.occurred_at, stale: false,
             };
@@ -454,7 +463,12 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
               observation.current_batch_ordinal = details.recovery_cursor.next_batch_ordinal;
             }
             snapshotRevisionRef.current += 1;
-            setSnapshot(prev => prev ? { ...prev, ...observation } : prev);
+            setSnapshot(prev => prev ? {
+              ...prev, ...observation,
+              ...(newEventItem.event_type === 'worker.disconnected' ? {
+                workers: applyWorkerDisconnect(prev.workers ?? [], details.worker_id, details.session_id, newEventItem.occurred_at),
+              } : {}),
+            } : prev);
             setIsStale(false);
             if (newEventItem.event_type === 'step.started') {
               const step: LiveStep = {
@@ -504,10 +518,13 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
             if (snapPayload.snapshot_seq != null && snapPayload.snapshot_seq < lastSeqRef.current) return;
             snapshotRevisionRef.current += 1;
             if (snapPayload.state) {
-              if (Array.isArray(snapPayload.state.workers)) setWorkers(snapPayload.state.workers);
+              if (Array.isArray(snapPayload.state.workers)) {
+                setWorkers(previous => mergeWorkerSessions(previous, snapPayload.state.workers, !snapPayload.state.stale));
+              }
               setSnapshot(prev => ({
                 ...(prev || ({} as any)),
                 ...snapPayload.state,
+                workers: mergeWorkerSessions(prev?.workers ?? [], snapPayload.state.workers ?? prev?.workers ?? [], !snapPayload.state.stale),
               }));
               if (snapPayload.state.state) {
                 setAttempt(prev =>
@@ -536,7 +553,8 @@ export function useAttemptStream(attemptId: string | null): UseAttemptStreamResu
               const snap = (await attemptsService.getSnapshot(attemptId)).data;
               if (!isMountedRef.current || wsRef.current !== ws) return;
               if (snap.stale || snap.runtime_event_seq == null) throw new Error('Snapshot required');
-              setSnapshot(snap);
+              setSnapshot(previous => ({ ...snap, workers: mergeWorkerSessions(previous?.workers ?? [], snap.workers ?? [], true) }));
+              setWorkers(previous => mergeWorkerSessions(previous, snap.workers ?? [], true));
               setAttempt(prev => prev ? { ...prev, ...snap } : prev);
               updateSeq(snap.runtime_event_seq);
               await refreshSnapshot();

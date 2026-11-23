@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import ts from 'typescript';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { mergeWorkerSessions } from '../../utils/workerSessions';
 import { getPreparationStatus } from '../../utils/preparation';
 import { PreparationStatus } from '../../components/live/PreparationStatus';
 
@@ -65,7 +66,7 @@ test('pre-training snapshots with the same event cursor update workers immediate
   const handler = callback('handleMessage', {
     isMountedRef: { current: true }, wsRef: { current: ws }, ws, WebSocket: { OPEN: 1 }, attemptId: 'attempt',
     lastSeqRef: { current: 0 }, snapshotRevisionRef: revision,
-    setWorkers: (value: any) => { current = value; }, setSnapshot: () => {}, setAttempt: () => {},
+    mergeWorkerSessions, setWorkers: (update: any) => { current = update(current ?? []); }, setSnapshot: () => {}, setAttempt: () => {},
     setIsStale: () => {}, updateSeq: (seq: number) => assert.equal(seq, 0), triggerCoalescedRefresh: () => {},
   });
   for (const state of ['PROVISIONING', 'SHARD_READY']) {
@@ -97,6 +98,25 @@ test('slow REST at cursor zero cannot replace newer WebSocket preparation data',
   revision.current += 1;
   release({ data: { runtime_event_seq: 0, stale: false } });
   await request;
+});
+
+test('refresh uses fresh snapshot membership when REST still contains a departed worker', async () => {
+  const departed = { worker_id: 0, session_id: 'old', state: 'READY' };
+  let rows = [departed];
+  const refresh = callback('refreshSnapshot', {
+    attemptId: 'attempt', refreshInFlightRef: { current: null }, lastSeqRef: { current: 10 },
+    snapshotRevisionRef: { current: 1 }, lifecycleRef: { current: null }, stepsRef: { current: [] },
+    isMountedRef: { current: true }, currentAttemptRef: { current: 'attempt' },
+    historyReads: { invalidate: () => {} }, mergeWorkerSessions,
+    attemptsService: { getSnapshot: async () => ({ data: { runtime_event_seq: 10, stale: false, workers: [] } }) },
+    workersService: { listWorkers: async () => ({ data: [departed] }) },
+    stepsService: { listStepUpdates: async () => ({ data: [] }) },
+    setWorkers: (update: any) => { rows = update(rows); },
+    setStepsError: () => {}, setNextStepsCursor: () => {}, setSteps: () => {},
+    setSnapshot: () => {}, setAttempt: () => {}, setIsStale: () => {},
+  });
+  await refresh();
+  assert.deepEqual(rows, []);
 });
 
 test('training events update barrier, timing and worker metrics without REST requests', async () => {

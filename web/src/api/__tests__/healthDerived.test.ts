@@ -90,10 +90,10 @@ describe('Subsystem Status Mapping Tests (mapSubsystemStatus)', () => {
     assert.strictEqual(mapSubsystemStatus('unknown'), 'DEGRADED');
   });
 
-  test('maps unrecognized or empty strings to DOWN', () => {
-    assert.strictEqual(mapSubsystemStatus('unreachable'), 'DOWN');
-    assert.strictEqual(mapSubsystemStatus('failed'), 'DOWN');
-    assert.strictEqual(mapSubsystemStatus(undefined), 'DOWN');
+  test('maps unrecognized or empty strings to DISCONNECTED', () => {
+    assert.strictEqual(mapSubsystemStatus('unreachable'), 'DISCONNECTED');
+    assert.strictEqual(mapSubsystemStatus('failed'), 'DISCONNECTED');
+    assert.strictEqual(mapSubsystemStatus(undefined), 'DISCONNECTED');
   });
 
   test('returns DEGRADED if isStale is true regardless of status', () => {

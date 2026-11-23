@@ -67,8 +67,8 @@ a new allocation with an expired token. No token refresh or Backend round trip.
 This record is execution state, is not checkpointed, and disappears with the Attempt.
 An active session must close or be fenced by timeout before the slot is reused;
 repeated HELLO cannot evict a live session. Lost HELLO_ACK retries the same identity.
-Unmanaged reconnect similarly binds the original client_instance_id to its rank;
-it remains the existing trusted local development mode, not managed authentication.
+Unmanaged Worker admission and reconnect are unsupported. All Worker processes
+are started by Node Agent with managed credentials.
 
 Worker keeps its process/cache, discards old-session pending computation and tensors,
 repeats verified provisioning/manifest/model readiness, and loads the current snapshot.
@@ -76,7 +76,9 @@ Compute/model operations have one owner; an old task cannot send using a new cli
 The connection supervisor interrupts stalled frame writes using the negotiated
 heartbeat timeout, without waiting on the sender/model lock. HELLO waits are bounded.
 Connection retries use bounded exponential backoff, ending on terminal/fatal outcome
-or reconnect budget expiry. Grace uses monotonic time and is cancelled only by READY.
+or reconnect budget expiry. After STOP/ATTEMPT_COMPLETED the Worker closes DTP,
+does not reconnect, and keeps its process alive until Node Agent stops it via the
+Backend STOP_WORKER command. Grace uses monotonic time and is cancelled only by READY.
 Process replacement/initializer promotion remain outside this milestone.
 
 ## Recovery

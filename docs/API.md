@@ -1,5 +1,10 @@
 # Tra cứu API đang triển khai
 
+Worker selection: see [WORKER_SELECTION_CONTRACT.md](WORKER_SELECTION_CONTRACT.md)
+for automatic/manual Node selection, frozen membership and the optional `node_ids`
+body on validate, start, retry and resume. Node list items include the derived
+`has_active_allocation` field so clients can distinguish ONLINE Nodes that are busy.
+
 Tài liệu này chỉ dẫn đến implementation hiện tại, không thay thế đặc tả canonical
 trong [source registry](../.agents/SOURCE_REGISTRY.md).
 
@@ -186,3 +191,22 @@ của PBL4 tương ứng:
 from pbl4.adapter.model_export import load_exported_model
 model = load_exported_model('model.zip')
 ```
+
+
+## Backend-Runtime MCP connection health
+
+Backend probes each established MCP connection with `GET_STATE` every 15 seconds
+and waits up to 15 seconds for its correlated `STATE_SNAPSHOT`. A silent partition
+is detected in approximately 30 seconds while Backend is scheduled normally.
+The deadline also covers blocked writes. Ordinary state requests retain their
+existing 5-second timeout and can detect failure earlier.
+
+On timeout, Backend closes that TCP connection, marks management state stale,
+and uses the existing 1-second reconnect loop to establish a new connection,
+repeat `MGMT_HELLO`, and reconcile authoritative state. Old connection callbacks
+cannot send on or close the replacement connection. Probe snapshots are consumed
+for connection health without entering the database projection queue.
+
+This check also runs when management events use Redis Streams. Losing MCP does
+not terminate training or Worker allocations. No new wire message, REST endpoint,
+or environment setting is introduced; internal probe timings are injectable in tests.

@@ -103,6 +103,8 @@ class _Connection:
     allocation_id: str | None = None
     offered: tuple[int, int, bool] | None = None
     initialization_version: int | None = None
+    hello_ack_sent: bool = False
+    dataset_assignment_sent: bool = False
 
 
 class ParameterServer:
@@ -127,7 +129,6 @@ class ParameterServer:
         heartbeat_timeout_ms: int = 15_000,
         max_tensor_chunk_bytes: int = 1024 * 1024,
         worker_admission_secret: str | None = None,
-        require_worker_admission: bool = False,
         require_compute_ms: bool = False,
         training_strategy: str = "strict_bsp",
         manifest_handler: Callable[[int, int], bool | None] | None = None,
@@ -152,7 +153,6 @@ class ParameterServer:
         self._heartbeat_timeout_ms = heartbeat_timeout_ms
         self._max_chunk = max_tensor_chunk_bytes
         self._worker_admission_secret = worker_admission_secret
-        self._require_worker_admission = require_worker_admission
         self._require_compute_ms = require_compute_ms
         self.training_strategy = training_strategy
         self._manifest_handler = manifest_handler
@@ -160,6 +160,7 @@ class ParameterServer:
         self._admission_open = admission_open or (lambda: True)
         self._join_bindings: dict[str, tuple[str, str, str, int]] = {}
         self._dataset_assignments: dict[int, DatasetAssignment] = {}
+        self._expected_shard_ready: dict[int, dict] = {}
         self._initial_parameters = None
         self._server = TcpServer(host, port, self._serve_connection)
         self._lock = threading.Lock()
@@ -274,7 +275,16 @@ class ParameterServer:
 
             # Admission check strictly BEFORE WorkerRegistry.register()
             is_managed = hello.is_managed
-            join_key = str(hello.allocation_id) if is_managed else str(hello.client_instance_id)
+            if not is_managed:
+                self._send_admission_error(
+                    sock,
+                    ERROR_CODE_WORKER_ADMISSION_REQUIRED,
+                    "Managed worker admission is required; missing join credentials",
+                )
+                sock.close()
+                return
+
+            join_key = str(hello.allocation_id)
             token_digest = hashlib.sha256(
                 str(hello.values.get("worker_join_token", "")).encode()
             ).hexdigest()
@@ -286,23 +296,14 @@ class ParameterServer:
             with self._lock:
                 previous = self._join_bindings.get(join_key) if asynchronous else None
             rejoining = previous is not None
-            if rejoining and is_managed and hello.attempt_id != self.attempt_id:
+            if rejoining and hello.attempt_id != self.attempt_id:
                 raise ProtocolError("Wrong managed rejoin Attempt")
             if rejoining and (
                 not hmac.compare_digest(previous[0], token_digest)
                 or previous[1:3] != binding_identity[1:]
             ):
                 raise ProtocolError("Rejoin credential binding mismatch")
-            if self._require_worker_admission and not is_managed:
-                self._send_admission_error(
-                    sock,
-                    ERROR_CODE_WORKER_ADMISSION_REQUIRED,
-                    "Managed worker admission is required; missing join credentials",
-                )
-                sock.close()
-                return
-
-            if is_managed and not rejoining:
+            if not rejoining:
                 if not self._worker_admission_secret:
                     self._send_admission_error(
                         sock,
@@ -342,11 +343,7 @@ class ParameterServer:
                     and len(self._join_bindings) >= self.expected_workers
                 ):
                     raise ProtocolError("Async allocation capacity is full")
-                if (
-                    is_managed
-                    and hello.allocation_id in self._admitted_allocation_ids
-                    and not rejoining
-                ):
+                if hello.allocation_id in self._admitted_allocation_ids and not rejoining:
                     duplicate_admission = True
                     registered = None
                 else:
@@ -355,8 +352,7 @@ class ParameterServer:
                     registered = self.registry.register(
                         session_id, time.monotonic(), previous[3] if rejoining else None
                     )
-                    if is_managed:
-                        self._admitted_allocation_ids.add(str(hello.allocation_id))
+                    self._admitted_allocation_ids.add(str(hello.allocation_id))
                     if asynchronous:
                         self._join_bindings[join_key] = (*binding_identity, registered.worker_id)
 
@@ -400,8 +396,8 @@ class ParameterServer:
                     connected_at=connected_at,
                     last_heartbeat_at=connected_at,
                     last_seen=time.monotonic(),
-                    node_id=str(hello.node_id) if is_managed else None,
-                    allocation_id=str(hello.allocation_id) if is_managed else None,
+                    node_id=str(hello.node_id),
+                    allocation_id=str(hello.allocation_id),
                 )
                 self._connections[registered.worker_id] = connection
                 if asynchronous:
@@ -414,8 +410,8 @@ class ParameterServer:
                     "connected_at": connected_at,
                     "last_heartbeat_at": connected_at,
                     "disconnected_at": None,
-                    "node_id": str(hello.node_id) if is_managed else None,
-                    "allocation_id": str(hello.allocation_id) if is_managed else None,
+                    "node_id": str(hello.node_id),
+                    "allocation_id": str(hello.allocation_id),
                     "shard_id": None,
                     "local_model_version": None,
                 }
@@ -439,9 +435,8 @@ class ParameterServer:
             )
             self._send_control(connection, ack)
             with self._lock:
-                assignment = self._dataset_assignments.get(connection.worker_id)
-            if assignment is not None:
-                self._send_control(connection, assignment)
+                connection.hello_ack_sent = True
+            self._send_dataset_assignment_once(connection)
             try:
                 self._read_bound(connection)
             except ContributionRejected as exc:
@@ -549,6 +544,20 @@ class ParameterServer:
             if frame.header.message_type == MESSAGE_TYPE_SHARD_READY:
                 assert message is not None
                 with self._lock:
+                    assignment = self._dataset_assignments.get(connection.worker_id)
+                    expected = self._expected_shard_ready.get(connection.worker_id, {})
+                    if assignment is None or not connection.dataset_assignment_sent:
+                        raise ProtocolError("SHARD_READY received before dataset assignment")
+                    expected = {
+                        **expected,
+                        "dataset_build_id": assignment.dataset_build_id,
+                        "dataset_manifest_hash": assignment.dataset_manifest_hash,
+                        "shard_id": assignment.shard_id,
+                    }
+                    if any(message.values.get(key) != value for key, value in expected.items()):
+                        raise ValueError(
+                            "SHARD_READY does not match the pinned session assignment"
+                        )
                     connection.shard_id = int(message.shard_id)
                     meta = self._session_metadata.get(connection.worker_id)
                     if meta is not None and meta.get("session_id") == connection.session_id:
@@ -774,10 +783,31 @@ class ParameterServer:
         )
         connection.sender.send_frame(connection.sock, frame)
 
-    def send_dataset_assignment(self, worker_id: int, assignment: DatasetAssignment) -> None:
+    def send_dataset_assignment(
+        self, worker_id: int, assignment: DatasetAssignment, *, expected_ready: dict | None = None
+    ) -> None:
         with self._lock:
+            previous = self._dataset_assignments.get(worker_id)
+            if previous is not None and previous.to_dict() != assignment.to_dict():
+                raise ValueError("Dataset assignment is immutable for the attempt's Worker slot")
             self._dataset_assignments[worker_id] = assignment
-        self._send_control(self._connection(worker_id), assignment)
+            if expected_ready is not None:
+                self._expected_shard_ready[worker_id] = dict(expected_ready)
+        self._send_dataset_assignment_once(self._connection(worker_id))
+
+    def _send_dataset_assignment_once(self, connection: _Connection) -> None:
+        # Registration and the Runtime provisioning thread can both observe the
+        # same pending assignment. Claim it once per TCP session, after HELLO_ACK.
+        with self._lock:
+            assignment = self._dataset_assignments.get(connection.worker_id)
+            if (
+                assignment is None
+                or not connection.hello_ack_sent
+                or connection.dataset_assignment_sent
+            ):
+                return
+            connection.dataset_assignment_sent = True
+        self._send_control(connection, assignment)
 
     def send_error(
         self,

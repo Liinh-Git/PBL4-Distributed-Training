@@ -1,3 +1,4 @@
+import { WorkerNodeSelection, selectionError, type WorkerSelection } from './WorkerNodeSelection';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { RefreshCw, RotateCcw, X } from 'lucide-react';
 import { attemptsService, checkpointsService, jobsService } from '../../api';
@@ -13,6 +14,9 @@ interface ResumeCheckpointModalProps {
 export const ResumeCheckpointModal: React.FC<ResumeCheckpointModalProps> = ({
   jobId, canResume, onClose, onResumed,
 }) => {
+  const [selection, setSelection] = useState<WorkerSelection>({ mode: 'auto', nodeIds: [] });
+  const [frozenCount, setFrozenCount] = useState<number>();
+  const [contractError, setContractError] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const requestRef = useRef<AbortController | null>(null);
   const submittingRef = useRef(false);
@@ -63,8 +67,21 @@ export const ResumeCheckpointModal: React.FC<ResumeCheckpointModalProps> = ({
     };
   }, [loadCheckpoints]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    jobsService.getJob(jobId, { signal: controller.signal }).then(response => {
+      if (controller.signal.aborted) return;
+      const count = response.data.resolved_contract?.synchronization?.expected_workers;
+      if (!count) { setContractError('Frozen Worker count is unavailable.'); return; }
+      setFrozenCount(count);
+      setContractError(null);
+      if (count > 3) setSelection({ mode: 'manual', nodeIds: [] });
+    }).catch(err => { if (!controller.signal.aborted) setContractError(err instanceof Error ? err.message : 'Unable to load Job.'); });
+    return () => controller.abort();
+  }, [jobId]);
+
   const handleResume = async () => {
-    if (!canResume || loading || submittingRef.current || !selectedCheckpoint
+    if (!frozenCount || selectionError(selection, frozenCount) || !canResume || loading || submittingRef.current || !selectedCheckpoint
       || selectedCheckpoint.job_id !== jobId || selectedCheckpoint.state !== 'COMPLETE') return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -73,6 +90,7 @@ export const ResumeCheckpointModal: React.FC<ResumeCheckpointModalProps> = ({
       await attemptsService.assertNoActiveAttempt();
       const response = await jobsService.resumeJob(jobId, {
         checkpoint_id: selectedCheckpoint.checkpoint_id,
+        ...(selection.mode === 'manual' ? { node_ids: selection.nodeIds } : {}),
       });
       onResumed(response.data.attempt_id);
     } catch (err) {
@@ -106,6 +124,8 @@ export const ResumeCheckpointModal: React.FC<ResumeCheckpointModalProps> = ({
         <p id="resume-checkpoint-description" className="leading-relaxed text-[#a1a1a8]">
           Create a new attempt using the model weights and data position saved in a checkpoint from this job.
         </p>
+        <WorkerNodeSelection value={selection} onChange={setSelection} frozenCount={frozenCount} disabled={submitting} />
+        {contractError && <p role="alert" className="text-rose-300">{contractError}</p>}
         {error && <p role="alert" className="break-words text-rose-300">{error}</p>}
         {loading && <p role="status" className="text-[#a1a1a8]">Loading checkpoints…</p>}
         {!loading && checkpoints.length === 0 && !error && (
@@ -153,7 +173,7 @@ export const ResumeCheckpointModal: React.FC<ResumeCheckpointModalProps> = ({
           className="rounded border border-white/[0.08] bg-[#171719] px-3 py-2 text-xs hover:bg-[#202024] disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-blue-500">Cancel</button>
         <button type="button" onClick={() => void handleResume()}
           aria-busy={submitting}
-          disabled={!canResume || loading || submitting || !selectedCheckpoint}
+          disabled={!frozenCount || Boolean(selectionError(selection, frozenCount)) || !canResume || loading || submitting || !selectedCheckpoint}
           className="inline-flex items-center gap-2 rounded bg-blue-600 px-3 py-2 text-xs font-medium hover:bg-blue-500 disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-blue-500">
           {submitting
             ? <RefreshCw aria-hidden="true" className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />

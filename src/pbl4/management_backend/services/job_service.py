@@ -26,6 +26,7 @@ from pbl4.management_backend.repositories import (
     job_repository,
 )
 from pbl4.management_backend.services import contract_resolver
+from pbl4.management_backend.services.cluster_scheduler import NodeCapacityUnavailableError
 from pbl4.management_backend.services.dataset_service import (
     InvalidCursorError as InvalidCursorError,
 )
@@ -35,6 +36,7 @@ from pbl4.management_backend.services.dataset_service import (
 from pbl4.management_backend.services.dataset_service import (
     encode_cursor as encode_cursor,
 )
+from pbl4.management_backend.services.worker_selection import select_workers
 
 logger = logging.getLogger(__name__)
 
@@ -124,26 +126,36 @@ def _validate_contract(requested_contract: dict) -> list[str]:
             if not raw_cp:
                 errors.append("checkpoint group cannot be empty.")
             elif "every_n_epochs" not in raw_cp:
-                errors.append("checkpoint.every_n_epochs is required when checkpoint group is provided.")
+                errors.append(
+                    "checkpoint.every_n_epochs is required when checkpoint group is provided."
+                )
             else:
                 n_val = raw_cp["every_n_epochs"]
                 if isinstance(n_val, bool) or not isinstance(n_val, int) or n_val <= 0:
-                    errors.append("checkpoint.every_n_epochs must be an integer > 0 (boolean/float values are rejected).")
+                    errors.append(
+                        "checkpoint.every_n_epochs must be an integer > 0 (boolean/float values are rejected)."
+                    )
                 elif len(raw_cp) > 1:
                     errors.append("checkpoint group contains unknown fields.")
         else:
             errors.append("checkpoint must be an object.")
 
     if "checkpoint_policy" in requested_contract:
-        errors.append("checkpoint_policy in requested_contract is unsupported. Use 'checkpoint' with 'every_n_epochs'.")
+        errors.append(
+            "checkpoint_policy in requested_contract is unsupported. Use 'checkpoint' with 'every_n_epochs'."
+        )
 
     return errors
 
 
-def _resolve_contract(conn: psycopg.Connection, requested_contract: dict) -> dict:
+def _resolve_contract(
+    conn: psycopg.Connection, requested_contract: dict, *, expected_workers: int
+) -> dict:
     """Delegate to contract_resolver.resolve for canonical resolution logic."""
     try:
-        return contract_resolver.resolve(conn, requested_contract)
+        return contract_resolver.resolve(
+            conn, requested_contract, expected_workers=expected_workers
+        )
     except contract_resolver.ContractResolutionError as e:
         raise JobValidationError(str(e), e.errors) from e
 
@@ -277,7 +289,9 @@ def update_job(
         old_policy = rc.get("workload_policy", "equal")
         new_policy = requested_contract.get("workload_policy", old_policy)
         if "checkpoint" in requested_contract and requested_contract["checkpoint"] is None:
-            raise JobValidationError("Contract validation failed", ["checkpoint group cannot be null."])
+            raise JobValidationError(
+                "Contract validation failed", ["checkpoint group cannot be null."]
+            )
 
         merged_rc = {**rc, **requested_contract}
         old_strategy = rc.get("training_strategy", "strict_bsp")
@@ -329,7 +343,9 @@ def update_job(
     return row
 
 
-def validate_job(conn: psycopg.Connection, job_id: str) -> dict:
+def validate_job(
+    conn: psycopg.Connection, job_id: str, *, node_ids: list[str] | None = None
+) -> dict:
     """Validate the job contract against current catalog. Does NOT transition state."""
     current = job_repository.get_job(conn, job_id)
     if current is None:
@@ -351,11 +367,21 @@ def validate_job(conn: psycopg.Connection, job_id: str) -> dict:
         frozen_resolved = current.get("resolved_contract")
         if isinstance(frozen_resolved, str):
             frozen_resolved = json.loads(frozen_resolved)
+        errors = []
+        if node_ids is not None:
+            try:
+                select_workers(
+                    conn,
+                    expected_workers=frozen_resolved["synchronization"]["expected_workers"],
+                    node_ids=node_ids,
+                )
+            except (ValueError, NodeCapacityUnavailableError) as exc:
+                errors.append(str(exc))
         return {
             "requested_contract": rc,
             "resolved_preview": frozen_resolved,
             "warnings": ["Job is already frozen (READY); returning frozen contract."],
-            "errors": [],
+            "errors": errors,
         }
 
     if "checkpoint" not in rc or rc.get("checkpoint") is None:
@@ -367,9 +393,31 @@ def validate_job(conn: psycopg.Connection, job_id: str) -> dict:
 
     if not errors:
         try:
-            resolved_preview = _resolve_contract(conn, rc)
+            # Validate independently of live capacity, without exposing a fictitious N.
+            _resolve_contract(conn, rc, expected_workers=1)
+            try:
+                placements = select_workers(conn, node_ids=node_ids)
+            except NodeCapacityUnavailableError as exc:
+                if node_ids is not None:
+                    errors.append(str(exc))
+                else:
+                    warnings.append(f"Worker count unresolved: {exc}")
+            else:
+                resolved_preview = _resolve_contract(conn, rc, expected_workers=len(placements))
+                effective_k = resolved_preview["workload"]["work_units_per_step"]
+                requested_k = rc.get("work_units_per_step")
+                if requested_k is not None and effective_k > requested_k:
+                    warnings.append(
+                        f"work_units_per_step increased from {requested_k} to {effective_k} "
+                        f"for {len(placements)} Workers."
+                    )
+                warnings.append(
+                    "Placement preview does not reserve Nodes; capacity is checked again at start."
+                )
         except JobValidationError as e:
             errors.extend(e.errors)
+        except ValueError as e:
+            errors.append(str(e))
 
     return {
         "requested_contract": rc,
@@ -379,7 +427,7 @@ def validate_job(conn: psycopg.Connection, job_id: str) -> dict:
     }
 
 
-def freeze_job(conn: psycopg.Connection, job_id: str) -> dict:
+def freeze_job(conn: psycopg.Connection, job_id: str, *, expected_workers: int) -> dict:
     """Validate + freeze a DRAFT job to READY state.
 
     Atomically sets resolved_contract, contract_hash, and frozen_at + state=READY.
@@ -403,7 +451,7 @@ def freeze_job(conn: psycopg.Connection, job_id: str) -> dict:
     if errors:
         raise JobValidationError("Contract validation failed before freeze", errors)
 
-    resolved = _resolve_contract(conn, rc)
+    resolved = _resolve_contract(conn, rc, expected_workers=expected_workers)
     contract_hash = canonical_json_hash(resolved)
     now = datetime.now(UTC)
 
@@ -419,7 +467,14 @@ def freeze_job(conn: psycopg.Connection, job_id: str) -> dict:
             f"Job '{job_id}' could not be frozen (race condition or not DRAFT).",
             current_state=current["state"],
         )
-    logger.info("Job frozen: %s (hash=%s)", job_id, contract_hash[:8])
+    logger.info(
+        "Job frozen: %s (hash=%s workers=%s workload=%s work_units_per_step=%s)",
+        job_id,
+        contract_hash[:8],
+        expected_workers,
+        resolved["workload"]["policy"],
+        resolved["workload"]["work_units_per_step"],
+    )
     return row
 
 

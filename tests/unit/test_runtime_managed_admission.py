@@ -140,7 +140,6 @@ class TestRuntimeAdmissionGate(unittest.TestCase):
             manifest=dummy_manifest(),
             registry=self.registry,
             worker_admission_secret=self.secret,
-            require_worker_admission=True,
         )
 
     def _send_hello_and_get_reply(
@@ -511,7 +510,7 @@ class TestRuntimeAdmissionGate(unittest.TestCase):
 
 
 class TestRuntimeModes(unittest.TestCase):
-    """Test cases 19 - 23: Runtime mode handling (managed vs explicit unmanaged mode)."""
+    """Runtime always requires valid managed admission."""
 
     def setUp(self) -> None:
         self.secret = "mode-test-secret"
@@ -528,7 +527,6 @@ class TestRuntimeModes(unittest.TestCase):
             manifest=self.manifest,
             registry=WorkerRegistry(self.attempt_id, 1),
             worker_admission_secret=None,
-            require_worker_admission=True,
         )
         s, c = socket.socketpair()
         try:
@@ -577,7 +575,6 @@ class TestRuntimeModes(unittest.TestCase):
             manifest=self.manifest,
             registry=WorkerRegistry(self.attempt_id, 1),
             worker_admission_secret=self.secret,
-            require_worker_admission=True,
         )
         s, c = socket.socketpair()
         try:
@@ -612,133 +609,6 @@ class TestRuntimeModes(unittest.TestCase):
             s.close()
             c.close()
 
-    def test_21_unmanaged_mode_accepts_unmanaged_hello(self) -> None:
-        server = ParameterServer(
-            "127.0.0.1",
-            0,
-            attempt_id=self.attempt_id,
-            job_id="job-1",
-            expected_workers=1,
-            manifest=self.manifest,
-            registry=WorkerRegistry(self.attempt_id, 1),
-            worker_admission_secret=None,
-            require_worker_admission=False,  # explicit unmanaged mode
-        )
-        s, c = socket.socketpair()
-        try:
-            unmanaged_hello = Hello.from_dict(
-                {
-                    "node_label": "w",
-                    "client_instance_id": "c1",
-                    "role": "worker",
-                    "protocol_version": 1,
-                    "framework_adapter": "pytorch",
-                    "supported_tensor_encoding": ["fp32_le_v1"],
-                    "supported_strategy_capabilities": ["strict_bsp"],
-                }
-            )
-            t = threading.Thread(
-                target=server._serve_connection, args=(s, ("127.0.0.1", 1)), daemon=True
-            )
-            t.start()
-            frame = build_control_frame(
-                unmanaged_hello, session_id=0, worker_id=UNASSIGNED_WORKER_ID
-            )
-            frame.write_to(c, lambda sk, b: sk.sendall(b))
-
-            frame_reply = DTPFrame.read_from(c, recv_exact)
-            msg = decode_control_message(frame_reply.header.message_type, frame_reply.payload)
-            self.assertIsInstance(msg, HelloAck)
-            self.assertEqual(len(server.worker_ids()), 1)
-            for conn in list(server._connections.values()):
-                conn.terminal_stop_sent = True
-            t.join(timeout=1.0)
-        finally:
-            s.close()
-            c.close()
-
-    def test_22_and_23_unmanaged_mode_verifies_managed_hello(self) -> None:
-        """Verify managed credentials even in explicit unmanaged mode."""
-        server = ParameterServer(
-            "127.0.0.1",
-            0,
-            attempt_id=self.attempt_id,
-            job_id="job-1",
-            expected_workers=1,
-            manifest=self.manifest,
-            registry=WorkerRegistry(self.attempt_id, 1),
-            worker_admission_secret=self.secret,
-            require_worker_admission=False,  # unmanaged mode
-        )
-        # 22. Valid token in unmanaged mode -> accept
-        s1, c1 = socket.socketpair()
-        try:
-            token = issue_worker_join_token(self.secret, self.attempt_id, "alloc-1", "node-1")
-            hello1 = Hello.from_dict(
-                {
-                    "node_label": "w",
-                    "client_instance_id": "c1",
-                    "role": "worker",
-                    "protocol_version": 1,
-                    "framework_adapter": "pytorch",
-                    "supported_tensor_encoding": ["fp32_le_v1"],
-                    "supported_strategy_capabilities": ["strict_bsp"],
-                    "attempt_id": self.attempt_id,
-                    "allocation_id": "alloc-1",
-                    "node_id": "node-1",
-                    "worker_join_token": token,
-                }
-            )
-            t1 = threading.Thread(
-                target=server._serve_connection, args=(s1, ("127.0.0.1", 1)), daemon=True
-            )
-            t1.start()
-            build_control_frame(hello1).write_to(c1, lambda sk, b: sk.sendall(b))
-            frame1 = DTPFrame.read_from(c1, recv_exact)
-            msg1 = decode_control_message(frame1.header.message_type, frame1.payload)
-            self.assertIsInstance(msg1, HelloAck)
-            for conn in list(server._connections.values()):
-                conn.terminal_stop_sent = True
-            t1.join(timeout=1.0)
-        finally:
-            s1.close()
-            c1.close()
-
-        # 23. Invalid token in unmanaged mode -> reject
-        s2, c2 = socket.socketpair()
-        try:
-            bad_token = issue_worker_join_token("wrong-key", self.attempt_id, "alloc-2", "node-2")
-            hello2 = Hello.from_dict(
-                {
-                    "node_label": "w",
-                    "client_instance_id": "c2",
-                    "role": "worker",
-                    "protocol_version": 1,
-                    "framework_adapter": "pytorch",
-                    "supported_tensor_encoding": ["fp32_le_v1"],
-                    "supported_strategy_capabilities": ["strict_bsp"],
-                    "attempt_id": self.attempt_id,
-                    "allocation_id": "alloc-2",
-                    "node_id": "node-2",
-                    "worker_join_token": bad_token,
-                }
-            )
-            t2 = threading.Thread(
-                target=server._serve_connection, args=(s2, ("127.0.0.1", 1)), daemon=True
-            )
-            t2.start()
-            build_control_frame(hello2).write_to(c2, lambda sk, b: sk.sendall(b))
-            frame2 = DTPFrame.read_from(c2, recv_exact)
-            msg2 = decode_control_message(frame2.header.message_type, frame2.payload)
-            self.assertIsInstance(msg2, Error)
-            self.assertEqual(msg2.error_code, ERROR_CODE_WORKER_ADMISSION_INVALID)
-            for conn in list(server._connections.values()):
-                conn.terminal_stop_sent = True
-            t2.join(timeout=1.0)
-        finally:
-            s2.close()
-            c2.close()
-
 
 class TestWorkerIdentityAndClient(unittest.TestCase):
     """Worker identity stability and initialization-seed requirements."""
@@ -757,12 +627,8 @@ class TestWorkerIdentityAndClient(unittest.TestCase):
         self.assertTrue(c.is_managed)
 
         # None present
-        c_unmanaged = WorkerConfig(
-            node_label="nl",
-            runtime_host="127.0.0.1",
-            runtime_port=9000,
-        )
-        self.assertFalse(c_unmanaged.is_managed)
+        with self.assertRaises(ValueError):
+            WorkerConfig()
 
         # Partial
         with self.assertRaises(ValueError):
@@ -816,6 +682,10 @@ class TestWorkerIdentityAndClient(unittest.TestCase):
         from pbl4.worker.process import WorkerProcess
 
         config = WorkerConfig(
+            attempt_id="unit-attempt",
+            allocation_id="unit-allocation",
+            node_id="unit-node",
+            worker_join_token="unit-token",
             node_label="nl",
             runtime_host="127.0.0.1",
             runtime_port=9000,
@@ -825,7 +695,7 @@ class TestWorkerIdentityAndClient(unittest.TestCase):
             WorkerProcess(config)  # type: ignore[call-arg]
 
         # Valid initialization_seed works and process has client_instance_id
-        proc = WorkerProcess(config, initialization_seed=42)
+        proc = WorkerProcess(config, initialization_seed=42, model_id="resnet18_groupnorm")
         self.assertIsInstance(proc.client_instance_id, str)
         self.assertTrue(len(proc.client_instance_id) > 10)
 
